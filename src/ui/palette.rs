@@ -293,6 +293,11 @@ impl Palette {
         mix(anchors[i], anchors[i + 1], (level as f32 - lo) / (hi - lo))
     }
 
+    /// Opaque `c` at strength `a` over the background (a translucent fill without alpha).
+    pub fn tint(&self, c: Color32, a: f32) -> Color32 {
+        mix(self.bg, c, a)
+    }
+
     /// Translucent ink over the background: white on dark themes, black on light.
     pub fn ink(&self, alpha: u8) -> Color32 {
         if self.dark { Color32::from_white_alpha(alpha) } else { Color32::from_black_alpha(alpha) }

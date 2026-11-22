@@ -23,7 +23,7 @@ EXE = ROOT / "target" / "debug" / "ghubx.exe"
 SEED = Path(__file__).resolve().parent / "ui_seed_config.toml"
 PAGES = [
     "home", "dropdown", "assign", "assign2", "gshift", "select", "keys", "actions", "p180game", "gamecmds",
-    "macro", "macroedit", "macrorec", "sens", "light", "fixed", "effectmenu", "screenfx", "audiofx", "audiofxadv", "devset", "onboard", "slotmenu", "slotconfirm", "slotdetails", "wdl",
+    "macro", "macroname", "macrotype", "macroseq", "macroedit", "macrorec", "macromenu", "macrocustom", "macrofold", "macroconfirm", "sens", "light", "fixed", "effectmenu", "screenfx", "audiofx", "audiofxadv", "devset", "onboard", "slotmenu", "slotconfirm", "slotdetails", "wdl",
     "profiles", "appdetail", "addgame", "settings", "sleep", "appearance", "themeedit", "mythemes", "ghub", "diag",
 ]
 

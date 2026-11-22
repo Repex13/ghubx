@@ -10,6 +10,8 @@ mod light;
 pub mod palette;
 mod profiles;
 mod sens;
+mod macros;
+mod macros_model;
 mod onboard;
 mod settings;
 mod themes;
@@ -254,7 +256,7 @@ impl GhubApp {
     fn prepare_shot(&mut self, page: &str) {
         self.route = match page {
             "home" | "dropdown" => Route::Home,
-            "assign" | "assign2" | "gshift" | "macro" | "macroedit" | "macrorec" | "select" | "keys" | "actions" | "gamecmds" | "p180game" => Route::Device(DevTab::Assignments),
+            "assign" | "assign2" | "gshift" | "macro" | "macroname" | "macrotype" | "macroseq" | "macroedit" | "macrorec" | "macromenu" | "macrocustom" | "macrofold" | "macroconfirm" | "select" | "keys" | "actions" | "gamecmds" | "p180game" => Route::Device(DevTab::Assignments),
             "sens" => Route::Device(DevTab::Sensitivity),
             "light" | "fixed" | "wdl" | "effectmenu" | "screenfx" | "audiofx" | "audiofxadv" => Route::Device(DevTab::Lighting),
             "devset" | "onboard" | "slotmenu" | "slotconfirm" | "slotdetails" => Route::DeviceSettings,
@@ -268,7 +270,7 @@ impl GhubApp {
         self.asg.side = page == "assign2";
         self.asg.gshift = page == "gshift";
         self.asg.tab = match page {
-            "macro" | "macroedit" | "macrorec" => 3,
+            "macro" | "macroname" | "macrotype" | "macroseq" | "macroedit" | "macrorec" | "macromenu" | "macrocustom" | "macrofold" | "macroconfirm" => 3,
             "keys" => 1,
             "actions" | "p180game" => 2,
             _ => 0,
@@ -276,11 +278,8 @@ impl GhubApp {
         if page == "select" {
             self.asg.selected = Some(3);
         }
-        if page == "macroedit" || page == "macrorec" {
-            let first = self.cfg().current().0.macros.first().cloned();
-            let mut ed = first.map(|m| assign::MacroEditor::from(&m)).unwrap_or_else(assign::MacroEditor::new);
-            ed.recording = page == "macrorec";
-            self.asg.editor = Some(ed);
+        if page.starts_with("macro") && page != "macro" {
+            self.asg.editor = Some(self.macro_shot(page));
         }
         if page == "fixed" {
             let mut c = self.cfg.lock().unwrap();
@@ -378,6 +377,81 @@ impl GhubApp {
 
     pub(crate) fn cfg(&self) -> Config {
         self.cfg.lock().unwrap().clone()
+    }
+
+    pub(crate) fn scripted(&self) -> bool {
+        self.script.is_some()
+    }
+
+    /// In-memory macro editor states for the `macro*` shot pages.
+    fn macro_shot(&self, page: &str) -> macros::MacroEditor {
+        use crate::profile::{Assignment, KeyCombo, Macro, MacroKind, MacroStep};
+        let k = MacroStep::key;
+        let name = "zz ghubx probe";
+        let cfg = self.cfg();
+        let find = |n: &str| cfg.current().0.macros.iter().find(|m| m.name == n).cloned();
+        let custom = |std: bool| {
+            let d = |v: u32| if std { 50 } else { v };
+            Macro {
+                id: "c".into(),
+                name: "custom".into(),
+                steps: vec![
+                    k(0xA2, true, 0),
+                    k(0x43, true, d(35)),
+                    k(0x43, false, d(120)),
+                    k(0xA2, false, d(40)),
+                    MacroStep::text("gg wp", 0),
+                    MacroStep::run(Assignment::Shortcut { name: "Play/Pause".into(), combo: KeyCombo { vk: 0xB3, mods: 0 } }, d(0)),
+                    MacroStep::run(Assignment::Launch { name: "Notepad".into(), path: "notepad.exe".into() }, d(0)),
+                    k(0x01, true, d(0)),
+                    k(0x01, false, d(1500)),
+                    MacroStep::pause(if std { 50 } else { 250 }),
+                ],
+                std_delay: std.then_some(50),
+                show_up_down: !std,
+                color: Some([0, 184, 252]),
+                ..Default::default()
+            }
+        };
+        match page {
+            "macroname" => macros::MacroEditor::new_named(),
+            "macrotype" => {
+                let mut e = macros::MacroEditor::new_named();
+                e.m.name = name.into();
+                e.stage = macros::Stage::Type;
+                e
+            }
+            "macroseq" => macros::MacroEditor::new_of(name, MacroKind::Sequence),
+            "macrorec" => {
+                let mut e = macros::MacroEditor::new_of("rec", MacroKind::NoRepeat);
+                e.m.lists[0] = vec![k(0x48, true, 0), k(0x48, false, 50), k(0x49, true, 50), k(0x49, false, 50)];
+                e.rec = Some(0);
+                e
+            }
+            "macromenu" => {
+                let mut e = macros::MacroEditor::new_of("menu", MacroKind::Sequence);
+                e.m.lists[0] = vec![k(0x57, true, 0)];
+                e.menu = Some(1);
+                e
+            }
+            "macrocustom" | "macrofold" => {
+                let mut e = macros::MacroEditor::open(&custom(page == "macrofold"));
+                if page == "macrocustom" {
+                    e.m.sel = vec![macros::ItemId { sec: 0, idx: 2, delay: false }];
+                }
+                e
+            }
+            "macroconfirm" => {
+                let m = find("jump").unwrap_or_default();
+                let mut e = macros::MacroEditor::open(&m);
+                if !e.m.lists[0].is_empty() {
+                    e.m.lists[0].remove(0);
+                }
+                e.confirm = Some(macros::Confirm::Leave);
+                e
+            }
+            _ => macros::MacroEditor::open(&find("cl").unwrap_or_default()),
+        }
     }
 
     pub(crate) fn say(&mut self, s: impl Into<String>) {
@@ -856,7 +930,7 @@ impl GhubApp {
                             && let Some(m) = cfg.current().0.macros.iter().find(|m| &m.id == id)
                         {
                             self.asg.tab = 3;
-                            self.asg.editor = Some(assign::MacroEditor::from(m));
+                            self.asg.editor = Some(macros::MacroEditor::open(m));
                         }
                     }
                 }
@@ -958,6 +1032,7 @@ impl eframe::App for GhubApp {
         let win = ui.max_rect();
         ui.painter().rect_filled(win, CornerRadius::ZERO, pal().bg);
         match self.route {
+            _ if self.asg.editor.is_some() => self.macro_overlay(ui, win),
             Route::Home => {
                 self.top_nav(ui, win);
                 self.home(ui, win);

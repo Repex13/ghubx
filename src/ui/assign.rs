@@ -23,118 +23,12 @@ pub struct AsgState {
     pub selected: Option<usize>,
     pub collapsed: HashSet<String>,
     pub mods: u8,
-    pub editor: Option<MacroEditor>,
+    pub editor: Option<super::macros::MacroEditor>,
     pub last_tab: Option<DevTab>,
     pub launch_path: String,
     pub p180_sens_text: String,
     pub p180_counts_text: String,
     pub game_sens: Option<(usize, Option<crate::games::GameSens>)>,
-}
-
-pub struct MacroEditor {
-    pub id: Option<String>,
-    pub name: String,
-    pub kind: MacroKind,
-    pub steps: Vec<MacroStep>,
-    /// The macro this editor was opened from (hold, release and the rest survive an edit).
-    orig: Macro,
-    pub recording: bool,
-    pub record_delays: bool,
-    last: Option<Instant>,
-    mods: egui::Modifiers,
-    capture_key: bool,
-    click_row: bool,
-    text_open: bool,
-    text_focus: bool,
-    text_buf: String,
-    edit_delay: Option<(usize, String)>,
-    test_at: Option<Instant>,
-    list: Rect,
-}
-
-impl MacroEditor {
-    pub fn new() -> Self {
-        Self { id: None, name: String::new(), kind: MacroKind::NoRepeat, steps: vec![], orig: Macro::default(), recording: false,
-            record_delays: true,
-            last: None,
-            mods: Default::default(),
-            capture_key: false,
-            click_row: false,
-            text_open: false,
-            text_focus: false,
-            text_buf: String::new(),
-            edit_delay: None,
-            test_at: None,
-            list: Rect::NOTHING,
-        }
-    }
-    pub fn from(m: &Macro) -> Self {
-        Self { id: Some(m.id.clone()), name: m.name.clone(), kind: m.kind, steps: m.steps.clone(), orig: m.clone(), ..Self::new() }
-    }
-    pub fn set_delay(&mut self, i: usize, ms: u32) {
-        if let Some(s) = self.steps.get_mut(i) {
-            s.delay_ms = ms.min(60_000);
-        }
-    }
-
-    pub fn move_step(&mut self, i: usize, up: bool) {
-        let j = if up { i.checked_sub(1) } else { Some(i + 1) };
-        if let Some(j) = j
-            && i < self.steps.len()
-            && j < self.steps.len()
-        {
-            self.steps.swap(i, j);
-        }
-    }
-
-    pub fn add_key(&mut self, vk: u16) {
-        let first = if self.steps.is_empty() { 0 } else { 50 };
-        self.steps.push(MacroStep::key(vk, true, first));
-        self.steps.push(MacroStep::key(vk, false, 50));
-    }
-
-    /// `btn` 0..=4 = left, right, middle, back, forward.
-    pub fn add_click(&mut self, btn: u8) {
-        if let Some(&vk) = [0x01u16, 0x02, 0x04, 0x05, 0x06].get(btn as usize) {
-            self.add_key(vk);
-        }
-    }
-
-    pub fn add_delay(&mut self) {
-        self.steps.push(MacroStep::pause(50));
-    }
-
-    /// Type text as key steps; `map` gives a character's VK and whether Shift is
-    /// needed. Returns how many characters could not be typed.
-    pub fn add_text(&mut self, text: &str, map: impl Fn(char) -> Option<(u16, bool)>) -> usize {
-        let mut skipped = 0;
-        for ch in text.chars() {
-            let Some((vk, shift)) = map(ch) else {
-                skipped += 1;
-                continue;
-            };
-            let mut step = |vk: u16, down: bool| self.steps.push(MacroStep::key(vk, down, 10));
-            if shift {
-                step(0xA0, true);
-            }
-            step(vk, true);
-            step(vk, false);
-            if shift {
-                step(0xA0, false);
-            }
-        }
-        skipped
-    }
-
-    fn push(&mut self, vk: u16, down: bool) {
-        let delay = match (self.record_delays, self.last) {
-            (true, Some(t)) => t.elapsed().as_millis().min(10_000) as u32,
-            (false, Some(_)) => 50,
-            _ => 0,
-        };
-        self.last = Some(Instant::now());
-        self.steps.push(MacroStep::key(vk, down, delay));
-    }
 }
 
 /// egui key -> Windows virtual-key code.
@@ -200,9 +94,7 @@ impl GhubApp {
             self.asg.tab = 3 + i;
             self.asg.search.clear();
         }
-        if self.asg.tab == 3 && self.asg.editor.is_some() {
-            self.macro_editor(ui, panel);
-        } else {
+        {
             let hint = match self.asg.tab {
                 0 => "Drag a command onto a target to assign it to this device.",
                 1 => "Drag a key onto a target to assign it to this device.",
@@ -302,7 +194,7 @@ impl GhubApp {
         if tab == 1 {
             self.keys_header(&mut child);
         } else if tab == 3 && dark_button(&child, Rect::from_min_size(child.cursor().min, vec2(278.0, 32.0)), "CREATE NEW MACRO", "new-macro", true).clicked() {
-            self.asg.editor = Some(MacroEditor::new());
+            self.asg.editor = Some(super::macros::MacroEditor::new_named());
         }
         if tab == 3 {
             child.add_space(44.0);
@@ -353,7 +245,7 @@ impl GhubApp {
                         }
                         let mut lx = rect.left() + 2.0;
                         if matches!(c.assignment, Assignment::Macro(_)) {
-                            macro_badge(ui, Rect::from_min_size(pos2(lx, rect.center().y - 7.0), vec2(14.0, 14.0)));
+                            macro_badge(ui, Rect::from_min_size(pos2(lx, rect.center().y - 7.0), vec2(14.0, 14.0)), macros.iter().find(|m| Assignment::Macro(m.id.clone()) == c.assignment).and_then(|m| m.color));
                             lx += 22.0;
                         }
                         let lcol = if r.hovered() { pal().text } else { lt.color };
@@ -413,7 +305,7 @@ impl GhubApp {
         if let Some(id) = edit_macro
             && let Some(m) = macros.iter().find(|m| m.id == id)
         {
-            self.asg.editor = Some(MacroEditor::from(m));
+            self.asg.editor = Some(super::macros::MacroEditor::open(m));
         }
         if let Some(id) = delete_macro {
             self.edit(|c| {
@@ -716,7 +608,7 @@ impl GhubApp {
             match style {
                 LabelStyle::Key => keycap(ui, lrect, &label, ts.color(color)),
                 LabelStyle::Macro => {
-                    macro_badge(ui, Rect::from_min_size(pos2(lrect.left(), lrect.bottom() - 18.0), vec2(18.0, 18.0)));
+                    macro_badge(ui, Rect::from_min_size(pos2(lrect.left(), lrect.bottom() - 18.0), vec2(18.0, 18.0)), app.macros.iter().find(|m| Assignment::Macro(m.id.clone()) == layer_a).and_then(|m| m.color));
                     ui.painter().galley(pos2(lrect.left() + 26.0, lrect.bottom() - g.size().y), galley(ui, &label, ts.color(color), f32::INFINITY), color);
                 }
                 _ => {
@@ -774,295 +666,9 @@ impl GhubApp {
         painter.galley(r.center() - g.size() / 2.0, g, pal().on_primary);
         ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
     }
-
-    fn macro_editor(&mut self, ui: &mut Ui, panel: Rect) {
-        let x0 = panel.left() + 16.0;
-        let w = 278.0;
-        let mut y = panel.top() + 146.0;
-        let Some(ed) = &mut self.asg.editor else { return };
-        // capture keystrokes and mouse buttons while recording
-        if ed.recording {
-            let (events, mods) = ui.ctx().input(|i| (i.events.clone(), i.modifiers));
-            for (vk, now, before) in [(0xA2u16, mods.ctrl, ed.mods.ctrl), (0xA0, mods.shift, ed.mods.shift), (0xA4, mods.alt, ed.mods.alt)] {
-                if now != before {
-                    ed.push(vk, now);
-                }
-            }
-            ed.mods = mods;
-            for e in events {
-                match e {
-                    egui::Event::Key { key, pressed, repeat: false, .. } => {
-                        if let Some(vk) = egui_vk(key) {
-                            ed.push(vk, pressed);
-                        }
-                    }
-                    egui::Event::PointerButton { pos, button, pressed, .. } if ed.list.contains(pos) => {
-                        let vk = match button {
-                            egui::PointerButton::Primary => 0x01,
-                            egui::PointerButton::Secondary => 0x02,
-                            egui::PointerButton::Middle => 0x04,
-                            egui::PointerButton::Extra1 => 0x05,
-                            egui::PointerButton::Extra2 => 0x06,
-                        };
-                        ed.push(vk, pressed);
-                    }
-                    _ => {}
-                }
-            }
-            ui.ctx().request_repaint();
-        }
-        // "+ KEY": the next key press becomes a step
-        if ed.capture_key {
-            let events = ui.ctx().input(|i| i.events.clone());
-            for e in events {
-                if let egui::Event::Key { key, pressed: true, repeat: false, .. } = e {
-                    if key != egui::Key::Escape
-                        && let Some(vk) = egui_vk(key)
-                    {
-                        ed.add_key(vk);
-                    }
-                    ed.capture_key = false;
-                    break;
-                }
-            }
-            ui.ctx().request_repaint();
-        }
-        text(ui, pos2(x0, y), Align2::LEFT_TOP, if ed.id.is_some() { "EDIT MACRO" } else { "NEW MACRO" }, t_section());
-        y += 28.0;
-        let te = egui::TextEdit::singleline(&mut ed.name).hint_text("Macro name").frame(egui::Frame::NONE).font(Ts::new(Fam::Reg, 14.0, pal().text).font()).text_color(pal().text);
-        ui.put(Rect::from_min_size(pos2(x0, y), vec2(w, 22.0)), te);
-        ui.painter().line_segment([pos2(x0, y + 24.0), pos2(x0 + w, y + 24.0)], Stroke::new(1.0, pal().outline_hi));
-        y += 40.0;
-        for (kind, label) in [(MacroKind::NoRepeat, "NO REPEAT"), (MacroKind::RepeatWhileHolding, "REPEAT WHILE HOLDING"), (MacroKind::Toggle, "TOGGLE")] {
-            if radio(ui, pos2(x0 + 6.0, y), ed.kind == kind, ("kind", label)).clicked() {
-                ed.kind = kind;
-            }
-            let r = click(ui, Rect::from_min_size(pos2(x0 + 16.0, y - 9.0), vec2(220.0, 18.0)), ("kind-l", label));
-            text(ui, pos2(x0 + 22.0, y), Align2::LEFT_CENTER, label, Ts::new(Fam::Reg, 12.0, if ed.kind == kind { pal().text } else { pal().muted }));
-            if r.clicked() {
-                ed.kind = kind;
-            }
-            y += 22.0;
-        }
-        y += 6.0;
-        let rec_label = if ed.recording { "STOP RECORDING" } else { "START RECORDING" };
-        let rb = Rect::from_min_size(pos2(x0, y), vec2(170.0, 30.0));
-        if dark_button(ui, rb, rec_label, "rec", true).clicked() {
-            ed.recording = !ed.recording;
-            ed.last = None;
-            ed.mods = ui.ctx().input(|i| i.modifiers);
-        }
-        if ed.recording {
-            let t = ui.ctx().input(|i| i.time);
-            ui.painter().circle_filled(pos2(rb.left() + 14.0, rb.center().y), 4.0, pal().error.gamma_multiply(0.55 + 0.45 * (t * 4.0).sin().abs() as f32));
-        }
-        if checkbox(ui, pos2(rb.right() + 12.0, y + 8.0), "DELAYS", ed.record_delays, true, "rec-delays").clicked() {
-            ed.record_delays = !ed.record_delays;
-        }
-        y += 40.0;
-
-        // add row: + KEY / + CLICK / + DELAY / + TEXT
-        let mut say_msg: Option<String> = None;
-        if ed.capture_key {
-            if blue_button(ui, Rect::from_min_size(pos2(x0, y), vec2(w, 26.0)), "PRESS A KEY\u{2026}  (ESC CANCELS)", "add-key-cancel").clicked() {
-                ed.capture_key = false;
-            }
-        } else {
-            let bw = (w - 18.0) / 4.0;
-            for (i, label) in ["+ KEY", "+ CLICK", "+ DELAY", "+ TEXT"].into_iter().enumerate() {
-                let r = Rect::from_min_size(pos2(x0 + i as f32 * (bw + 6.0), y), vec2(bw, 26.0));
-                let on = (i == 1 && ed.click_row) || (i == 3 && ed.text_open);
-                let clicked = if on { blue_button(ui, r, label, ("add", i)).clicked() } else { dark_button(ui, r, label, ("add", i), true).clicked() };
-                if clicked {
-                    match i {
-                        0 => {
-                            ed.capture_key = true;
-                            ed.click_row = false;
-                            ed.text_open = false;
-                        }
-                        1 => {
-                            ed.click_row = !ed.click_row;
-                            ed.text_open = false;
-                        }
-                        2 => ed.add_delay(),
-                        _ => {
-                            ed.text_open = !ed.text_open;
-                            ed.text_focus = ed.text_open;
-                            ed.click_row = false;
-                        }
-                    }
-                }
-            }
-        }
-        y += 32.0;
-        if ed.click_row {
-            let pw = (w - 16.0) / 5.0;
-            for (i, label) in ["LEFT", "RIGHT", "MIDDLE", "BACK", "FORWARD"].into_iter().enumerate() {
-                let r = Rect::from_min_size(pos2(x0 + i as f32 * (pw + 4.0), y), vec2(pw, 22.0));
-                if pill_sized(ui, r, label, false, 10.0, ("click-pill", i)).clicked() {
-                    ed.add_click(i as u8);
-                    ed.click_row = false;
-                }
-            }
-            y += 30.0;
-        }
-        if ed.text_open {
-            let fr = Rect::from_min_size(pos2(x0, y), vec2(w, 22.0));
-            let te = egui::TextEdit::singleline(&mut ed.text_buf)
-                .hint_text("Type text, press Enter")
-                .frame(egui::Frame::NONE)
-                .font(Ts::new(Fam::Reg, 12.0, pal().text).font())
-                .text_color(pal().text);
-            let resp = ui.put(fr, te);
-            ui.painter().line_segment([pos2(fr.left(), fr.bottom() + 2.0), pos2(fr.right(), fr.bottom() + 2.0)], Stroke::new(1.0, pal().outline_hi));
-            if ed.text_focus {
-                resp.request_focus();
-                ed.text_focus = false;
-            }
-            if resp.lost_focus() && ui.ctx().input(|i| i.key_pressed(egui::Key::Enter)) {
-                let typed = std::mem::take(&mut ed.text_buf);
-                let skipped = ed.add_text(&typed, crate::win::char_key);
-                if skipped > 0 {
-                    say_msg = Some(format!("Skipped {skipped} character(s) this keyboard can't type"));
-                }
-                ed.text_focus = true;
-            }
-            y += 32.0;
-        }
-
-        let list = Rect::from_min_max(pos2(x0, y), pos2(panel.right() - 12.0, panel.bottom() - 56.0));
-        ed.list = list;
-        let recording = ed.recording;
-        let steps = ed.steps.clone();
-        let mut edit_delay = ed.edit_delay.take();
-        let mut remove: Option<usize> = None;
-        let mut mv: Option<(usize, bool)> = None;
-        let mut commit: Option<(usize, u32)> = None;
-        let mut child = ui.new_child(UiBuilder::new().max_rect(list));
-        egui::ScrollArea::vertical().id_salt("macro-steps").auto_shrink([false, false]).stick_to_bottom(true).show(&mut child, |ui| {
-            if recording {
-                let (r, _) = ui.allocate_exact_size(vec2(270.0, 34.0), Sense::hover());
-                para(ui, r.min, 270.0, "Recording: keys anywhere, mouse buttons inside this box.", Ts::new(Fam::Reg, 11.0, pal().muted).ls(0.4));
-            }
-            if steps.is_empty() {
-                let (r, _) = ui.allocate_exact_size(vec2(270.0, 40.0), Sense::hover());
-                para(ui, r.min, 270.0, "Press Start Recording, then type the keys for this macro.", Ts::new(Fam::Reg, 12.0, pal().muted).ls(0.6));
-            }
-            for (i, s) in steps.iter().enumerate() {
-                let (r, _) = ui.allocate_exact_size(vec2(270.0, 26.0), Sense::hover());
-                let hover = !recording && ui.rect_contains_pointer(r);
-                let dr = Rect::from_min_size(pos2(r.left(), r.top() + 3.0), vec2(62.0, 20.0));
-                let editing = matches!(&edit_delay, Some((ei, _)) if *ei == i);
-                if editing {
-                    let mut finish = false;
-                    if let Some((_, buf)) = &mut edit_delay {
-                        let te = egui::TextEdit::singleline(buf).frame(egui::Frame::NONE).char_limit(5).font(Ts::new(Fam::Reg, 11.0, pal().text).font()).text_color(pal().text);
-                        let er = ui.put(dr, te);
-                        ui.painter().line_segment([pos2(dr.left(), dr.bottom()), pos2(dr.right(), dr.bottom())], Stroke::new(1.0, pal().primary));
-                        if er.lost_focus() {
-                            commit = Some((i, buf.trim().parse().unwrap_or(s.delay_ms)));
-                            finish = true;
-                        } else if !er.has_focus() {
-                            er.request_focus();
-                        }
-                    }
-                    if finish {
-                        edit_delay = None;
-                    }
-                } else if recording {
-                    if s.delay_ms > 0 {
-                        text(ui, pos2(r.left() + 2.0, r.center().y), Align2::LEFT_CENTER, &format!("{} ms", s.delay_ms), Ts::new(Fam::Reg, 11.0, pal().muted).ls(0.4));
-                    }
-                } else {
-                    let dc = click(ui, dr, ("step-delay", i));
-                    if s.delay_ms > 0 || hover {
-                        let c = if s.delay_ms > 0 { pal().muted } else { pal().muted.gamma_multiply(0.5) };
-                        text(ui, pos2(r.left() + 2.0, r.center().y), Align2::LEFT_CENTER, &format!("{} ms", s.delay_ms), Ts::new(Fam::Reg, 11.0, if dc.hovered() { pal().text } else { c }).ls(0.4));
-                    }
-                    if dc.clicked() {
-                        edit_delay = Some((i, s.delay_ms.to_string()));
-                    }
-                }
-                if s.is_pause() {
-                    text(ui, pos2(r.left() + 84.0, r.center().y), Align2::LEFT_CENTER, "Delay", Ts::new(Fam::Reg, 12.0, pal().muted).ls(0.4));
-                } else {
-                    if s.act.is_none() {
-                        chevron(ui.painter(), pos2(r.left() + 70.0, r.center().y), 4.0, !s.down, Stroke::new(1.5, if s.down { pal().primary } else { pal().muted }));
-                    }
-                    text(ui, pos2(r.left() + 84.0, r.center().y), Align2::LEFT_CENTER, &catalog::step_name(s), Ts::new(Fam::Reg, 12.0, pal().text).ls(0.4));
-                }
-                if hover {
-                    let xr = Rect::from_center_size(pos2(r.right() - 12.0, r.center().y), vec2(20.0, 20.0));
-                    let x = click(ui, xr, ("step-x", i));
-                    caption_glyph(ui.painter(), xr.center(), 2, if x.hovered() { pal().error } else { pal().muted });
-                    if x.clicked() {
-                        remove = Some(i);
-                    }
-                    for (k, up) in [(0usize, false), (1, true)] {
-                        let cr = Rect::from_center_size(pos2(r.right() - 34.0 - k as f32 * 20.0, r.center().y), vec2(18.0, 18.0));
-                        let c = click(ui, cr, ("step-mv", i, up));
-                        chevron(ui.painter(), cr.center(), 3.5, up, Stroke::new(1.5, if c.hovered() { pal().primary } else { pal().muted }));
-                        if c.clicked() {
-                            mv = Some((i, up));
-                        }
-                    }
-                }
-            }
-        });
-        ed.edit_delay = edit_delay;
-        if let Some((i, ms)) = commit {
-            ed.set_delay(i, ms);
-        }
-        if let Some((i, up)) = mv {
-            ed.move_step(i, up);
-        }
-        if let Some(i) = remove {
-            ed.steps.remove(i);
-        }
-
-        // bottom row: SAVE / TEST / CANCEL
-        let by = panel.bottom() - 46.0;
-        let bw = (w - 16.0) / 3.0;
-        let save = blue_button(ui, Rect::from_min_size(pos2(x0, by), vec2(bw, 32.0)), "SAVE", "macro-save").clicked();
-        let test_label = match ed.test_at {
-            Some(t) => format!("PLAYS IN {}\u{2026}", 3 - t.elapsed().as_secs().min(2)),
-            None => "TEST".into(),
-        };
-        if dark_button(ui, Rect::from_min_size(pos2(x0 + bw + 8.0, by), vec2(bw, 32.0)), &test_label, "macro-test", ed.test_at.is_none()).clicked() && ed.test_at.is_none() {
-            ed.test_at = Some(Instant::now());
-        }
-        if let Some(t) = ed.test_at {
-            ui.ctx().request_repaint();
-            if t.elapsed().as_secs_f32() >= 3.0 {
-                ed.test_at = None;
-                let _ = self.eng.send(EngineMsg::TestMacro(Box::new(Macro { kind: ed.kind, steps: ed.steps.clone(), ..ed.orig.clone() })));
-            }
-        }
-        let cancel = dark_button(ui, Rect::from_min_size(pos2(x0 + 2.0 * (bw + 8.0), by), vec2(bw, 32.0)), "CANCEL", "macro-cancel", true).clicked();
-        if let Some(m) = say_msg {
-            self.say(m);
-        }
-        if cancel {
-            self.asg.editor = None;
-        } else if save {
-            let ed = self.asg.editor.take().unwrap();
-            let name = if ed.name.trim().is_empty() { "Macro".to_string() } else { ed.name.trim().to_string() };
-            let id = ed.id.clone().unwrap_or_else(new_id);
-            let m = Macro { id: id.clone(), name: name.clone(), kind: ed.kind, steps: ed.steps, std_delay: None, ..ed.orig };
-            self.edit(|c| {
-                let ca = c.current_app;
-                let ms = &mut c.apps[ca].macros;
-                match ms.iter_mut().find(|x| x.id == id) {
-                    Some(x) => *x = m,
-                    None => ms.push(m),
-                }
-            });
-            self.say(format!("Saved macro \"{name}\" \u{2014} drag it onto a button"));
-        }
-    }
 }
 
-fn launch_cards(cfg: &Config) -> Vec<Card> {
+pub(super) fn launch_cards(cfg: &Config) -> Vec<Card> {
     let mut seen = HashSet::new();
     let mut v = Vec::new();
     for p in &cfg.current().0.profiles {
@@ -1115,59 +721,4 @@ fn number_field(ui: &mut Ui, rect: Rect, buf: &mut String, current: &str, id: &s
         *buf = current.to_string();
     }
     out
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn step(vk: u16, down: bool, delay_ms: u32) -> MacroStep {
-        MacroStep::key(vk, down, delay_ms)
-    }
-
-    #[test]
-    fn set_delay_clamps() {
-        let mut e = MacroEditor::new();
-        e.steps.push(step(0x41, true, 0));
-        e.set_delay(0, 70_000);
-        assert_eq!(e.steps[0].delay_ms, 60_000);
-        e.set_delay(5, 10);
-        assert_eq!(e.steps.len(), 1);
-    }
-
-    #[test]
-    fn move_step_swaps_and_stops_at_ends() {
-        let mut e = MacroEditor::new();
-        e.steps = vec![step(1, true, 0), step(2, true, 0), step(3, true, 0)];
-        e.move_step(1, true);
-        assert_eq!(e.steps.iter().map(|s| s.vk).collect::<Vec<_>>(), [2, 1, 3]);
-        e.move_step(0, true);
-        e.move_step(2, false);
-        assert_eq!(e.steps.iter().map(|s| s.vk).collect::<Vec<_>>(), [2, 1, 3]);
-        e.move_step(1, false);
-        assert_eq!(e.steps.iter().map(|s| s.vk).collect::<Vec<_>>(), [2, 3, 1]);
-    }
-
-    #[test]
-    fn add_key_and_click_append_pairs() {
-        let mut e = MacroEditor::new();
-        e.add_key(0x41);
-        assert_eq!(e.steps, vec![step(0x41, true, 0), step(0x41, false, 50)]);
-        e.add_click(2);
-        assert_eq!(e.steps[2..], [step(0x04, true, 50), step(0x04, false, 50)]);
-    }
-
-    #[test]
-    fn add_text_uses_shift_and_counts_skips() {
-        let mut e = MacroEditor::new();
-        let map = |c: char| match c {
-            'a' => Some((0x41, false)),
-            'A' => Some((0x41, true)),
-            _ => None,
-        };
-        let skipped = e.add_text("aA\u{20ac}", map);
-        assert_eq!(skipped, 1);
-        let got: Vec<(u16, bool)> = e.steps.iter().map(|s| (s.vk, s.down)).collect();
-        assert_eq!(got, [(0x41, true), (0x41, false), (0xA0, true), (0x41, true), (0x41, false), (0xA0, false)]);
-    }
 }

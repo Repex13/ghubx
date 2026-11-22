@@ -269,37 +269,140 @@ MACRO_NEW = ["wait 1500", HOME_TILE, SETTLE, RAIL_ASSIGN, SETTLE, TAB_MACROS, SE
              SETTLE]
 
 
-@scenario
-def macro_create():
-    res = run_script("macro_create", MACRO_NEW + ["click 200 281", "text t1",  # name field
-                                                  "click 124 433", SETTLE,  # + KEY
-                                                  "key J", SETTLE,
-                                                  "click 266 433",  # + DELAY
-                                                  "shot {shots}/before_save.png",
-                                                  "click 135 716",  # SAVE
-                                                  SETTLE])
-    ok_run(res)
-    m = [m for m in desktop(res.cfg)["macros"] if m["name"] == "t1"]
-    must(len(m) == 1, [m["name"] for m in desktop(res.cfg)["macros"]])
-    steps = [(s["vk"], s["down"], s["delay_ms"]) for s in m[0]["steps"]]
-    must(steps == [(74, True, 0), (74, False, 50), (0, False, 50)], steps)
+MACRO_NAME_T1 = ["text t1", "key Enter", SETTLE]  # name page: type the name, Enter
+MACRO_NEW_EDIT = ["wait 1500", HOME_TILE, SETTLE, RAIL_ASSIGN, SETTLE, TAB_MACROS, SETTLE]
+CONFIRM_YES = "click 442 637"  # confirmation panel YES
+CONFIRM_NO = "click 582 637"  # confirmation panel NO
+TILE = {"norepeat": "click 260 413", "repeat": "click 428 413", "toggle": "click 596 413", "sequence": "click 764 413"}  # type tiles
+EDIT_CL = ["move 200 380", "click 310 380", SETTLE]  # macros list: hover the "cl" row, EDIT
+EDIT_JUMP = ["move 200 412", "click 310 412", SETTLE]  # "jump" row, EDIT
+M_SAVE = "click 620 720"  # editor SAVE
+M_RESET = "click 404 720"  # editor RESET
+M_BACK = "click 39 58"  # editor back arrow
+
+
+def edit_macro(res, name):
+    return [m for m in desktop(res.cfg)["macros"] if m["name"] == name]
+
+
+def seed_macro(name):
+    import tomllib as t
+    return [m for m in t.loads(seed_config())["apps"][0]["macros"] if m["name"] == name][0]
+
+
+def simple(steps):
+    return [(s["vk"], s["down"], s["delay_ms"]) for s in steps]
 
 
 @scenario
-def macro_text_and_edit():
-    res = run_script("macro_text", MACRO_NEW + ["click 337 433", SETTLE,  # + TEXT
-                                                "text aB", "key Enter", SETTLE,
-                                                "move 200 627", SETTLE,  # hover the last step row
-                                                "move 308 627", SETTLE, "shot {shots}/hover.png",  # onto its up chevron
-                                                "click 308 627",  # its up chevron
-                                                SETTLE, "shot {shots}/rows.png",
-                                                "click 135 716", SETTLE])  # SAVE
+def macro_create_no_repeat():
+    res = run_script("macro_create_no_repeat", MACRO_NEW + MACRO_NAME_T1 + [
+        TILE["norepeat"], SETTLE,
+        "click 119 476",  # "+" of the only section
+        SETTLE, "click 220 344",  # menu: RECORD KEYSTROKES
+        SETTLE, "key J", SETTLE,
+        "click 241 476",  # STOP RECORDING (after two chips)
+        SETTLE, M_SAVE, SETTLE])
     ok_run(res)
-    m = [m for m in desktop(res.cfg)["macros"] if m["name"] == "Macro"]
-    must(len(m) == 1, [m["name"] for m in desktop(res.cfg)["macros"]])
-    steps = [(s["vk"], s["down"], s["delay_ms"]) for s in m[0]["steps"]]
-    want = [(0x41, True, 10), (0x41, False, 10), (0xA0, True, 10), (0x42, True, 10), (0xA0, False, 10), (0x42, False, 10)]
-    must(steps == want, steps)
+    m = edit_macro(res, "t1")
+    must(len(m) == 1, [x["name"] for x in desktop(res.cfg)["macros"]])
+    must(m[0]["kind"] == "NoRepeat" and m[0].get("std_delay") == 50, m[0])
+    must(simple(m[0]["steps"]) == [(74, True, 0), (74, False, 50)], simple(m[0]["steps"]))
+
+
+@scenario
+def macro_sequence_sections():
+    res = run_script("macro_sequence_sections", MACRO_NEW + ["text seq", "key Enter", SETTLE,
+        TILE["sequence"], SETTLE,
+        "click 119 409", SETTLE, "click 220 277",  # ON PRESS: "+", RECORD KEYSTROKES
+        SETTLE, "key W", SETTLE, "click 241 409",  # STOP
+        SETTLE, "click 119 554", SETTLE, "click 220 422",  # WHILE HOLDING: "+", RECORD
+        SETTLE, "key A", SETTLE, "click 241 554",  # STOP
+        SETTLE, "scroll 500 500 -300", SETTLE,
+        "click 119 609", SETTLE, "click 190 521",  # ON RELEASE: "+", TEXT & EMOJIS
+        SETTLE, "text hi", SETTLE, "click 424 609",  # DONE
+        SETTLE, M_SAVE, SETTLE])
+    ok_run(res)
+    m = edit_macro(res, "seq")
+    must(len(m) == 1, [x["name"] for x in desktop(res.cfg)["macros"]])
+    m = m[0]
+    must(m["kind"] == "Sequence", m)
+    must(simple(m["steps"]) == [(87, True, 0), (87, False, 50)], simple(m["steps"]))
+    must(simple(m["hold"]) == [(65, True, 0), (65, False, 50), (0, False, 50)], simple(m["hold"]))
+    must(len(m["release"]) == 1 and m["release"][0]["act"] == {"Text": "hi"}, m["release"])
+
+
+@scenario
+def macro_switch_type():
+    res = run_script("macro_switch_type", MACRO_NEW_EDIT + EDIT_JUMP + ["click 278 166", SETTLE, M_SAVE, SETTLE])
+    ok_run(res)
+    m = edit_macro(res, "jump")[0]
+    want = seed_macro("jump")
+    must(m["kind"] == "Toggle" and simple(m["steps"]) == simple(want["steps"]), m)
+
+
+@scenario
+def macro_custom_delay():
+    res = run_script("macro_custom_delay", MACRO_NEW_EDIT + EDIT_CL + [
+        "click 655 135",  # USE STANDARD DELAYS off
+        SETTLE, "shot {shots}/custom.png",
+        "dclick 158 470", SETTLE,  # first delay item: edit in place
+        "key Backspace", "key Backspace", "key Backspace", "key Backspace", "text 120", "key Enter", SETTLE,
+        M_SAVE, SETTLE])
+    ok_run(res)
+    m = edit_macro(res, "cl")[0]
+    must("std_delay" not in m, m)
+    must(m["steps"][1]["delay_ms"] == 120, simple(m["steps"]))
+
+
+@scenario
+def macro_delete_and_reset():
+    res = run_script("macro_delete_and_reset", MACRO_NEW_EDIT + EDIT_JUMP + [
+        "click 119 476",  # first chip
+        SETTLE, "key Delete", SETTLE, "shot {shots}/deleted.png", M_RESET, SETTLE, M_BACK, SETTLE])
+    ok_run(res)
+    must(edit_macro(res, "jump")[0]["steps"] == seed_macro("jump")["steps"], edit_macro(res, "jump")[0])
+
+
+@scenario
+def macro_leave_confirm():
+    for answer, name in ((CONFIRM_NO, "no"), (CONFIRM_YES, "yes")):
+        res = run_script(f"macro_leave_confirm_{name}", MACRO_NEW_EDIT + EDIT_JUMP + [
+            "click 119 476", SETTLE, "key Delete", SETTLE, M_BACK, SETTLE, "shot {shots}/ask.png",
+            answer, SETTLE, "shot {shots}/ask2.png"] + ([CONFIRM_YES, SETTLE] if name == "yes" else []))
+        ok_run(res)
+        m = edit_macro(res, "jump")[0]
+        if name == "no":
+            must(m["steps"] == seed_macro("jump")["steps"], m)
+        else:
+            must(len(m["steps"]) == 2, m)
+
+
+@scenario
+def macro_system_step():
+    res = run_script("macro_system_step", MACRO_NEW + MACRO_NAME_T1 + [
+        TILE["norepeat"], SETTLE, "click 119 476", SETTLE,
+        "click 220 476",  # menu: SYSTEM
+        SETTLE, "click 120 553",  # category list: Media
+        SETTLE, "click 120 505",  # card: Play/Pause
+        SETTLE, M_SAVE, SETTLE])
+    ok_run(res)
+    m = edit_macro(res, "t1")
+    must(len(m) == 1 and len(m[0]["steps"]) == 1, m)
+    must(m[0]["steps"][0]["act"]["Do"]["Shortcut"]["name"] == "Play/Pause", m[0]["steps"])
+
+
+@scenario
+def macro_fold_toggle():
+    res = run_script("macro_fold_toggle", MACRO_NEW_EDIT + EDIT_JUMP + [
+        "shot {shots}/before.png", "click 655 210",  # SHOW KEY DOWN/KEY UP off
+        SETTLE, "shot {shots}/after.png", M_SAVE, SETTLE])
+    ok_run(res)
+    # second chip centre (the "Space" key-up chip): chip fill before, background after
+    before, after = pixel(res, "before.png", (178, 470)), pixel(res, "after.png", (178, 470))
+    must(before != (0, 0, 0) and after == (0, 0, 0), (before, after))
+    m = edit_macro(res, "jump")[0]
+    must(m.get("show_up_down") is False and simple(m["steps"]) == simple(seed_macro("jump")["steps"]), m)
 
 
 @scenario

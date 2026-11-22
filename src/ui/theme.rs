@@ -447,9 +447,19 @@ pub fn keycap(ui: &Ui, rect: Rect, label: &str, ts: Ts) {
     text(ui, rect.center(), Align2::CENTER_CENTER, label, ts);
 }
 
-pub fn macro_badge(ui: &Ui, rect: Rect) {
-    ui.painter().rect_filled(rect, CornerRadius::same(2), pal().n(0x6e));
-    text(ui, rect.center() + vec2(0.0, 0.5), Align2::CENTER_CENTER, "M", Ts::new(Fam::Bold, 10.0, pal().bg).ls(0.0));
+/// The "M" badge of a macro; a macro with a colour fills it with that colour.
+pub fn macro_badge(ui: &Ui, rect: Rect, color: Option<[u8; 3]>) {
+    let (fill, ink) = match color {
+        Some(c) => {
+            let f = Color32::from_rgb(c[0], c[1], c[2]);
+            let lum = |x: Color32| 0.2126 * x.r() as f32 + 0.7152 * x.g() as f32 + 0.0722 * x.b() as f32;
+            let (a, b) = (pal().bg, pal().text);
+            (f, if (lum(f) - lum(a)).abs() > (lum(f) - lum(b)).abs() { a } else { b })
+        }
+        None => (pal().n(0x6e), pal().bg),
+    };
+    ui.painter().rect_filled(rect, CornerRadius::same(2), fill);
+    text(ui, rect.center() + vec2(0.0, 0.5), Align2::CENTER_CENTER, "M", Ts::new(Fam::Bold, 10.0, ink).ls(0.0));
 }
 
 pub fn soft_shadow(ui: &Ui, rect: Rect, r: u8) {
