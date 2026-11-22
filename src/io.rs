@@ -5,11 +5,32 @@
 use crate::device::{DeviceState, G502, MODE_HOST, MODE_ONBOARD};
 use crate::engine::{DevCmd, EngineMsg, UiEvent};
 use crate::hidpp::Result;
+use crate::profile::{OnboardProfile, OnboardSlot, parse_directory};
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TryRecvError};
 use hidapi::HidApi;
 use std::time::{Duration, Instant};
 
 const IDENTITY_MAP: [u8; 16] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 0, 0, 0, 0, 0];
+
+/// Read-only walk over the mouse's on-board profile memory, one sector per IO pass.
+struct OnboardJob {
+    dir: Option<Vec<(u16, bool)>>,
+    slots: Vec<OnboardSlot>,
+}
+
+impl OnboardJob {
+    /// Do one sector; returns the finished list when done.
+    fn step(&mut self, dev: &G502) -> Option<Vec<OnboardSlot>> {
+        let Some(dir) = &self.dir else {
+            self.dir = Some(dev.read_sector(0).map(|s| parse_directory(&s)).unwrap_or_default());
+            return self.dir.as_ref().is_some_and(|d| d.is_empty()).then(Vec::new);
+        };
+        let (sector, enabled) = dir[self.slots.len()];
+        let profile = dev.read_sector(sector).ok().and_then(|s| OnboardProfile::parse(&s));
+        self.slots.push(OnboardSlot { sector, enabled, profile });
+        (self.slots.len() == dir.len()).then(|| std::mem::take(&mut self.slots))
+    }
+}
 
 pub fn run(cmd_rx: Receiver<DevCmd>, eng: Sender<EngineMsg>, ui: Sender<UiEvent>) {
     let mut api = match HidApi::new() {
@@ -46,10 +67,19 @@ pub fn run(cmd_rx: Receiver<DevCmd>, eng: Sender<EngineMsg>, ui: Sender<UiEvent>
 
         let mut last = Instant::now();
         let mut frames = Vec::new();
+        let mut onboard_job: Option<OnboardJob> = None;
         'conn: loop {
             loop {
                 match cmd_rx.try_recv() {
                     Ok(DevCmd::Quit) | Err(TryRecvError::Disconnected) => return,
+                    Ok(DevCmd::ReadOnboard) => {
+                        if crate::win::ghub_running() {
+                            let _ = ui.send(UiEvent::Log("On-board profiles not read: G HUB is running".into()));
+                            let _ = ui.send(UiEvent::Onboard(Vec::new()));
+                        } else {
+                            onboard_job = Some(OnboardJob { dir: None, slots: Vec::new() });
+                        }
+                    }
                     Ok(cmd) => {
                         let take = matches!(cmd, DevCmd::TakeControl(_));
                         let r = exec(&dev, &mut st, cmd);
@@ -63,6 +93,12 @@ pub fn run(cmd_rx: Receiver<DevCmd>, eng: Sender<EngineMsg>, ui: Sender<UiEvent>
                     }
                     Err(TryRecvError::Empty) => break,
                 }
+            }
+            if let Some(job) = &mut onboard_job
+                && let Some(slots) = job.step(&dev)
+            {
+                onboard_job = None;
+                let _ = ui.send(UiEvent::Onboard(slots));
             }
             frames.clear();
             if dev.poll_events(&mut frames).is_err() {
@@ -136,7 +172,7 @@ fn exec(dev: &G502, st: &mut DeviceState, cmd: DevCmd) -> Result<()> {
         }
         DevCmd::SetOnboardProfile(slot) => dev.set_onboard_profile(slot)?,
         DevCmd::Refresh => refresh(dev, st),
-        DevCmd::Quit => {}
+        DevCmd::ReadOnboard | DevCmd::Quit => {}
     }
     Ok(())
 }

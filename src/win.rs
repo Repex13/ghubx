@@ -423,6 +423,17 @@ pub fn pick_exe(owner: isize) -> Option<String> {
     pick_file(owner, "Choose a game or app", "Programs", "*.exe")
 }
 
+/// VK and whether Shift is needed to type `ch` on the current layout
+/// (`None` for characters that are not on it or need Ctrl/Alt).
+pub fn char_key(ch: char) -> Option<(u16, bool)> {
+    let unit = u16::try_from(ch as u32).ok()?;
+    let r = unsafe { VkKeyScanW(unit) };
+    if r == -1 || (r >> 8) & 0b110 != 0 {
+        return None;
+    }
+    Some(((r & 0xFF) as u16, (r >> 8) & 1 != 0))
+}
+
 pub fn main_hidden() -> bool {
     HIDDEN.load(Ordering::Relaxed)
 }
@@ -752,6 +763,15 @@ pub fn start_scroll_hook() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn char_key_maps_ascii() {
+        if char_key('a') != Some((0x41, false)) {
+            return;
+        }
+        assert_eq!(char_key('A'), Some((0x41, true)));
+        assert_eq!(char_key('1'), Some((0x31, false)));
+    }
 
     #[test]
     fn startup_blob_and_flag() {

@@ -184,6 +184,10 @@ impl GhubApp {
             self.edit(|c| c.general.take_control = !c.general.take_control);
         }
         y += 28.0;
+        if !self.onboard_asked && self.shot.is_none() && self.dev.connected {
+            self.onboard_asked = true;
+            let _ = self.eng.send(EngineMsg::ReadOnboard);
+        }
         let n = self.dev.info.profile_count.clamp(1, 5);
         let active_slot = self.dev.onboard_profile;
         for slot in 1..=n {
@@ -199,7 +203,32 @@ impl GhubApp {
                 ui.painter().circle_stroke(c, 5.0, Stroke::new(1.2, ring));
             }
             text(ui, pos2(ox + 21.0, y), Align2::LEFT_CENTER, &format!("SLOT {slot}"), Ts::new(Fam::Reg, 12.0, if enabled { pal().text } else { pal().n(0x55) }));
-            text(ui, pos2(ox + 78.0, y), Align2::LEFT_CENTER, &format!("PROFILE {slot}"), Ts::new(Fam::Reg, 12.0, if enabled { pal().primary } else { pal().primary_disabled }));
+            let stored = self.onboard.get(slot as usize - 1).and_then(|o| o.profile.as_ref());
+            let ts = Ts::new(Fam::Reg, 12.0, if enabled { pal().primary } else { pal().primary_disabled });
+            let label = match stored {
+                Some(p) => {
+                    let mut s = crate::profile::onboard_summary(p);
+                    let max_w = win.right() - 24.0 - (ox + 78.0);
+                    while s.chars().count() > 1 && galley(ui, &s, ts, f32::INFINITY).size().x > max_w {
+                        s.pop();
+                        s = s.trim_end().to_string();
+                        if galley(ui, &format!("{s}\u{2026}"), ts, f32::INFINITY).size().x <= max_w {
+                            s.push('\u{2026}');
+                            break;
+                        }
+                    }
+                    s
+                }
+                None => format!("PROFILE {slot}"),
+            };
+            text(ui, pos2(ox + 78.0, y), Align2::LEFT_CENTER, &label, ts);
+            if let Some(p) = stored {
+                let name = |l: &[u8; 11]| crate::profile::Lighting::from_led(l).map_or("unknown", |l| super::light::effect_name(l.effect));
+                let start = p.dpi.get(p.default_dpi).map_or_else(|| "?".to_string(), |d| d.to_string());
+                r.clone().on_hover_text(format!("Starts at {start} DPI
+Primary: {}
+Logo: {}", name(&p.leds[0]), name(&p.leds[1])));
+            }
             if enabled && r.clicked() {
                 let _ = self.eng.send(EngineMsg::OnboardSlot(slot));
             }

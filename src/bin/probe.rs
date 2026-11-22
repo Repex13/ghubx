@@ -33,6 +33,7 @@ fn main() {
         Some("takeover-test") => std::process::exit(takeover_test()),
         Some("release") => std::process::exit(release()),
         Some("games") => std::process::exit(games()),
+        Some("onboard") => std::process::exit(onboard_cmd()),
         Some("save-dialog") => println!("{:?}", win::save_file(0, "Export a game or app", "test.ghubx", "GHUB-X profile", "*.ghubx")),
         Some("ghub-autostart") => println!("startup_approved(LGHUB) = {:?}", win::startup_approved("LGHUB")),
         Some("export-app") => std::process::exit(export_app_cmd(&std::env::args().skip(2).collect::<Vec<_>>())),
@@ -106,6 +107,47 @@ fn import_app_cmd(args: &[String]) -> i32 {
         "would add as {:?} (index {idx}): {profiles} profile(s), {macros} macro(s), exe {exe:?}, dir {dir:?}, G HUB id {ghub_id:?}; linked to its game: {linked} (nothing was written)",
         cfg.apps[idx].name
     );
+    0
+}
+
+/// Read-only dump of the mouse's on-board profile directory and profiles.
+fn onboard_cmd() -> i32 {
+    use ghubx::profile::{Lighting, OnboardProfile, onboard_summary, parse_directory, sector_crc_ok};
+    if win::ghub_running() {
+        eprintln!("lghub_agent.exe is running: not reading the mouse's memory while G HUB talks to it.");
+        return 2;
+    }
+    let api = HidApi::new().unwrap();
+    let Ok(dev) = G502::connect(&api) else {
+        eprintln!("G502 HERO not found");
+        return 1;
+    };
+    let dir = match dev.read_sector(0) {
+        Ok(s) => parse_directory(&s),
+        Err(e) => {
+            eprintln!("directory read failed: {e}");
+            return 1;
+        }
+    };
+    println!("directory: {dir:?}");
+    let effect = |l: &[u8; 11]| Lighting::from_led(l).map_or_else(|| format!("{l:02X?}"), |l| format!("{:?}", l.effect));
+    for (i, (sector, enabled)) in dir.iter().enumerate() {
+        match dev.read_sector(*sector) {
+            Ok(s) => {
+                let p = OnboardProfile::parse(&s);
+                println!(
+                    "slot {}: sector {sector} enabled {enabled} crc_ok {} | {} | default dpi index {} | zone0 {} | zone1 {}",
+                    i + 1,
+                    sector_crc_ok(&s),
+                    p.as_ref().map_or("unreadable".to_string(), onboard_summary),
+                    p.as_ref().map_or("-".to_string(), |p| p.default_dpi.to_string()),
+                    p.as_ref().map_or("-".to_string(), |p| effect(&p.leds[0])),
+                    p.as_ref().map_or("-".to_string(), |p| effect(&p.leds[1])),
+                );
+            }
+            Err(e) => println!("slot {}: sector {sector} read failed: {e}", i + 1),
+        }
+    }
     0
 }
 

@@ -30,7 +30,7 @@ pub struct LightState {
     hex: String,
 }
 
-fn effect_name(e: Effect) -> &'static str {
+pub(super) fn effect_name(e: Effect) -> &'static str {
     EFFECTS.iter().find(|(_, x)| *x == e).map(|(n, _)| *n).unwrap_or("?")
 }
 

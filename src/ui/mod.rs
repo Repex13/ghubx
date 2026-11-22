@@ -152,6 +152,8 @@ pub struct GhubApp {
     pub(crate) import_armed: Option<Instant>,
     pub(crate) appear_hex: String,
     pub(crate) ghub_autostart: Option<Option<bool>>,
+    pub(crate) onboard: Vec<crate::profile::OnboardSlot>,
+    pub(crate) onboard_asked: bool,
 }
 
 impl GhubApp {
@@ -210,6 +212,8 @@ impl GhubApp {
             import_armed: None,
             appear_hex: String::new(),
             ghub_autostart: None,
+            onboard: Vec::new(),
+            onboard_asked: false,
         };
         if let Some(s) = shot {
             app.prepare_shot(&s.page);
@@ -221,10 +225,10 @@ impl GhubApp {
     fn prepare_shot(&mut self, page: &str) {
         self.route = match page {
             "home" | "dropdown" => Route::Home,
-            "assign" | "assign2" | "gshift" | "macro" | "macroedit" | "select" | "keys" | "actions" | "gamecmds" => Route::Device(DevTab::Assignments),
+            "assign" | "assign2" | "gshift" | "macro" | "macroedit" | "macrorec" | "select" | "keys" | "actions" | "gamecmds" => Route::Device(DevTab::Assignments),
             "sens" => Route::Device(DevTab::Sensitivity),
             "light" | "fixed" => Route::Device(DevTab::Lighting),
-            "devset" => Route::DeviceSettings,
+            "devset" | "onboard" => Route::DeviceSettings,
             "profiles" | "appdetail" | "addgame" => Route::Profiles,
             "settings" | "sleep" => Route::Settings(0),
             "appearance" => Route::Settings(1),
@@ -235,7 +239,7 @@ impl GhubApp {
         self.asg.side = page == "assign2";
         self.asg.gshift = page == "gshift";
         self.asg.tab = match page {
-            "macro" | "macroedit" => 3,
+            "macro" | "macroedit" | "macrorec" => 3,
             "keys" => 1,
             "actions" => 2,
             _ => 0,
@@ -243,9 +247,11 @@ impl GhubApp {
         if page == "select" {
             self.asg.selected = Some(3);
         }
-        if page == "macroedit" {
+        if page == "macroedit" || page == "macrorec" {
             let first = self.cfg().current().0.macros.first().cloned();
-            self.asg.editor = Some(first.map(|m| assign::MacroEditor::from(&m)).unwrap_or_else(assign::MacroEditor::new));
+            let mut ed = first.map(|m| assign::MacroEditor::from(&m)).unwrap_or_else(assign::MacroEditor::new);
+            ed.recording = page == "macrorec";
+            self.asg.editor = Some(ed);
         }
         if page == "fixed" {
             let mut c = self.cfg.lock().unwrap();
@@ -253,6 +259,21 @@ impl GhubApp {
             p.lighting[1] = crate::profile::Lighting { effect: crate::profile::Effect::Fixed, color: [0x00, 0xB8, 0xFC], period_ms: 4000, brightness: 80 };
             drop(c);
             self.light.zone = 1;
+        }
+        if page == "onboard" {
+            use crate::profile::{OnboardProfile, OnboardSlot, sample_sector1};
+            let base = OnboardProfile::parse(&sample_sector1());
+            let with = |dpi: &[u16]| {
+                base.clone().map(|mut p| {
+                    p.dpi = dpi.to_vec();
+                    p
+                })
+            };
+            self.onboard = [base.clone(), with(&[400, 800, 1600, 3200, 6400]), with(&[800, 1600]), with(&[1600]), None]
+                .into_iter()
+                .enumerate()
+                .map(|(i, profile)| OnboardSlot { sector: i as u16 + 1, enabled: true, profile })
+                .collect();
         }
         if page == "addgame" {
             self.prof.open_add();
@@ -312,7 +333,14 @@ impl GhubApp {
         }
         for ev in events {
             match ev {
-                UiEvent::Device(d) => self.dev = d,
+                UiEvent::Device(d) => {
+                    if !d.connected {
+                        self.onboard_asked = false;
+                        self.onboard.clear();
+                    }
+                    self.dev = d;
+                }
+                UiEvent::Onboard(v) => self.onboard = v,
                 UiEvent::Buttons(m) => {
                     if self.shot.is_none() {
                         self.mask = m;

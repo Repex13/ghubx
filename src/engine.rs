@@ -74,6 +74,8 @@ pub enum DevCmd {
     SetZone { zone: u8, led: [u8; 11] },
     SetOnboardProfile(u8),
     Refresh,
+    /// Read the mouse's on-board profile memory (read-only), one sector per IO pass.
+    ReadOnboard,
     Quit,
 }
 
@@ -90,8 +92,12 @@ pub enum EngineMsg {
     StartGhub,
     /// Inject a test turn of exactly this many counts.
     TestPerfect180 { counts: i32 },
+    /// Play these macro steps once (macro editor TEST button).
+    TestMacro(Vec<MacroStep>),
     /// Pick the active on-board slot (only while not in host control).
     OnboardSlot(u8),
+    /// Ask the device thread to read the on-board profiles.
+    ReadOnboard,
     Quit,
 }
 
@@ -114,6 +120,7 @@ pub enum UiEvent {
     Buttons(u16),
     Status(Status),
     Log(String),
+    Onboard(Vec<OnboardSlot>),
 }
 
 struct Held {
@@ -211,6 +218,12 @@ impl Engine {
                             let _ = self.dev.send(DevCmd::Refresh);
                         }
                     }
+                    Ok(EngineMsg::ReadOnboard) => {
+                        if self.st.connected {
+                            let _ = self.dev.send(DevCmd::ReadOnboard);
+                        }
+                    }
+                    Ok(EngineMsg::TestMacro(steps)) => self.test_macro(steps),
                     Ok(EngineMsg::TestPerfect180 { counts }) => {
                         let e = self.cfg.lock().unwrap().extras.clone();
                         let input = self.input.clone();
@@ -248,6 +261,11 @@ impl Engine {
                 }
             }
         }
+    }
+
+    fn test_macro(&self, steps: Vec<MacroStep>) {
+        let input = self.input.clone();
+        std::thread::spawn(move || play(&*input, &steps, None));
     }
 
     fn on_control_lost(&mut self) {
@@ -975,6 +993,15 @@ mod tests {
         r.e.on_mask(1 << 5);
         r.e.on_control_lost();
         assert_eq!(r.rec.events().last(), Some(&Ev::Key(0x53, false)));
+    }
+
+    #[test]
+    fn test_macro_plays_once_through_the_sink() {
+        let mut r = rig(|_| {});
+        r.take_control();
+        r.e.test_macro(vec![MacroStep { vk: 0x41, down: true, delay_ms: 0 }, MacroStep { vk: 0x41, down: false, delay_ms: 30 }]);
+        pause(150);
+        assert_eq!(r.rec.events(), vec![Ev::Key(0x41, true), Ev::Key(0x41, false)]);
     }
 
     #[test]
