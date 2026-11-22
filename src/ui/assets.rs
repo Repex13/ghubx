@@ -80,6 +80,45 @@ pub struct FontSet {
     pub defs: FontDefinitions,
 }
 
+const FONT_ROLES: [(&str, &str, u32, &str); 5] = [
+    ("reg", "BrownPro-Regular", 400, "segoeui.ttf"),
+    ("bold", "BrownPro-Bold", 700, "segoeuib.ttf"),
+    ("light", "BrownPro-Light", 100, "segoeuisl.ttf"),
+    ("pan", "BrownLogitechPan", 400, "segoeui.ttf"),
+    ("panb", "BrownLogitechPan", 700, "segoeuib.ttf"),
+];
+
+fn windows_fonts_dir() -> PathBuf {
+    std::env::var("WINDIR").map(|w| PathBuf::from(w).join("Fonts")).unwrap_or_else(|_| PathBuf::from(r"C:\Windows\Fonts"))
+}
+
+fn open_faces() -> (Option<Asar>, HashMap<(String, u32), String>) {
+    let mut asar = Asar::open(ASAR);
+    let faces = asar
+        .as_mut()
+        .and_then(|a| a.read("app.min.css"))
+        .map(|css| font_faces(&String::from_utf8_lossy(&css)))
+        .unwrap_or_default();
+    (asar, faces)
+}
+
+/// Font bytes for a role: G HUB's Brown Pro from the asar, else the Windows fallback.
+/// The bool says whether they came from G HUB.
+fn role_bytes(asar: &mut Option<Asar>, faces: &HashMap<(String, u32), String>, win_fonts: &Path, role: (&str, &str, u32, &str)) -> (Option<Vec<u8>>, bool) {
+    let (_, fam, weight, fallback) = role;
+    match faces.get(&(fam.to_string(), weight)).and_then(|p| asar.as_mut()?.read(p)) {
+        Some(b) => (Some(b), true),
+        None => (std::fs::read(win_fonts.join(fallback)).or_else(|_| std::fs::read(win_fonts.join("segoeui.ttf"))).ok(), false),
+    }
+}
+
+/// The bytes `load_fonts` uses for a role key (`reg`, `bold`, ...).
+pub fn font_bytes(key: &str) -> Option<Vec<u8>> {
+    let role = FONT_ROLES.iter().find(|r| r.0 == key)?;
+    let (mut asar, faces) = open_faces();
+    role_bytes(&mut asar, &faces, &windows_fonts_dir(), *role).0
+}
+
 /// Build egui fonts: Brown Pro from G HUB when present, else Segoe UI.
 pub fn load_fonts() -> FontSet {
     let mut defs = FontDefinitions::default();
@@ -90,29 +129,12 @@ pub fn load_fonts() -> FontSet {
         defs.font_data.insert(key.to_string(), Arc::new(fd));
     };
     let mut from_ghub = false;
-    let roles: [(&str, &str, u32, &str); 5] = [
-        ("reg", "BrownPro-Regular", 400, "segoeui.ttf"),
-        ("bold", "BrownPro-Bold", 700, "segoeuib.ttf"),
-        ("light", "BrownPro-Light", 100, "segoeuisl.ttf"),
-        ("pan", "BrownLogitechPan", 400, "segoeui.ttf"),
-        ("panb", "BrownLogitechPan", 700, "segoeuib.ttf"),
-    ];
-    let mut asar = Asar::open(ASAR);
-    let faces = asar
-        .as_mut()
-        .and_then(|a| a.read("app.min.css"))
-        .map(|css| font_faces(&String::from_utf8_lossy(&css)))
-        .unwrap_or_default();
-    let win_fonts = std::env::var("WINDIR").map(|w| PathBuf::from(w).join("Fonts")).unwrap_or_else(|_| PathBuf::from(r"C:\Windows\Fonts"));
-    for (key, fam, weight, fallback) in roles {
-        let ghub = faces.get(&(fam.to_string(), weight)).and_then(|p| asar.as_mut()?.read(p));
-        let bytes = match ghub {
-            Some(b) => {
-                from_ghub = true;
-                Some(b)
-            }
-            None => std::fs::read(win_fonts.join(fallback)).or_else(|_| std::fs::read(win_fonts.join("segoeui.ttf"))).ok(),
-        };
+    let (mut asar, faces) = open_faces();
+    let win_fonts = windows_fonts_dir();
+    for role in FONT_ROLES {
+        let key = role.0;
+        let (bytes, ghub) = role_bytes(&mut asar, &faces, &win_fonts, role);
+        from_ghub |= ghub;
         let mut chain = Vec::new();
         if let Some(b) = bytes {
             let name = format!("ghubx-{key}");

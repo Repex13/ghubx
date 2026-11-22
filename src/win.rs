@@ -220,7 +220,20 @@ pub fn set_autostart(on: bool, minimized: bool) -> bool {
 pub const WM_TRAY: u32 = WM_APP + 1;
 pub const WM_TRAY_SHOW: u32 = WM_APP + 2;
 pub const WM_TRAY_QUIT: u32 = WM_APP + 3;
-const TRAY_CLASS: PCWSTR = w!("GHUBX_TRAY");
+static DEV: AtomicBool = AtomicBool::new(false);
+
+/// `--dev`: a second, harmless instance with its own mutex, tray class and tooltip.
+pub fn set_dev(on: bool) {
+    DEV.store(on, Ordering::Relaxed);
+}
+
+pub fn is_dev() -> bool {
+    DEV.load(Ordering::Relaxed)
+}
+
+fn tray_class() -> PCWSTR {
+    if is_dev() { w!("GHUBX_TRAY_DEV") } else { w!("GHUBX_TRAY") }
+}
 const TRAY_ID: u32 = 1;
 const MENU_OPEN: usize = 1;
 const MENU_QUIT: usize = 2;
@@ -313,7 +326,7 @@ fn add_tray_icon(hwnd: HWND) {
     nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
     nid.uCallbackMessage = WM_TRAY;
     nid.hIcon = HICON(TRAY_ICON.load(Ordering::Relaxed) as *mut _);
-    copy_wide(&mut nid.szTip, "GHUB-X");
+    copy_wide(&mut nid.szTip, if is_dev() { "GHUB-X (dev)" } else { "GHUB-X" });
     unsafe {
         let _ = Shell_NotifyIconW(NIM_ADD, &nid);
     }
@@ -460,11 +473,11 @@ pub fn start_tray(
     let (ready_tx, ready_rx) = crossbeam_channel::bounded::<()>(1);
     let spawned = std::thread::Builder::new().name("tray".into()).spawn(move || unsafe {
         let Ok(module) = GetModuleHandleW(None) else { return };
-        let class = WNDCLASSW { lpfnWndProc: Some(tray_proc), hInstance: module.into(), lpszClassName: TRAY_CLASS, ..Default::default() };
+        let class = WNDCLASSW { lpfnWndProc: Some(tray_proc), hInstance: module.into(), lpszClassName: tray_class(), ..Default::default() };
         RegisterClassW(&class);
         let Ok(hwnd) = CreateWindowExW(
             WS_EX_TOOLWINDOW,
-            TRAY_CLASS,
+            tray_class(),
             w!("GHUB-X tray"),
             WS_POPUP,
             0,
@@ -539,12 +552,12 @@ fn center_on_work_area(h: HWND) {
 pub fn single_instance() -> bool {
     use windows::Win32::System::Threading::CreateMutexW;
     unsafe {
-        let Ok(_mutex) = CreateMutexW(None, true, w!("Local\\GHUBX-single-instance")) else { return true };
+        let Ok(_mutex) = CreateMutexW(None, true, if is_dev() { w!("Local\\GHUBX-single-instance-dev") } else { w!("Local\\GHUBX-single-instance") }) else { return true };
         if GetLastError() != ERROR_ALREADY_EXISTS {
             return true;
         }
         for _ in 0..30 {
-            if let Ok(h) = FindWindowW(TRAY_CLASS, PCWSTR::null()) {
+            if let Ok(h) = FindWindowW(tray_class(), PCWSTR::null()) {
                 let _ = AllowSetForegroundWindow(ASFW_ANY);
                 let _ = PostMessageW(Some(h), WM_TRAY_SHOW, WPARAM(0), LPARAM(0));
                 break;

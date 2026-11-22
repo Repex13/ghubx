@@ -5,12 +5,24 @@
 use crate::catalog::mod_vks;
 use crate::device::{DeviceState, RATES_MS, SLOTS};
 use crate::profile::*;
+use crate::osd::{self, OsdKind};
 use crate::win;
 use crossbeam_channel::{Receiver, Sender, select, tick};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+
+static OBSERVER: AtomicBool = AtomicBool::new(false);
+
+/// Observer mode (`--dev`, `--shot`): never take control or touch G HUB.
+pub fn set_observer(on: bool) {
+    OBSERVER.store(on, Ordering::Relaxed);
+}
+
+fn observer() -> bool {
+    OBSERVER.load(Ordering::Relaxed)
+}
 
 /// What GHUB-X pushes to the mouse while it holds host mode.
 #[derive(Clone, Debug, PartialEq)]
@@ -88,6 +100,9 @@ pub struct Engine {
     held: Vec<Option<Held>>,
     toggles: HashMap<String, Arc<AtomicBool>>,
     asleep: bool,
+    pub(crate) osd: Box<dyn Fn(OsdKind) + Send>,
+    pub(crate) persist: bool,
+    pub(crate) flash_until: Option<Instant>,
 }
 
 impl Engine {
@@ -104,6 +119,9 @@ impl Engine {
             held: (0..SLOTS).map(|_| None).collect(),
             toggles: HashMap::new(),
             asleep: false,
+            osd: Box::new(osd::show),
+            persist: true,
+            flash_until: None,
         }
     }
 
@@ -138,6 +156,7 @@ impl Engine {
                         }
                     }
                     Ok(EngineMsg::ConfigChanged) => self.reconcile(),
+                    Ok(EngineMsg::CloseGhub | EngineMsg::StartGhub) if observer() => self.log("G HUB control ignored in dev mode".into()),
                     Ok(EngineMsg::CloseGhub) => {
                         let n = win::close_ghub();
                         self.log(format!("Closed {n} G HUB process(es)"));
@@ -158,14 +177,16 @@ impl Engine {
                         self.send_status();
                     }
                     Ok(EngineMsg::OnboardSlot(slot)) => {
-                        if !self.st.controlled && self.st.connected && !self.st.ghub_running {
+                        if !observer() && !self.st.controlled && self.st.connected && !self.st.ghub_running {
                             let _ = self.dev.send(DevCmd::SetOnboardProfile(slot));
                             let _ = self.dev.send(DevCmd::Refresh);
                         }
                     }
                     Ok(EngineMsg::TestPerfect180) => {
-                        let e = self.cfg.lock().unwrap().extras.clone();
-                        std::thread::spawn(move || perfect_180(e.p180_counts, e.p180_ms, e.p180_steps));
+                        if let Some((p, _, e)) = self.profile() {
+                            let counts = turn_counts(turn_for(&p, &e).counts, turn_for(&p, &e).angle);
+                            std::thread::spawn(move || perfect_180(counts, e.p180_ms, e.p180_steps));
+                        }
                     }
                     Ok(EngineMsg::Quit) | Err(_) => {
                         self.release_device();
@@ -187,6 +208,7 @@ impl Engine {
                         self.st.ghub_running = g;
                     }
                     dirty |= self.check_sleep();
+                    dirty |= self.expire_flash();
                     if self.retry_at.is_some_and(|t| Instant::now() >= t) {
                         self.retry_at = None;
                         dirty = true;
@@ -212,6 +234,7 @@ impl Engine {
         self.applied = None;
         self.st.controlled = false;
         self.mask = 0;
+        self.flash_until = None;
     }
 
     fn release_device(&mut self) {
@@ -221,6 +244,13 @@ impl Engine {
         }
         self.applied = None;
         self.st.controlled = false;
+        self.flash_until = None;
+    }
+
+    fn save_cfg(&self, cfg: &Config) {
+        if self.persist {
+            let _ = cfg.save();
+        }
     }
 
     fn check_sleep(&mut self) -> bool {
@@ -238,13 +268,22 @@ impl Engine {
         win::set_scroll_accel(cfg.extras.scroll_accel, cfg.extras.scroll_boost);
         let active = cfg.resolve(self.st.foreground.as_deref());
         if active != self.st.active {
+            let switched_in_control = self.applied.is_some();
             self.release_all();
             self.st.active = active;
+            if switched_in_control
+                && cfg.general.osd_profile
+                && let (Some(app), Some(p)) = (cfg.apps.get(active.0), cfg.profile_at(active))
+            {
+                (self.osd)(OsdKind::Profile { name: format!("{}: {}", app.name, p.name) });
+            }
         }
-        let want = self.st.connected && cfg.general.take_control && !self.st.ghub_running && self.retry_at.is_none();
+        let want = !observer() && self.st.connected && cfg.general.take_control && !self.st.ghub_running && self.retry_at.is_none();
         if want {
             let Some(p) = cfg.profile_at(active) else { return };
-            let leds = if self.asleep {
+            let leds = if self.flash_until.is_some() && self.applied.is_some() {
+                self.applied.as_ref().map_or([[0u8; 11]; 2], |a| a.leds)
+            } else if self.asleep {
                 [[0u8; 11]; 2]
             } else {
                 [p.lighting[0].to_led(), p.lighting[1].to_led()]
@@ -316,7 +355,8 @@ impl Engine {
         let base = p.effective(slot, false);
         let a = if base == Assignment::System(SystemFn::GShift) || !self.st.gshift { base } else { p.effective(slot, true) };
         let passthrough = self.applied.as_ref().is_some_and(|ap| ap.map[slot] != 0) && a == native(slot);
-        let stop = self.start(&a, passthrough, &macros, &extras);
+        let turn = turn_for(&p, &extras);
+        let stop = self.start(&a, passthrough, &macros, &extras, &turn);
         self.held[slot] = Some(Held { a, passthrough, stop });
     }
 
@@ -361,7 +401,7 @@ impl Engine {
     }
 
     /// Start an action; returns a stop flag for actions that run while held.
-    fn start(&mut self, a: &Assignment, passthrough: bool, macros: &[Macro], extras: &Extras) -> Option<Arc<AtomicBool>> {
+    fn start(&mut self, a: &Assignment, passthrough: bool, macros: &[Macro], extras: &Extras, turn: &TurnCal) -> Option<Arc<AtomicBool>> {
         match a {
             Assignment::Default | Assignment::Disabled => None,
             Assignment::Mouse(m) => match m {
@@ -444,7 +484,8 @@ impl Engine {
                 None
             }
             Assignment::Perfect180 { left } => {
-                let c = if *left { -extras.p180_counts } else { extras.p180_counts };
+                let counts = turn_counts(turn.counts, turn.angle);
+                let c = if *left { -counts } else { counts };
                 let (ms, steps) = (extras.p180_ms, extras.p180_steps);
                 std::thread::spawn(move || perfect_180(c, ms, steps));
                 None
@@ -453,7 +494,7 @@ impl Engine {
                 let on = {
                     let mut cfg = self.cfg.lock().unwrap();
                     cfg.extras.scroll_accel = !cfg.extras.scroll_accel;
-                    let _ = cfg.save();
+                    self.save_cfg(&cfg);
                     cfg.extras.scroll_accel
                 };
                 self.log(format!("Scroll acceleration {}", if on { "on" } else { "off" }));
@@ -485,6 +526,7 @@ impl Engine {
                         }
                     };
                 });
+                self.dpi_feedback();
             }
             SystemFn::ReportRateCycle => self.edit_active(|p| {
                 let i = RATES_MS.iter().position(|&r| r == p.rate_ms).unwrap_or(0);
@@ -495,11 +537,43 @@ impl Engine {
                     let mut cfg = self.cfg.lock().unwrap();
                     let a = &mut cfg.apps[self.st.active.0];
                     a.active_profile = (a.active_profile + 1) % a.profiles.len();
-                    let _ = cfg.save();
+                    self.save_cfg(&cfg);
                 }
                 self.reconcile();
             }
         }
+    }
+
+    /// OSD and lighting flash after a DPI button.
+    fn dpi_feedback(&mut self) {
+        let (info, osd_on, flash_on) = {
+            let cfg = self.cfg.lock().unwrap();
+            let info = cfg.profile_at(self.st.active).map(|p| (p.dpi.active, p.dpi.levels.len().min(255) as u8, p.dpi.active_index()));
+            (info, cfg.general.osd_dpi, cfg.general.dpi_flash)
+        };
+        let Some((value, levels, index)) = info else { return };
+        if osd_on {
+            (self.osd)(OsdKind::Dpi { value, levels, active: index as u8 });
+        }
+        if flash_on && !self.asleep && self.applied.is_some() {
+            let led = Lighting { effect: Effect::Fixed, color: dpi_flash_color(index), ..Default::default() }.to_led();
+            for zone in 0..2u8 {
+                let _ = self.dev.send(DevCmd::SetZone { zone, led });
+            }
+            if let Some(ap) = &mut self.applied {
+                ap.leds = [led; 2];
+            }
+            self.flash_until = Some(Instant::now() + Duration::from_millis(1200));
+        }
+    }
+
+    /// True when a DPI lighting flash just ended (the profile's LEDs must be re-sent).
+    fn expire_flash(&mut self) -> bool {
+        if self.flash_until.is_some_and(|t| Instant::now() >= t) {
+            self.flash_until = None;
+            return true;
+        }
+        false
     }
 
     /// Send the current (shifted or active) DPI without a full reconcile.
@@ -524,7 +598,7 @@ impl Engine {
             if let Some(prof) = cfg.apps.get_mut(a).and_then(|x| x.profiles.get_mut(p)) {
                 f(prof);
             }
-            let _ = cfg.save();
+            self.save_cfg(&cfg);
         }
         self.reconcile();
     }
@@ -590,5 +664,122 @@ pub fn perfect_180(counts: i32, ms: u16, steps: u8) {
         if gap >= 1.0 && i < steps {
             std::thread::sleep(Duration::from_secs_f64(gap / 1000.0));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossbeam_channel::unbounded;
+    use std::sync::MutexGuard;
+
+    /// The observer flag is process-wide, so engine tests run one at a time.
+    static SERIAL: Mutex<()> = Mutex::new(());
+
+    struct Rig {
+        e: Engine,
+        dev_rx: Receiver<DevCmd>,
+        osd: Arc<Mutex<Vec<OsdKind>>>,
+        cfg: Arc<Mutex<Config>>,
+        _ui_rx: Receiver<UiEvent>,
+        _guard: MutexGuard<'static, ()>,
+    }
+
+    impl Drop for Rig {
+        fn drop(&mut self) {
+            set_observer(false);
+        }
+    }
+
+    fn rig(edit: impl FnOnce(&mut Config)) -> Rig {
+        let guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        set_observer(false);
+        let mut cfg = Config::default();
+        cfg.apps[0].profiles[0].dpi = DpiTable { levels: vec![600, 1000, 1600], active: 600, default: 600, shift: 400 };
+        edit(&mut cfg);
+        let cfg = Arc::new(Mutex::new(cfg));
+        let (dev_tx, dev_rx) = unbounded();
+        let (ui_tx, ui_rx) = unbounded();
+        let mut e = Engine::new(cfg.clone(), dev_tx, ui_tx);
+        let osd = Arc::new(Mutex::new(Vec::new()));
+        let sink = osd.clone();
+        e.osd = Box::new(move |k| sink.lock().unwrap().push(k));
+        e.persist = false;
+        e.st.connected = true;
+        e.st.ghub_running = false;
+        Rig { e, dev_rx, osd, cfg, _ui_rx: ui_rx, _guard: guard }
+    }
+
+    impl Rig {
+        fn cmds(&self) -> Vec<DevCmd> {
+            self.dev_rx.try_iter().collect()
+        }
+
+        fn take_control(&mut self) {
+            self.e.reconcile();
+            assert!(matches!(self.cmds().first(), Some(DevCmd::TakeControl(_))));
+        }
+
+        fn press(&mut self, slot: usize) {
+            self.e.on_mask(1 << slot);
+            self.e.on_mask(0);
+        }
+    }
+
+    fn fixed_led(color: [u8; 3]) -> [u8; 11] {
+        Lighting { effect: Effect::Fixed, color, ..Default::default() }.to_led()
+    }
+
+    #[test]
+    fn dpi_up_button_steps_dpi_and_shows_osd() {
+        let mut r = rig(|_| {});
+        r.take_control();
+        r.press(7);
+        assert!(r.cmds().iter().any(|c| matches!(c, DevCmd::SetDpi(1000))));
+        assert_eq!(r.cfg.lock().unwrap().apps[0].profiles[0].dpi.active, 1000);
+        assert_eq!(*r.osd.lock().unwrap(), vec![OsdKind::Dpi { value: 1000, levels: 3, active: 1 }]);
+    }
+
+    #[test]
+    fn osd_respects_settings() {
+        let mut r = rig(|c| c.general.osd_dpi = false);
+        r.take_control();
+        r.press(7);
+        assert!(r.cmds().iter().any(|c| matches!(c, DevCmd::SetDpi(1000))));
+        assert!(r.osd.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn profile_cycle_shows_profile_osd() {
+        let mut r = rig(|c| c.apps[0].profiles.push(Profile::new("Second")));
+        r.take_control();
+        r.press(8);
+        assert_eq!(r.cfg.lock().unwrap().apps[0].active_profile, 1);
+        assert_eq!(*r.osd.lock().unwrap(), vec![OsdKind::Profile { name: "Desktop: Second".into() }]);
+    }
+
+    #[test]
+    fn dpi_flash_sets_zones_then_restores() {
+        let mut r = rig(|c| c.general.dpi_flash = true);
+        r.take_control();
+        r.press(7);
+        let zones: Vec<(u8, [u8; 11])> = r.cmds().into_iter().filter_map(|c| if let DevCmd::SetZone { zone, led } = c { Some((zone, led)) } else { None }).collect();
+        assert_eq!(zones, vec![(0, fixed_led([0x34, 0xC7, 0x59])), (1, fixed_led([0x34, 0xC7, 0x59]))]);
+        assert!(r.e.flash_until.is_some());
+        r.e.flash_until = Some(Instant::now() - Duration::from_millis(1));
+        assert!(r.e.expire_flash());
+        r.e.reconcile();
+        let own: Vec<(u8, [u8; 11])> = r.cmds().into_iter().filter_map(|c| if let DevCmd::SetZone { zone, led } = c { Some((zone, led)) } else { None }).collect();
+        let cfg = r.cfg.lock().unwrap();
+        let p = &cfg.apps[0].profiles[0];
+        assert_eq!(own, vec![(0, p.lighting[0].to_led()), (1, p.lighting[1].to_led())]);
+    }
+
+    #[test]
+    fn observer_never_takes_control() {
+        let mut r = rig(|_| {});
+        set_observer(true);
+        r.e.reconcile();
+        assert!(r.cmds().is_empty());
     }
 }

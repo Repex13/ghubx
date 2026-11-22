@@ -164,6 +164,14 @@ impl GhubApp {
         y += 22.0;
         para(ui, pos2(lx + 24.0, y - 6.0), 300.0, "Fast flicks of the wheel scroll further, like Razer's scroll acceleration.", Ts::new(Fam::Reg, 11.0, pal().muted).ls(0.4));
         y += 42.0;
+        text(ui, pos2(lx, y), Align2::LEFT_CENTER, "DPI FEEDBACK", t_small_label());
+        y += 24.0;
+        if checkbox(ui, pos2(lx, y - 7.0), "FLASH LIGHTING ON DPI CHANGE", cfg.general.dpi_flash, true, "ds-flash").clicked() {
+            self.edit(|c| c.general.dpi_flash = !c.general.dpi_flash);
+        }
+        y += 22.0;
+        para(ui, pos2(lx + 24.0, y - 6.0), 300.0, "Both lighting zones show the speed's color for a moment.", Ts::new(Fam::Reg, 11.0, pal().muted).ls(0.4));
+        y += 42.0;
         text(ui, pos2(lx, y), Align2::LEFT_CENTER, "PERFECT 180", t_small_label());
         para(ui, pos2(lx, y + 14.0), 330.0, "Calibrate and assign it from Assignments > ACTIONS.", Ts::new(Fam::Reg, 11.0, pal().muted).ls(0.4));
 

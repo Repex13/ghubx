@@ -59,11 +59,12 @@ pub struct Shot {
     done: Arc<Mutex<bool>>,
     /// Switch to this theme on frame 10 (exercises the live-switch path).
     pub switch_to: Option<String>,
+    ready_at: Option<u32>,
 }
 
 impl Shot {
     pub fn new(page: String, out: PathBuf) -> Self {
-        Self { page, out, started: Instant::now(), frames: 0, requested: false, done: Default::default(), switch_to: None }
+        Self { page, out, started: Instant::now(), frames: 0, requested: false, done: Default::default(), switch_to: None, ready_at: None }
     }
 }
 
@@ -302,7 +303,11 @@ impl GhubApp {
         for ev in events {
             match ev {
                 UiEvent::Device(d) => self.dev = d,
-                UiEvent::Buttons(m) => self.mask = m,
+                UiEvent::Buttons(m) => {
+                    if self.shot.is_none() {
+                        self.mask = m;
+                    }
+                }
                 UiEvent::Status(s) => {
                     if let Some(fg) = &s.foreground
                         && !self.seen_exes.contains(fg)
@@ -384,7 +389,10 @@ impl GhubApp {
         }
         let Some(s) = &mut self.shot else { return };
         let ready = (self.tex.front.is_some() && self.dev.connected) || s.started.elapsed() > Duration::from_secs(6);
-        if ready && s.frames > 20 && !s.requested {
+        if ready && s.ready_at.is_none() {
+            s.ready_at = Some(s.frames);
+        }
+        if s.ready_at.is_some_and(|r| s.frames >= r + 12) && s.frames > 20 && !s.requested {
             s.requested = true;
             let out = s.out.clone();
             let done = s.done.clone();
@@ -813,7 +821,8 @@ impl eframe::App for GhubApp {
         // Screenshots must not depend on where the real cursor is or on the clock.
         if self.shot.is_some() {
             raw.events.clear();
-            raw.time = Some(1000.0);
+            let after_ready = self.shot.as_ref().and_then(|s| s.ready_at.map(|r| s.frames.saturating_sub(r)));
+            raw.time = Some(1000.0 + after_ready.unwrap_or(0) as f64 * 0.05);
         }
     }
 

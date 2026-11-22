@@ -353,23 +353,24 @@ impl GhubApp {
         let top = ui.cursor().min;
         let cfg = self.cfg();
         let e = cfg.extras.clone();
-        let box_r = Rect::from_min_size(top, vec2(278.0, 300.0));
+        let per_profile = cfg.current().1.turn.is_some();
+        let cal = turn_for(cfg.current().1, &e);
+        let box_r = Rect::from_min_size(top, vec2(278.0, 366.0));
         ui.painter().rect_filled(box_r, CornerRadius::same(8), pal().surface_hi);
         let x = box_r.left() + 12.0;
         text(ui, pos2(x, box_r.top() + 12.0), Align2::LEFT_TOP, "PERFECT 180", Ts::new(Fam::Bold, 12.0, pal().text));
         para(ui, pos2(x, box_r.top() + 30.0), 254.0, "One press turns you 180°. Calibrate it from your in-game sensitivity.", Ts::new(Fam::Reg, 11.0, pal().muted).ls(0.4));
 
-        // game presets (2 x 2); a count that doesn't match the preset maths shows as CUSTOM
-        let custom = P180_GAMES.len() - 1;
-        let mut game = e.p180_game.min(custom);
-        if game != custom && p180_counts_for(P180_GAMES[game].1, e.p180_sens) != Some(e.p180_counts) {
-            game = custom;
+        // game presets (3 x 2); a count that doesn't match the preset maths shows as CUSTOM
+        let mut game = cal.game.min(P180_GAMES.len() - 1);
+        if game != P180_CUSTOM && p180_counts_for(P180_GAMES[game].1, cal.sens) != Some(cal.counts) {
+            game = P180_CUSTOM;
         }
         let shown_game = game;
         let mut recalc = false;
-        for (i, (name, _)) in P180_GAMES.iter().enumerate() {
-            let r = Rect::from_min_size(pos2(x + (i % 2) as f32 * 129.0, box_r.top() + 66.0 + (i / 2) as f32 * 26.0), vec2(125.0, 22.0));
-            if pill_sized(ui, r, name, game == i, 11.0, ("p180-game", i)).clicked() && game != i {
+        for (slot, &i) in P180_ORDER.iter().enumerate() {
+            let r = Rect::from_min_size(pos2(x + (slot % 3) as f32 * 86.0, box_r.top() + 66.0 + (slot / 3) as f32 * 26.0), vec2(82.0, 22.0));
+            if pill_sized(ui, r, P180_GAMES[i].0, game == i, 11.0, ("p180-game", i)).clicked() && game != i {
                 game = i;
                 recalc = true;
             }
@@ -380,9 +381,9 @@ impl GhubApp {
         // in-game sensitivity
         text(ui, pos2(x, row(0)), Align2::LEFT_CENTER, "IN-GAME SENS", t_small_label().color(if yaw > 0.0 { pal().label } else { pal().disabled }));
         let sens_r = Rect::from_min_size(pos2(x + 108.0, row(0) - 11.0), vec2(80.0, 22.0));
-        let mut sens_val = e.p180_sens;
+        let mut sens_val = cal.sens;
         if yaw > 0.0 {
-            if let Some(v) = number_field(ui, sens_r, &mut self.asg.p180_sens_text, &format!("{}", e.p180_sens), "p180-sens")
+            if let Some(v) = number_field(ui, sens_r, &mut self.asg.p180_sens_text, &format!("{}", cal.sens), "p180-sens")
                 && v > 0.0
             {
                 sens_val = v as f32;
@@ -395,16 +396,16 @@ impl GhubApp {
         // counts: exact field + log slider (100 .. 100 000)
         text(ui, pos2(x, row(1)), Align2::LEFT_CENTER, "COUNTS", t_small_label());
         let counts_r = Rect::from_min_size(pos2(x + 108.0, row(1) - 11.0), vec2(80.0, 22.0));
-        let mut counts = e.p180_counts;
+        let mut counts = cal.counts;
         let mut manual = false;
-        if let Some(v) = number_field(ui, counts_r, &mut self.asg.p180_counts_text, &e.p180_counts.to_string(), "p180-counts")
+        if let Some(v) = number_field(ui, counts_r, &mut self.asg.p180_counts_text, &cal.counts.to_string(), "p180-counts")
             && v >= 1.0
         {
             counts = v.round() as i32;
             manual = true;
         }
         let (lo, hi) = (100f32.ln(), 100_000f32.ln());
-        let mut t = ((e.p180_counts.max(100) as f32).ln() - lo) / (hi - lo);
+        let mut t = ((cal.counts.max(100) as f32).ln() - lo) / (hi - lo);
         let sr = Rect::from_min_size(pos2(x, row(2) - 6.0), vec2(254.0, 12.0));
         if slider(ui, sr, &mut t, 0.0..=1.0, "p180-c-log") {
             let v = (lo + t * (hi - lo)).exp();
@@ -412,30 +413,45 @@ impl GhubApp {
             manual = true;
         }
 
+        // angle
+        text(ui, pos2(x, row(3)), Align2::LEFT_CENTER, "ANGLE", t_small_label());
+        let mut angle = cal.angle as f32;
+        let angle_r = Rect::from_min_size(pos2(x + 60.0, row(3) - 6.0), vec2(140.0, 12.0));
+        let angle_changed = slider(ui, angle_r, &mut angle, 45.0..=360.0, "p180-angle");
+        let angle_deg = ((angle / 5.0).round() * 5.0).clamp(45.0, 360.0) as u16;
+        text(ui, pos2(box_r.right() - 12.0, row(3)), Align2::RIGHT_CENTER, &format!("{angle_deg}°"), t_body_bold());
+
         // speed
-        text(ui, pos2(x, row(3)), Align2::LEFT_CENTER, "SPEED", t_small_label());
+        text(ui, pos2(x, row(4)), Align2::LEFT_CENTER, "SPEED", t_small_label());
         let mut ms = e.p180_ms as f32;
-        let speed_r = Rect::from_min_size(pos2(x + 60.0, row(3) - 6.0), vec2(140.0, 12.0));
+        let speed_r = Rect::from_min_size(pos2(x + 60.0, row(4) - 6.0), vec2(140.0, 12.0));
         let ms_changed = slider(ui, speed_r, &mut ms, 0.0..=200.0, "p180-ms");
-        text(ui, pos2(box_r.right() - 12.0, row(3)), Align2::RIGHT_CENTER, &format!("{}ms", ms.round() as u16), t_body_bold());
+        text(ui, pos2(box_r.right() - 12.0, row(4)), Align2::RIGHT_CENTER, &format!("{}ms", ms.round() as u16), t_body_bold());
 
         if recalc && let Some(c) = p180_counts_for(yaw, sens_val) {
             counts = c;
         }
         // a hand-set count no longer matches the preset maths
         if manual && p180_counts_for(yaw, sens_val) != Some(counts) {
-            game = P180_GAMES.len() - 1;
+            game = P180_CUSTOM;
         }
-        if recalc || manual || ms_changed || game != shown_game {
+        if recalc || manual || ms_changed || angle_changed || game != shown_game {
+            let new = TurnCal { counts, game, sens: sens_val, angle: angle_deg };
+            let ms = ms.round() as u16;
             self.edit(|c| {
-                c.extras.p180_game = game;
-                c.extras.p180_sens = sens_val;
-                c.extras.p180_counts = counts;
-                c.extras.p180_ms = ms.round() as u16;
+                c.extras.p180_ms = ms;
+                if c.current_profile_mut().turn.is_some() {
+                    c.current_profile_mut().turn = Some(new);
+                } else {
+                    c.extras.p180_game = new.game;
+                    c.extras.p180_sens = new.sens;
+                    c.extras.p180_counts = new.counts;
+                    c.extras.p180_angle = new.angle;
+                }
             });
         }
 
-        let br = Rect::from_min_size(pos2(x, row(3) + 20.0), vec2(254.0, 26.0));
+        let br = Rect::from_min_size(pos2(x, row(4) + 20.0), vec2(254.0, 26.0));
         let label = match self.p180_at {
             Some(t) => format!("TURNING IN {}…", 3 - t.elapsed().as_secs().min(2)),
             None => "TEST IN 3 SECONDS".into(),
@@ -450,8 +466,12 @@ impl GhubApp {
                 let _ = self.eng.send(EngineMsg::TestPerfect180);
             }
         }
-        para(ui, pos2(x, br.bottom() + 8.0), 254.0, "Some games ignore injected input or don't allow turn binds in competitive play.", Ts::new(Fam::Reg, 10.0, pal().muted).ls(0.3));
-        ui.add_space(312.0);
+        if checkbox(ui, pos2(x, br.bottom() + 12.0), "USE FOR THIS PROFILE ONLY", per_profile, true, "p180-per-profile").clicked() {
+            let cur = TurnCal { counts, game, sens: sens_val, angle: angle_deg };
+            self.edit(|c| c.current_profile_mut().turn = if per_profile { None } else { Some(cur) });
+        }
+        para(ui, pos2(x, br.bottom() + 38.0), 254.0, "Some games ignore injected input or don't allow turn binds in competitive play.", Ts::new(Fam::Reg, 10.0, pal().muted).ls(0.3));
+        ui.add_space(378.0);
     }
 
     pub(crate) fn assign(&mut self, slot: usize, a: Assignment) {

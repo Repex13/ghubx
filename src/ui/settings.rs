@@ -66,7 +66,9 @@ impl GhubApp {
         let mut y = main.top() + 95.0;
         if row(ui, main, y, "Launch app on login", "Always start after logging in", g.launch_on_login, "s-login") {
             let on = !g.launch_on_login;
-            if crate::win::set_autostart(on, g.start_minimized) {
+            if crate::win::is_dev() {
+                self.say("Not available in dev mode");
+            } else if crate::win::set_autostart(on, g.start_minimized) {
                 self.edit(|c| c.general.launch_on_login = on);
             } else {
                 self.say("Couldn't update the Windows startup entry");
@@ -79,7 +81,9 @@ impl GhubApp {
         y += 52.0;
         if row(ui, main, y, "Start minimized", "Start in the tray when launched with Windows", g.start_minimized, "s-minimized") {
             let on = !g.start_minimized;
-            if !g.launch_on_login || crate::win::set_autostart(true, on) {
+            if crate::win::is_dev() {
+                self.say("Not available in dev mode");
+            } else if !g.launch_on_login || crate::win::set_autostart(true, on) {
                 self.edit(|c| c.general.start_minimized = on);
             } else {
                 self.say("Couldn't update the Windows startup entry");
@@ -170,7 +174,9 @@ impl GhubApp {
 
     fn appearance(&mut self, ui: &mut Ui, main: Rect) {
         let th = pal();
-        let ap = self.cfg().appearance;
+        let full = self.cfg();
+        let ap = full.appearance;
+        let cfg_general = full.general;
         text(ui, pos2(main.left(), main.top() + 36.0), Align2::LEFT_CENTER, "Appearance", Ts::new(Fam::Bold, 22.0, th.text).ls(0.0));
         let mut y = main.top() + 95.0;
         text(ui, pos2(main.left(), y), Align2::LEFT_CENTER, "THEME", t_section());
@@ -225,8 +231,16 @@ impl GhubApp {
             self.appear_hex = c.map(|c| format!("{:02X}{:02X}{:02X}", c[0], c[1], c[2])).unwrap_or_default();
             self.edit(|cfg| cfg.appearance.accent = c);
         }
+        let hex_id = ui.make_persistent_id("appear-hex");
+        if !ui.ctx().memory(|m| m.has_focus(hex_id)) {
+            let c = ap.accent.unwrap_or_else(|| {
+                let p = preset.primary;
+                [p.r(), p.g(), p.b()]
+            });
+            self.appear_hex = format!("{:02X}{:02X}{:02X}", c[0], c[1], c[2]);
+        }
         let mut hex = self.appear_hex.clone();
-        let te = egui::TextEdit::singleline(&mut hex).frame(egui::Frame::NONE).char_limit(6).font(Ts::new(Fam::Reg, 12.0, th.text).font()).text_color(th.text);
+        let te = egui::TextEdit::singleline(&mut hex).id(hex_id).frame(egui::Frame::NONE).char_limit(6).font(Ts::new(Fam::Reg, 12.0, th.text).font()).text_color(th.text);
         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(hr));
         let resp = child.put(Rect::from_min_max(pos2(hr.left() + 22.0, hr.top() + 5.0), hr.right_bottom() - vec2(6.0, 2.0)), te);
         if hex != self.appear_hex {
@@ -242,7 +256,7 @@ impl GhubApp {
             }
         }
         y = cy + 40.0;
-        if row(ui, main, y, "Match mouse lighting", "Use the logo lighting colour as the accent colour", ap.follow_lighting, "s-follow") {
+        if row(ui, main, y, "Match mouse lighting", "Use the logo lighting color as the accent color", ap.follow_lighting, "s-follow") {
             self.edit(|c| c.appearance.follow_lighting = !c.appearance.follow_lighting);
         }
         y += 50.0;
@@ -255,11 +269,28 @@ impl GhubApp {
         dark_button(ui, Rect::from_min_size(pos2(x + 122.0, y), vec2(110.0, 32.0)), "BUTTON", "pv-dark", true);
         switch(ui, pos2(x + 268.0, y + 16.0), true, th.primary, "pv-switch");
         checkbox(ui, pos2(x + 320.0, y + 9.0), "OPTION", true, true, "pv-check");
-        y += 52.0;
+        y += 44.0;
         let mut v = 0.6;
         slider(ui, Rect::from_min_size(pos2(x, y + 15.0), vec2(160.0, 2.0)), &mut v, 0.0..=1.0, "pv-slider");
         pill(ui, Rect::from_min_size(pos2(x + 196.0, y + 5.0), vec2(58.0, 22.0)), "10 MIN", true, "pv-pill-on");
         pill(ui, Rect::from_min_size(pos2(x + 262.0, y + 5.0), vec2(58.0, 22.0)), "30 MIN", false, "pv-pill-off");
+        y += 44.0;
+        ui.painter().line_segment([pos2(main.left(), y), pos2(main.right(), y)], Stroke::new(1.0, th.divider));
+        y += 24.0;
+        text(ui, pos2(main.left(), y), Align2::LEFT_CENTER, "ON-SCREEN DISPLAY", t_section());
+        if dark_button(ui, Rect::from_center_size(pos2(main.right() - 55.0, y), vec2(110.0, 26.0)), "PREVIEW", "osd-preview", true).clicked() {
+            let cfg = self.cfg();
+            let d = &cfg.current().1.dpi;
+            crate::osd::show(crate::osd::OsdKind::Dpi { value: d.active, levels: d.levels.len().min(255) as u8, active: d.active_index() as u8 });
+        }
+        y += 28.0;
+        if row(ui, main, y, "Show DPI changes", "A small pop-up shows the new DPI speed", cfg_general.osd_dpi, "s-osd-dpi") {
+            self.edit(|c| c.general.osd_dpi = !c.general.osd_dpi);
+        }
+        y += 52.0;
+        if row(ui, main, y, "Show profile changes", "A small pop-up shows the profile that became active", cfg_general.osd_profile, "s-osd-profile") {
+            self.edit(|c| c.general.osd_profile = !c.general.osd_profile);
+        }
     }
 
     fn diagnostics(&mut self, ui: &Ui, main: Rect) {

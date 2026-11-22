@@ -293,6 +293,18 @@ pub struct Profile {
     pub gshift: Vec<Assignment>,
     #[serde(default)]
     pub lighting: [Lighting; 2],
+    /// Perfect 180 calibration for this profile only (falls back to `Extras`).
+    #[serde(default)]
+    pub turn: Option<TurnCal>,
+}
+
+/// Perfect 180 calibration stored with a profile.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TurnCal {
+    pub counts: i32,
+    pub game: usize,
+    pub sens: f32,
+    pub angle: u16,
 }
 
 fn default_rate_ms() -> u8 {
@@ -312,6 +324,7 @@ impl Profile {
             base: default_slots(),
             gshift: default_slots(),
             lighting: Default::default(),
+            turn: None,
         }
     }
 
@@ -393,7 +406,28 @@ impl AppEntry {
 
 /// Perfect 180 calculator presets: (label, degrees per count at sensitivity 1.0).
 /// Custom = enter the count directly.
-pub const P180_GAMES: [(&str, f32); 4] = [("CS2/APEX", 0.022), ("VALORANT", 0.07), ("OW2/COD", 0.0066), ("CUSTOM", 0.0)];
+pub const P180_GAMES: [(&str, f32); 6] = [
+    ("CS2/APEX", 0.022),
+    ("VALORANT", 0.07),
+    ("OW2/COD", 0.0066),
+    ("CUSTOM", 0.0),
+    ("R6 SIEGE", 0.005_729_578),
+    ("FORTNITE", 0.005555),
+];
+/// Index of the "enter the count directly" preset.
+pub const P180_CUSTOM: usize = 3;
+/// Preset pills are shown in this order (custom last).
+pub const P180_ORDER: [usize; 6] = [0, 1, 2, 4, 5, P180_CUSTOM];
+
+/// Counts for a turn of `angle` degrees given the counts for 180°.
+pub fn turn_counts(counts: i32, angle: u16) -> i32 {
+    (counts as i64 * angle as i64 + 90).div_euclid(180) as i32
+}
+
+/// The calibration in force for a profile: its own, else the global one.
+pub fn turn_for(profile: &Profile, extras: &Extras) -> TurnCal {
+    profile.turn.clone().unwrap_or(TurnCal { counts: extras.p180_counts, game: extras.p180_game, sens: extras.p180_sens, angle: extras.p180_angle })
+}
 
 /// Mouse counts for a 180° turn: 180 / (yaw × in-game sensitivity).
 pub fn p180_counts_for(yaw: f32, sens: f32) -> Option<i32> {
@@ -411,6 +445,8 @@ pub struct Extras {
     pub p180_game: usize,
     /// In-game sensitivity used by the calculator.
     pub p180_sens: f32,
+    /// Turn angle in degrees (180 = a half turn).
+    pub p180_angle: u16,
     pub scroll_accel: bool,
     /// Extra wheel ticks per tick at full speed.
     pub scroll_boost: f32,
@@ -418,7 +454,7 @@ pub struct Extras {
 
 impl Default for Extras {
     fn default() -> Self {
-        Self { p180_counts: 8182, p180_ms: 60, p180_steps: 12, p180_game: 0, p180_sens: 1.0, scroll_accel: false, scroll_boost: 3.0 }
+        Self { p180_counts: 8182, p180_ms: 60, p180_steps: 12, p180_game: 0, p180_sens: 1.0, p180_angle: 180, scroll_accel: false, scroll_boost: 3.0 }
     }
 }
 
@@ -434,12 +470,32 @@ pub struct General {
     pub close_to_tray: bool,
     /// Autostart with `--minimized` so it starts in the tray.
     pub start_minimized: bool,
+    /// Pop-up with the new DPI speed after a DPI button.
+    pub osd_dpi: bool,
+    /// Pop-up with the profile name after a profile change.
+    pub osd_profile: bool,
+    /// Flash both lighting zones in the speed's color after a DPI button.
+    pub dpi_flash: bool,
 }
 
 impl Default for General {
     fn default() -> Self {
-        Self { launch_on_login: false, take_control: true, lighting_sleep_min: 0, close_to_tray: true, start_minimized: false }
+        Self {
+            launch_on_login: false,
+            take_control: true,
+            lighting_sleep_min: 0,
+            close_to_tray: true,
+            start_minimized: false,
+            osd_dpi: true,
+            osd_profile: true,
+            dpi_flash: false,
+        }
     }
+}
+
+/// Lighting flash color for a DPI level index (wraps after five).
+pub fn dpi_flash_color(level: usize) -> [u8; 3] {
+    [[0xFF, 0x3B, 0x30], [0x34, 0xC7, 0x59], [0x0A, 0x84, 0xFF], [0xFF, 0xD6, 0x0A], [0xBF, 0x5A, 0xF2]][level % 5]
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -646,6 +702,43 @@ impl OnboardProfile {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn p180_presets_keep_their_indices() {
+        let want = [("CS2/APEX", 0.022), ("VALORANT", 0.07), ("OW2/COD", 0.0066), ("CUSTOM", 0.0), ("R6 SIEGE", 0.005_729_578), ("FORTNITE", 0.005555)];
+        assert_eq!(P180_GAMES, want);
+        assert_eq!(P180_CUSTOM, 3);
+        assert_eq!(p180_counts_for(0.005_729_578, 50.0), Some(628));
+        assert_eq!(p180_counts_for(0.005555, 8.0), Some(4050));
+    }
+
+    #[test]
+    fn turn_counts_scale_with_angle() {
+        assert_eq!(turn_counts(8182, 180), 8182);
+        assert_eq!(turn_counts(8182, 90), 4091);
+        assert_eq!(turn_counts(8182, 360), 16364);
+        assert_eq!(turn_counts(1801, 45), 450);
+    }
+
+    #[test]
+    fn profile_turn_overrides_global() {
+        let extras = Extras { p180_counts: 5000, p180_game: 2, p180_sens: 2.5, p180_angle: 120, ..Default::default() };
+        let mut p = Profile::new("x");
+        assert_eq!(turn_for(&p, &extras), TurnCal { counts: 5000, game: 2, sens: 2.5, angle: 120 });
+        p.turn = Some(TurnCal { counts: 900, game: 4, sens: 0.5, angle: 90 });
+        assert_eq!(turn_for(&p, &extras), TurnCal { counts: 900, game: 4, sens: 0.5, angle: 90 });
+    }
+
+    #[test]
+    fn dpi_flash_colors() {
+        let want = [[0xFF, 0x3B, 0x30], [0x34, 0xC7, 0x59], [0x0A, 0x84, 0xFF], [0xFF, 0xD6, 0x0A], [0xBF, 0x5A, 0xF2]];
+        for (i, c) in want.iter().enumerate() {
+            assert_eq!(dpi_flash_color(i), *c);
+        }
+        assert_eq!(dpi_flash_color(5), dpi_flash_color(0));
+    }
+
     #[test]
     fn config_without_appearance_loads_defaults() {
         let c: Config = toml::from_str("apps = []").unwrap();
@@ -653,8 +746,6 @@ mod tests {
         assert_eq!(c.appearance.accent, None);
         assert!(!c.appearance.follow_lighting);
     }
-
-    use super::*;
 
     /// Sector 1 as read from the user's G502 HERO (probe round 8).
     fn real_sector1() -> [u8; 256] {

@@ -4,7 +4,9 @@
 //! is running, and `takeover-test` also while any `ghubx.exe` is running).
 use ghubx::device::{G502, MODE_HOST, MODE_ONBOARD};
 use ghubx::hidpp::Result;
+use ghubx::osd::{OsdKind, render};
 use ghubx::profile::{Effect, Lighting};
+use ghubx::ui::palette::palette_for;
 use ghubx::win;
 use hidapi::HidApi;
 use std::time::{Duration, Instant};
@@ -30,12 +32,64 @@ fn main() {
         }
         Some("takeover-test") => std::process::exit(takeover_test()),
         Some("release") => std::process::exit(release()),
+        Some("osd-png") => std::process::exit(osd_png(&std::env::args().skip(2).collect::<Vec<_>>())),
+        Some("osd") => std::process::exit(osd_show(&std::env::args().skip(2).collect::<Vec<_>>())),
         Some("listen") => listen(std::env::args().nth(2).and_then(|s| s.parse().ok()).unwrap_or(15)),
         Some(other) => {
             eprintln!("unknown subcommand {other:?}; use ghub-status, ghub-close, ghub-start, takeover-test, release or listen");
             std::process::exit(64);
         }
     }
+}
+
+fn parse_osd(args: &[String]) -> Option<OsdKind> {
+    match args.first()?.as_str() {
+        "dpi" => Some(OsdKind::Dpi { value: args.get(1)?.parse().ok()?, levels: args.get(2)?.parse().ok()?, active: args.get(3)?.parse().ok()? }),
+        "profile" => Some(OsdKind::Profile { name: args.get(1)?.clone() }),
+        _ => None,
+    }
+}
+
+fn flag_value(args: &[String], name: &str) -> Option<String> {
+    args.iter().position(|a| a == name).and_then(|i| args.get(i + 1).cloned())
+}
+
+/// `probe osd-png <out.png> dpi <value> <levels> <active>|profile <name> [--theme id] [--scale f]`
+fn osd_png(args: &[String]) -> i32 {
+    let (Some(out), Some(kind)) = (args.first(), parse_osd(&args[1.min(args.len())..])) else {
+        eprintln!("usage: probe osd-png <out.png> dpi <value> <levels> <active> | profile <name> [--theme <id>] [--scale <f>]");
+        return 64;
+    };
+    let theme = flag_value(args, "--theme").unwrap_or_else(|| "ghub-dark".into());
+    let scale: f32 = flag_value(args, "--scale").and_then(|s| s.parse().ok()).unwrap_or(1.0);
+    let img = render(&kind, &palette_for(&theme), scale);
+    let mut rgba = Vec::with_capacity(img.bgra.len());
+    for p in img.bgra.as_chunks::<4>().0 {
+        let a = p[3] as u32;
+        let un = |v: u8| ((v as u32 * 255 + a / 2).checked_div(a).unwrap_or(0)).min(255) as u8;
+        rgba.extend_from_slice(&[un(p[2]), un(p[1]), un(p[0]), p[3]]);
+    }
+    match image::save_buffer(out, &rgba, img.w, img.h, image::ExtendedColorType::Rgba8) {
+        Ok(()) => {
+            println!("wrote {out} ({}x{})", img.w, img.h);
+            0
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            1
+        }
+    }
+}
+
+/// `probe osd dpi <value> <levels> <active>|profile <name>`: show on screen for ~2 s.
+fn osd_show(args: &[String]) -> i32 {
+    let Some(kind) = parse_osd(args) else {
+        eprintln!("usage: probe osd dpi <value> <levels> <active> | profile <name>");
+        return 64;
+    };
+    ghubx::osd::show(kind);
+    std::thread::sleep(Duration::from_millis(2200));
+    0
 }
 
 fn print_status() {

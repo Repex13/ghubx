@@ -24,6 +24,13 @@ fn main() -> eframe::Result<()> {
     if let Some(s) = &mut shot {
         s.switch_to = flag("--switch-to");
     }
+    let dev = args.iter().any(|a| a == "--dev");
+    if dev && std::env::var_os("GHUBX_CONFIG_DIR").is_none() {
+        eprintln!("--dev needs GHUBX_CONFIG_DIR (a separate config folder) so it cannot touch the live settings");
+        std::process::exit(2);
+    }
+    ghubx::win::set_dev(dev);
+    ghubx::engine::set_observer(dev || shot.is_some());
     let minimized = args.iter().any(|a| a == "--minimized") && shot.is_none();
     if shot.is_none() && !ghubx::win::single_instance() {
         return Ok(());

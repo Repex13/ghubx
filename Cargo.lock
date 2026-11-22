@@ -1272,6 +1272,7 @@ dependencies = [
 name = "ghubx"
 version = "0.1.0"
 dependencies = [
+ "ab_glyph",
  "crossbeam-channel",
  "eframe",
  "egui",
