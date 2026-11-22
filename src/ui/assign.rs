@@ -28,6 +28,7 @@ pub struct AsgState {
     pub launch_path: String,
     pub p180_sens_text: String,
     pub p180_counts_text: String,
+    pub game_sens: Option<(usize, Option<crate::games::GameSens>)>,
 }
 
 pub struct MacroEditor {
@@ -452,13 +453,31 @@ impl GhubApp {
         ui.add_space(36.0);
     }
 
+    /// The edited app's game sensitivity, looked up once per app (and again after a click).
+    /// `--shot` never reads real files.
+    fn game_sens_for(&mut self, cfg: &Config) -> Option<crate::games::GameSens> {
+        let idx = cfg.current_app;
+        if self.asg.game_sens.as_ref().is_none_or(|(i, _)| *i != idx) {
+            let app = cfg.current().0;
+            let found = if self.shot.is_some() {
+                (app.name == "Counter-Strike 2").then_some(crate::games::GameSens { game: "Counter-Strike 2", preset: 0, sens: 0.51, yaw: 0.022, counts: 16043 })
+            } else {
+                crate::games::game_sensitivity(app.ghub_id.as_deref(), &app.name)
+            };
+            self.asg.game_sens = Some((idx, found));
+        }
+        self.asg.game_sens.as_ref().and_then(|(_, g)| g.clone())
+    }
+
     fn p180_block(&mut self, ui: &mut Ui) {
         let top = ui.cursor().min;
         let cfg = self.cfg();
         let e = cfg.extras.clone();
         let per_profile = cfg.current().1.turn.is_some();
         let cal = turn_for(cfg.current().1, &e);
-        let box_r = Rect::from_min_size(top, vec2(278.0, 366.0));
+        let game_sens = self.game_sens_for(&cfg);
+        let extra = if game_sens.is_some() { 16.0 } else { 0.0 };
+        let box_r = Rect::from_min_size(top, vec2(278.0, 366.0 + extra));
         ui.painter().rect_filled(box_r, CornerRadius::same(8), pal().surface_hi);
         let x = box_r.left() + 12.0;
         text(ui, pos2(x, box_r.top() + 12.0), Align2::LEFT_TOP, "PERFECT 180", Ts::new(Fam::Bold, 12.0, pal().text));
@@ -478,8 +497,22 @@ impl GhubApp {
                 recalc = true;
             }
         }
+        if let Some(gs) = &game_sens {
+            let matches = cal.game == gs.preset && (cal.sens - gs.sens).abs() < 1e-4 && cal.counts == gs.counts;
+            let line = Rect::from_min_size(pos2(x, box_r.top() + 117.0), vec2(254.0, 16.0));
+            let resp = (!matches).then(|| click(ui, line, "p180-use-game-sens"));
+            let (hovered, clicked) = resp.map_or((false, false), |r| (r.hovered(), r.clicked()));
+            let (verb, color) = if matches { ("MATCHES", pal().muted) } else { ("USE", if hovered { pal().primary_hover } else { pal().primary }) };
+            let label = format!("{verb} MY {} SENSITIVITY ({})", gs.game.to_uppercase(), gs.sens);
+            text(ui, pos2(x, line.center().y), Align2::LEFT_CENTER, &label, Ts::new(Fam::Bold, 10.0, color).ls(0.2));
+            if clicked {
+                let new = TurnCal { counts: gs.counts, game: gs.preset, sens: gs.sens, angle: cal.angle };
+                self.edit(|c| c.current_profile_mut().turn = Some(new));
+                self.asg.game_sens = None;
+            }
+        }
         let yaw = P180_GAMES[game].1;
-        let row = |i: usize| box_r.top() + 136.0 + i as f32 * 28.0;
+        let row = |i: usize| box_r.top() + 136.0 + extra + i as f32 * 28.0;
 
         // in-game sensitivity
         text(ui, pos2(x, row(0)), Align2::LEFT_CENTER, "IN-GAME SENS", t_small_label().color(if yaw > 0.0 { pal().label } else { pal().disabled }));
@@ -574,7 +607,7 @@ impl GhubApp {
             self.edit(|c| c.current_profile_mut().turn = if per_profile { None } else { Some(cur) });
         }
         para(ui, pos2(x, br.bottom() + 38.0), 254.0, "Some games ignore injected input or don't allow turn binds in competitive play.", Ts::new(Fam::Reg, 10.0, pal().muted).ls(0.3));
-        ui.add_space(378.0);
+        ui.add_space(378.0 + extra);
     }
 
     pub(crate) fn assign(&mut self, slot: usize, a: Assignment) {

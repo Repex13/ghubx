@@ -1,7 +1,7 @@
 //! G HUB's game database (read at runtime from the local G HUB install) and
 //! a scan for installed games (Steam, Epic, Riot, GOG, Ubisoft, registry rules).
 
-use crate::profile::{KeyCombo, MOD_ALT, MOD_CTRL, MOD_SHIFT, MOD_WIN};
+use crate::profile::{KeyCombo, MOD_ALT, MOD_CTRL, MOD_SHIFT, MOD_WIN, P180_CUSTOM, p180_counts_for};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -478,12 +478,111 @@ pub fn scan(db: Option<&GameDb>) -> Vec<Installed> {
     all
 }
 
+// ------------------------------------------------------------------ game sensitivity
+
+/// A game's own mouse sensitivity and what it means for Perfect 180 (read-only).
+#[derive(Clone, Debug, PartialEq)]
+pub struct GameSens {
+    pub game: &'static str,
+    /// Index into `P180_GAMES`.
+    pub preset: usize,
+    pub sens: f32,
+    pub yaw: f32,
+    pub counts: i32,
+}
+
+const CS2_ID: &str = "ca572e6a-c76d-4e34-bd64-3665c0d0b0c1";
+const VALORANT_ID: &str = "48574816-5d5d-4e5b-b616-9c3af2c15bbf";
+
+/// `(sensitivity, m_yaw)` from `cs2_user_convars_0_slot0.vcfg`; `m_yaw` defaults to 0.022.
+pub fn parse_cs2_convars(text: &str) -> Option<(f32, f32)> {
+    let (mut sens, mut yaw) = (None, None);
+    for l in text.lines() {
+        let q = quoted(l);
+        if q.len() >= 2 {
+            match q[0].as_str() {
+                "sensitivity" => sens = q[1].parse::<f32>().ok(),
+                "m_yaw" => yaw = q[1].parse::<f32>().ok(),
+                _ => {}
+            }
+        }
+    }
+    Some((sens?, yaw.unwrap_or(0.022)))
+}
+
+/// `MouseSensitivity` from `RiotUserSettings.ini`, rounded to 3 decimals.
+pub fn parse_valorant_sens(text: &str) -> Option<f32> {
+    let v = text.lines().find_map(|l| l.trim().strip_prefix("EAresFloatSettingName::MouseSensitivity="))?;
+    let v: f32 = v.trim().parse().ok()?;
+    Some((v * 1000.0).round() / 1000.0)
+}
+
+fn newest(paths: impl IntoIterator<Item = PathBuf>) -> Option<PathBuf> {
+    paths.into_iter().filter_map(|p| Some((std::fs::metadata(&p).ok()?.modified().ok()?, p))).max_by_key(|(t, _)| *t).map(|(_, p)| p)
+}
+
+fn dirs_in(dir: &Path) -> Vec<PathBuf> {
+    std::fs::read_dir(dir).into_iter().flatten().flatten().map(|e| e.path()).collect()
+}
+
+fn cs2_file() -> Option<PathBuf> {
+    let steam = reg_any_view(HKEY_CURRENT_USER, r"Software\Valve\Steam", "SteamPath")?.replace('/', "\\");
+    newest(dirs_in(&Path::new(&steam).join("userdata")).into_iter().map(|u| u.join(r"730\local\cfg\cs2_user_convars_0_slot0.vcfg")).filter(|p| p.is_file()))
+}
+
+fn valorant_file() -> Option<PathBuf> {
+    let root = PathBuf::from(std::env::var("LOCALAPPDATA").ok()?).join(r"VALORANT\Saved\Config");
+    newest(dirs_in(&root).into_iter().map(|c| c.join(r"Windows\RiotUserSettings.ini")).filter(|p| p.is_file()))
+}
+
+/// Sensitivity of a supported game plus the file it came from (read-only).
+pub fn game_sensitivity_file(ghub_id: Option<&str>, name: &str) -> Option<(GameSens, PathBuf)> {
+    if ghub_id == Some(CS2_ID) || name == "Counter-Strike 2" {
+        let file = cs2_file()?;
+        let (sens, yaw) = parse_cs2_convars(&std::fs::read_to_string(&file).ok()?)?;
+        let preset = if (yaw - 0.022).abs() < 1e-6 { 0 } else { P180_CUSTOM };
+        return Some((GameSens { game: "Counter-Strike 2", preset, sens, yaw, counts: p180_counts_for(yaw, sens)? }, file));
+    }
+    if ghub_id == Some(VALORANT_ID) || name.eq_ignore_ascii_case("Valorant") {
+        let file = valorant_file()?;
+        let sens = parse_valorant_sens(&std::fs::read_to_string(&file).ok()?)?;
+        return Some((GameSens { game: "Valorant", preset: 1, sens, yaw: 0.07, counts: p180_counts_for(0.07, sens)? }, file));
+    }
+    None
+}
+
+pub fn game_sensitivity(ghub_id: Option<&str>, name: &str) -> Option<GameSens> {
+    game_sensitivity_file(ghub_id, name).map(|(g, _)| g)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn toks(t: &[&str]) -> Vec<String> {
         t.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn parses_cs2_convars() {
+        let t = "\"config\"\n{\n\t\"convars\"\n\t{\n\t\t\"m_pitch\"\t\t\"0.022\"\n\t\t\"m_yaw\"\t\t\"0.022\"\n\t\t\"sensitivity\"\t\t\"0.51\"\n\t\t\"zoom_sensitivity_ratio\"\t\t\"1\"\n\t}\n}\n";
+        assert_eq!(parse_cs2_convars(t), Some((0.51, 0.022)));
+        let no_yaw: String = t.lines().filter(|l| !l.contains("m_yaw")).collect::<Vec<_>>().join("\n");
+        assert_eq!(parse_cs2_convars(&no_yaw), Some((0.51, 0.022)));
+        assert_eq!(parse_cs2_convars("\"zoom_sensitivity_ratio\"\t\t\"1\"\n"), None);
+    }
+
+    #[test]
+    fn parses_valorant_sens() {
+        let t = "[/Script/X]\nFoo=1\nEAresFloatSettingName::MouseSensitivity=0.159999996\nBar=2\n";
+        assert_eq!(parse_valorant_sens(t), Some(0.16));
+        assert_eq!(parse_valorant_sens("Foo=1\n"), None);
+    }
+
+    #[test]
+    fn sensitivity_gives_half_turn_counts() {
+        assert_eq!(p180_counts_for(0.022, 0.51), Some(16043));
+        assert_eq!(p180_counts_for(0.07, 0.16), Some(16071));
     }
 
     #[test]

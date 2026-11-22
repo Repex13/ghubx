@@ -363,14 +363,20 @@ impl GhubApp {
             x = cr.right() + 8.0;
         }
         if let Some(game) = chosen {
+            let sens = crate::games::game_sensitivity(game.ghub_id.as_deref(), &game.name);
+            let toast = match &sens {
+                Some(g) => format!("Added \u{2014} Perfect 180 is calibrated from your {} sensitivity ({})", g.game, g.sens),
+                None => "Added \u{2014} its profile activates when the game is in front".to_string(),
+            };
             self.edit(|c| {
                 let mut base = c.apps[0].profile().clone();
                 base.name = "Default".into();
+                base.turn = sens.as_ref().map(|g| TurnCal { counts: g.counts, game: g.preset, sens: g.sens, angle: 180 });
                 c.apps.push(AppEntry { name: game.name.clone(), exe: None, dir: Some(game.dir.clone()), ghub_id: game.ghub_id.clone(), enabled: true, profiles: vec![base], active_profile: 0, macros: c.apps[0].macros.clone() });
                 c.profile_switching = true;
             });
             self.prof.adding = Some(s);
-            self.say("Added \u{2014} its profile activates when the game is in front");
+            self.say(toast);
         } else if cancel {
             self.prof.adding = None;
         } else if add && !s.trim().is_empty() {

@@ -225,7 +225,7 @@ impl GhubApp {
     fn prepare_shot(&mut self, page: &str) {
         self.route = match page {
             "home" | "dropdown" => Route::Home,
-            "assign" | "assign2" | "gshift" | "macro" | "macroedit" | "macrorec" | "select" | "keys" | "actions" | "gamecmds" => Route::Device(DevTab::Assignments),
+            "assign" | "assign2" | "gshift" | "macro" | "macroedit" | "macrorec" | "select" | "keys" | "actions" | "gamecmds" | "p180game" => Route::Device(DevTab::Assignments),
             "sens" => Route::Device(DevTab::Sensitivity),
             "light" | "fixed" => Route::Device(DevTab::Lighting),
             "devset" | "onboard" => Route::DeviceSettings,
@@ -241,7 +241,7 @@ impl GhubApp {
         self.asg.tab = match page {
             "macro" | "macroedit" | "macrorec" => 3,
             "keys" => 1,
-            "actions" => 2,
+            "actions" | "p180game" => 2,
             _ => 0,
         };
         if page == "select" {
@@ -278,7 +278,7 @@ impl GhubApp {
         if page == "addgame" {
             self.prof.open_add();
         }
-        if page == "gamecmds" {
+        if page == "gamecmds" || page == "p180game" {
             let ghub_id = crate::games::db_blocking().and_then(|d| d.by_name("Counter-Strike 2")).map(|g| g.id.clone());
             let mut c = self.cfg.lock().unwrap();
             c.apps.push(crate::profile::AppEntry { name: "Counter-Strike 2".into(), ghub_id, ..crate::profile::AppEntry::desktop() });

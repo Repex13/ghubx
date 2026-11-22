@@ -33,6 +33,14 @@ fn main() {
         Some("takeover-test") => std::process::exit(takeover_test()),
         Some("release") => std::process::exit(release()),
         Some("games") => std::process::exit(games()),
+        Some("game-sens") => {
+            for (name, id) in [("Counter-Strike 2", Some("ca572e6a-c76d-4e34-bd64-3665c0d0b0c1")), ("Valorant", Some("48574816-5d5d-4e5b-b616-9c3af2c15bbf"))] {
+                match ghubx::games::game_sensitivity_file(id, name) {
+                    Some((g, file)) => println!("{name}: file {} | sensitivity {} | yaw {} | preset {} | {} counts for 180", file.display(), g.sens, g.yaw, ghubx::profile::P180_GAMES[g.preset].0, g.counts),
+                    None => println!("{name}: not found"),
+                }
+            }
+        }
         Some("onboard") => std::process::exit(onboard_cmd()),
         Some("save-dialog") => println!("{:?}", win::save_file(0, "Export a game or app", "test.ghubx", "GHUB-X profile", "*.ghubx")),
         Some("ghub-autostart") => println!("startup_approved(LGHUB) = {:?}", win::startup_approved("LGHUB")),
