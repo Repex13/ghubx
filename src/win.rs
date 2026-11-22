@@ -3,7 +3,7 @@
 //! scroll acceleration.
 
 use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 use windows::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::Graphics::Gdi::{CreateBitmap, DeleteObject};
@@ -287,6 +287,10 @@ pub fn set_autostart(on: bool, minimized: bool) -> bool {
 pub const WM_TRAY: u32 = WM_APP + 1;
 pub const WM_TRAY_SHOW: u32 = WM_APP + 2;
 pub const WM_TRAY_QUIT: u32 = WM_APP + 3;
+/// Tray-menu profile pick: `wParam` is the profile index.
+pub const WM_TRAY_PROFILE: u32 = WM_APP + 4;
+/// Re-read [`PROFILE_HOTKEY`] and (un)register it — posted by [`set_profile_hotkey`].
+pub const WM_TRAY_HOTKEY: u32 = WM_APP + 5;
 static DEV: AtomicBool = AtomicBool::new(false);
 
 /// `--dev`: a second, harmless instance with its own mutex, tray class and tooltip.
@@ -304,6 +308,10 @@ fn tray_class() -> PCWSTR {
 const TRAY_ID: u32 = 1;
 const MENU_OPEN: usize = 1;
 const MENU_QUIT: usize = 2;
+/// First menu id of the profile list in the tray quick-menu.
+const MENU_PROFILE_BASE: usize = 100;
+/// `RegisterHotKey` id of the profile-cycle hotkey on the tray window.
+const HOTKEY_ID: i32 = 1;
 const ICON_SIZE: usize = 32;
 
 static MAIN_HWND: AtomicIsize = AtomicIsize::new(0);
@@ -314,10 +322,113 @@ static TRAY_READY: AtomicBool = AtomicBool::new(false);
 static HIDDEN: AtomicBool = AtomicBool::new(false);
 static BALLOON_SHOWN: AtomicBool = AtomicBool::new(false);
 static CALLBACKS: OnceLock<TrayCallbacks> = OnceLock::new();
+/// Channel into the UI for tray picks and the profile hotkey (set at startup).
+static TRAY_UI: OnceLock<crossbeam_channel::Sender<crate::engine::UiEvent>> = OnceLock::new();
+/// The configured profile-cycle hotkey; applied on the tray thread.
+static PROFILE_HOTKEY: Mutex<Option<crate::profile::Hotkey>> = Mutex::new(None);
 
 struct TrayCallbacks {
     repaint: Box<dyn Fn() + Send + Sync>,
     quit: Box<dyn Fn() + Send + Sync>,
+}
+
+/// Snapshot the tray quick-menu renders (filled by the UI; see [`set_tray_info`]).
+#[derive(Default, Clone)]
+pub struct TrayInfo {
+    pub control: TrayControl,
+    pub dpi: u16,
+    /// `(index, name)` of the current app's profiles.
+    pub profiles: Vec<(usize, String)>,
+    pub active_profile: usize,
+}
+
+/// Who drives the mouse right now, as shown by the menu's grayed first line.
+#[derive(Default, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TrayControl {
+    #[default]
+    NoDevice,
+    GHub,
+    Onboard,
+    Ghubx,
+}
+
+impl TrayControl {
+    /// The grayed top line of the tray quick-menu.
+    pub fn label(self, dpi: u16) -> String {
+        match self {
+            Self::NoDevice => "Connect your G502 HERO".into(),
+            Self::GHub => "G HUB in control".into(),
+            Self::Onboard => "On-board profile".into(),
+            Self::Ghubx => format!("GHUB-X controls \u{b7} {dpi} DPI"),
+        }
+    }
+}
+
+static TRAY_INFO: Mutex<TrayInfo> = Mutex::new(TrayInfo { control: TrayControl::NoDevice, dpi: 0, profiles: Vec::new(), active_profile: 0 });
+
+/// Update the snapshot the next right-click menu is built from (no tray = dropped).
+pub fn set_tray_info(info: TrayInfo) {
+    if tray_ready() {
+        *TRAY_INFO.lock().unwrap() = info;
+    }
+}
+
+/// Hand the tray the channel into the UI (once, at startup) so menu picks and
+/// the global hotkey can send `UiEvent::Tray*` events.
+pub fn set_tray_ui_sender(tx: crossbeam_channel::Sender<crate::engine::UiEvent>) {
+    let _ = TRAY_UI.set(tx);
+}
+
+fn tray_send(ev: crate::engine::UiEvent) {
+    if let Some(tx) = TRAY_UI.get() {
+        let _ = tx.send(ev);
+    }
+}
+
+/// Our modifier bits (`profile::MOD_CTRL`=1, `MOD_SHIFT`=2, `MOD_ALT`=4,
+/// `MOD_WIN`=8) as Win32 `RegisterHotKey` flags; `MOD_NOREPEAT` is always set.
+pub fn hotkey_flags(mods: u8) -> u32 {
+    let mut f = MOD_NOREPEAT.0;
+    if mods & crate::profile::MOD_CTRL != 0 {
+        f |= MOD_CONTROL.0;
+    }
+    if mods & crate::profile::MOD_SHIFT != 0 {
+        f |= MOD_SHIFT.0;
+    }
+    if mods & crate::profile::MOD_ALT != 0 {
+        f |= MOD_ALT.0;
+    }
+    if mods & crate::profile::MOD_WIN != 0 {
+        f |= MOD_WIN.0;
+    }
+    f
+}
+
+/// Apply the stored hotkey on the tray thread: `RegisterHotKey` must be called
+/// by the thread that owns `hwnd`, so other threads ask via `WM_TRAY_HOTKEY`.
+/// `--dev` never registers (observer mode grabs no global keys).
+fn apply_profile_hotkey(hwnd: HWND) {
+    unsafe {
+        let _ = UnregisterHotKey(Some(hwnd), HOTKEY_ID);
+        if is_dev() {
+            return;
+        }
+        if let Some(hk) = *PROFILE_HOTKEY.lock().unwrap() {
+            let _ = RegisterHotKey(Some(hwnd), HOTKEY_ID, HOT_KEY_MODIFIERS(hotkey_flags(hk.mods)), hk.vk as u32);
+        }
+    }
+}
+
+/// Store the profile-cycle hotkey and (re)register it on the tray window;
+/// `None` removes it. Called at startup and whenever Settings edits it.
+pub fn set_profile_hotkey(hk: Option<crate::profile::Hotkey>) {
+    *PROFILE_HOTKEY.lock().unwrap() = hk;
+    let h = TRAY_HWND.load(Ordering::Relaxed);
+    if h != 0 {
+        unsafe {
+            let _ = PostMessageW(Some(HWND(h as *mut _)), WM_TRAY_HOTKEY, WPARAM(0), LPARAM(0));
+        }
+    }
 }
 
 /// Square RGBA app icon (tray 32, window 64): a #1196FF disc with a white X,
@@ -543,6 +654,20 @@ fn tray_quit() {
 fn tray_menu(hwnd: HWND) {
     unsafe {
         let Ok(menu) = CreatePopupMenu() else { return };
+        // Quick-menu: grayed status line, the current app's profiles (active one
+        // checked), then Open/Quit. No profiles -> the old two-item menu.
+        let info = TRAY_INFO.lock().unwrap().clone();
+        if !info.profiles.is_empty() {
+            let head: Vec<u16> = info.control.label(info.dpi).encode_utf16().chain([0]).collect();
+            let _ = AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, PCWSTR(head.as_ptr()));
+            let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+            for (i, name) in &info.profiles {
+                let text: Vec<u16> = name.encode_utf16().chain([0]).collect();
+                let flags = if *i == info.active_profile { MF_STRING | MF_CHECKED } else { MF_STRING };
+                let _ = AppendMenuW(menu, flags, MENU_PROFILE_BASE + *i, PCWSTR(text.as_ptr()));
+            }
+            let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+        }
         let _ = AppendMenuW(menu, MF_STRING, MENU_OPEN, w!("Open GHUB-X"));
         let _ = AppendMenuW(menu, MF_STRING, MENU_QUIT, w!("Quit GHUB-X"));
         let mut pt = POINT::default();
@@ -554,6 +679,9 @@ fn tray_menu(hwnd: HWND) {
         match cmd.0 as usize {
             MENU_OPEN => show_main(),
             MENU_QUIT => tray_quit(),
+            n if n >= MENU_PROFILE_BASE => {
+                let _ = PostMessageW(Some(hwnd), WM_TRAY_PROFILE, WPARAM(n - MENU_PROFILE_BASE), LPARAM(0));
+            }
             _ => {}
         }
     }
@@ -575,6 +703,20 @@ unsafe extern "system" fn tray_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
         }
         WM_TRAY_QUIT => {
             tray_quit();
+            LRESULT(0)
+        }
+        WM_TRAY_PROFILE => {
+            tray_send(crate::engine::UiEvent::TrayProfile(wp.0));
+            LRESULT(0)
+        }
+        WM_TRAY_HOTKEY => {
+            apply_profile_hotkey(hwnd);
+            LRESULT(0)
+        }
+        WM_HOTKEY => {
+            if wp.0 == HOTKEY_ID as usize {
+                tray_send(crate::engine::UiEvent::TrayCycleProfile);
+            }
             LRESULT(0)
         }
         WM_ENDSESSION => {
@@ -631,6 +773,8 @@ pub fn start_tray(
             TRAY_ICON.store(icon.0 as isize, Ordering::Relaxed);
         }
         add_tray_icon(hwnd);
+        // Register the stored profile hotkey on this thread (the window's owner).
+        apply_profile_hotkey(hwnd);
         TRAY_READY.store(true, Ordering::Relaxed);
         let _ = ready_tx.send(());
         let mut m = MSG::default();
@@ -1060,5 +1204,26 @@ mod tests {
             let _ = RegDeleteKeyValueW(HKEY_CURRENT_USER, &HSTRING::from(RUN_APPROVED), &HSTRING::from(name));
         }
         assert_eq!(startup_approved("GHUBX-missing-entry"), None);
+    }
+
+    #[test]
+    fn hotkey_flags_maps_mod_bits() {
+        use crate::profile as p;
+        // Win32 MOD_* names are already in scope via `super::*`; `p::` is ours.
+        assert_eq!(hotkey_flags(0), MOD_NOREPEAT.0);
+        assert_eq!(hotkey_flags(p::MOD_CTRL), MOD_NOREPEAT.0 | MOD_CONTROL.0);
+        assert_eq!(hotkey_flags(p::MOD_SHIFT | p::MOD_ALT), MOD_NOREPEAT.0 | MOD_SHIFT.0 | MOD_ALT.0);
+        assert_eq!(hotkey_flags(p::MOD_WIN), MOD_NOREPEAT.0 | MOD_WIN.0);
+        let all = p::MOD_CTRL | p::MOD_SHIFT | p::MOD_ALT | p::MOD_WIN;
+        assert_eq!(hotkey_flags(all), MOD_NOREPEAT.0 | MOD_CONTROL.0 | MOD_SHIFT.0 | MOD_ALT.0 | MOD_WIN.0);
+    }
+
+    #[test]
+    fn tray_control_labels() {
+        assert_eq!(TrayControl::Ghubx.label(600), "GHUB-X controls \u{b7} 600 DPI");
+        assert_eq!(TrayControl::GHub.label(1600), "G HUB in control");
+        assert_eq!(TrayControl::Onboard.label(0), "On-board profile");
+        assert_eq!(TrayControl::NoDevice.label(0), "Connect your G502 HERO");
+        assert_eq!(TrayControl::default(), TrayControl::NoDevice);
     }
 }

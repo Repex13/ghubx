@@ -158,6 +158,8 @@ pub struct GhubApp {
     pub(crate) p180_at: Option<Instant>,
     pub(crate) list_view: bool,
     pub(crate) import_armed: Option<Instant>,
+    /// The General hotkey field is armed: the next key event is captured.
+    pub(crate) hotkey_capture: bool,
     pub(crate) appear_hex: String,
     pub(crate) ghub_autostart: Option<Option<bool>>,
     pub(crate) onboard: Vec<crate::profile::OnboardSlot>,
@@ -258,6 +260,7 @@ impl GhubApp {
             p180_at: None,
             list_view: false,
             import_armed: None,
+            hotkey_capture: false,
             appear_hex: String::new(),
             ghub_autostart: None,
             onboard: Vec::new(),
@@ -466,6 +469,31 @@ impl GhubApp {
         }
         self.dirty_at = Some(Instant::now());
         let _ = self.eng.send(EngineMsg::ConfigChanged);
+        self.push_tray();
+    }
+
+    /// Refresh the snapshot the tray quick-menu is built from (control state,
+    /// DPI, the current app's profile list). No-op without a tray.
+    fn push_tray(&self) {
+        if !crate::win::tray_ready() {
+            return;
+        }
+        let cfg = self.cfg();
+        let a = cfg.current().0;
+        crate::win::set_tray_info(crate::win::TrayInfo {
+            control: if !self.dev.connected {
+                crate::win::TrayControl::NoDevice
+            } else if self.status.ghub_running {
+                crate::win::TrayControl::GHub
+            } else if self.status.controlled {
+                crate::win::TrayControl::Ghubx
+            } else {
+                crate::win::TrayControl::Onboard
+            },
+            dpi: self.dev.dpi,
+            profiles: a.profiles.iter().enumerate().map(|(i, p)| (i, p.name.clone())).collect(),
+            active_profile: a.active_profile,
+        });
     }
 
     pub(crate) fn cfg(&self) -> Config {
@@ -589,6 +617,7 @@ impl GhubApp {
                         self.onboard.clear();
                     }
                     self.dev = d;
+                    self.push_tray();
                 }
                 UiEvent::Onboard(v) => self.onboard = v,
                 UiEvent::OnboardWritten(r) => {
@@ -615,6 +644,25 @@ impl GhubApp {
                     }
                     self.notify_status(&s);
                     self.status = s;
+                    self.push_tray();
+                }
+                UiEvent::TrayProfile(i) => {
+                    self.edit(|c| {
+                        let ca = c.current_app;
+                        if let Some(a) = c.apps.get_mut(ca) {
+                            a.active_profile = i.min(a.profiles.len().saturating_sub(1));
+                        }
+                    });
+                }
+                UiEvent::TrayCycleProfile => {
+                    self.edit(|c| {
+                        let ca = c.current_app;
+                        if let Some(a) = c.apps.get_mut(ca)
+                            && !a.profiles.is_empty()
+                        {
+                            a.active_profile = (a.active_profile + 1) % a.profiles.len();
+                        }
+                    });
                 }
                 UiEvent::Log(l) => {
                     self.log.push_front(l);

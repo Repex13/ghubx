@@ -78,6 +78,7 @@ fn main() {
         Some("osd") => std::process::exit(osd_show(&std::env::args().skip(2).collect::<Vec<_>>())),
         Some("listen") => listen(std::env::args().nth(2).and_then(|s| s.parse().ok()).unwrap_or(15)),
         Some("update-check") => std::process::exit(update_check_cmd()),
+        Some("update-fetch") => std::process::exit(update_fetch_cmd()),
         Some(other) => {
             eprintln!("unknown subcommand {other:?}; use ghub-status, ghub-close, ghub-start, takeover-test, release or listen");
             std::process::exit(64);
@@ -103,6 +104,35 @@ fn update_check_cmd() -> i32 {
             println!("latest release: none — the repo has no releases yet (GitHub returned 404)");
             println!("local version: {}", env!("CARGO_PKG_VERSION"));
             println!("update available: no");
+            0
+        }
+        Err(e) => {
+            eprintln!("update check failed: {e}");
+            1
+        }
+    }
+}
+
+/// `probe update-fetch` — download the latest release's exe into the normal
+/// updates dir and verify its SHA-256. The only probe that downloads; it never
+/// touches the mouse.
+fn update_fetch_cmd() -> i32 {
+    match ghubx::update::latest_release() {
+        Ok(Some(r)) => match ghubx::update::fetch_release(&r) {
+            Ok(path) => {
+                let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                println!("tag: {}", r.tag);
+                println!("exe: {size} bytes at {}", path.display());
+                println!("sha256 ok");
+                0
+            }
+            Err(e) => {
+                eprintln!("fetch failed: {e}");
+                1
+            }
+        },
+        Ok(None) => {
+            println!("no releases yet");
             0
         }
         Err(e) => {

@@ -864,6 +864,23 @@ def notify_bell():
     must(gone == (0, 0, 0) and dot != gone, f"unread dot: open {dot} after {gone}")
 
 
+@scenario
+def hotkey_set():
+    # Settings > General: the capture field stores vk=F5 mods=0 (scripts send no
+    # modifiers); the run is "(tray only)" but capture still writes the config.
+    res = run_script("hotkey_set", ["wait 1500", GEAR, SETTLE, NAV_GENERAL, SETTLE,
+                                    "click 860 394",  # hotkey capture field
+                                    SETTLE, "key F5", SETTLE])
+    ok_run(res)
+    must(res.cfg["general"].get("profile_hotkey") == {"mods": 0, "vk": 116}, res.cfg["general"])
+    cfg = seed_config().replace("dpi_flash = false", "dpi_flash = false\nprofile_hotkey = { mods = 0, vk = 116 }")
+    res = run_script("hotkey_clear", ["wait 1500", GEAR, SETTLE, NAV_GENERAL, SETTLE,
+                                      "click 961 394",  # X clears the hotkey
+                                      SETTLE], config=cfg)
+    ok_run(res)
+    must("profile_hotkey" not in res.cfg["general"], res.cfg["general"])
+
+
 def main():
     names = sys.argv[1:] or list(SCENARIOS)
     failed = 0

@@ -113,6 +113,8 @@ impl GhubApp {
             }
         }
         y += 44.0;
+        self.hotkey_row(ui, main, y);
+        y += 52.0;
         ui.painter().line_segment([pos2(main.left(), y), pos2(main.right(), y)], Stroke::new(1.0, pal().divider));
         y += 26.0;
         text(ui, pos2(main.left(), y), Align2::LEFT_CENTER, "Persistent Profile", Ts::new(Fam::Bold, 20.0, pal().text).ls(0.0));
@@ -126,6 +128,75 @@ impl GhubApp {
         }
         let pr = para(ui, pos2(main.left(), dd.bottom() + 14.0), main.width(), "This Persistent Profile overrides all other profiles in all games and apps until you set it back to None.", Ts::new(Fam::Reg, 13.0, pal().label).ls(0.3));
         self.app_section(ui, main, pr.bottom() + 30.0);
+    }
+
+    /// General's PROFILE SWITCH HOTKEY row: a capture field (click to arm; the
+    /// next key event becomes `general.profile_hotkey`) and an X to clear. The
+    /// Win32 hotkey lives on the tray window, so runs without one show
+    /// "(tray only)"; `--shot` never arms it so the pages stay deterministic.
+    fn hotkey_row(&mut self, ui: &Ui, main: Rect, y: f32) {
+        let hk = self.cfg().general.profile_hotkey;
+        text(ui, pos2(main.left(), y), Align2::LEFT_CENTER, "Profile switch hotkey", Ts::new(Fam::Bold, 15.0, pal().text).ls(0.2));
+        let sub = if crate::win::tray_ready() { "Cycle this app's profiles while GHUB-X runs in the tray" } else { "Cycle this app's profiles (tray only)" };
+        text(ui, pos2(main.left(), y + 22.0), Align2::LEFT_CENTER, sub, Ts::new(Fam::Reg, 13.0, pal().label).ls(0.3));
+        let fr = Rect::from_min_size(pos2(main.right() - 190.0, y - 4.0), vec2(148.0, 30.0));
+        let xr = Rect::from_min_size(pos2(main.right() - 30.0, y - 4.0), vec2(30.0, 30.0));
+        if click(ui, xr, "hk-clear").clicked() && hk.is_some() {
+            self.hotkey_capture = false;
+            self.edit(|c| c.general.profile_hotkey = None);
+            crate::win::set_profile_hotkey(None);
+            self.say("Profile hotkey cleared");
+        }
+        let xc = xr.center();
+        ui.painter().line_segment([xc + vec2(-5.0, -5.0), xc + vec2(5.0, 5.0)], Stroke::new(1.6, pal().label));
+        ui.painter().line_segment([xc + vec2(-5.0, 5.0), xc + vec2(5.0, -5.0)], Stroke::new(1.6, pal().label));
+        let armed = self.hotkey_capture;
+        let label = if armed {
+            "press a combo\u{2026}".into()
+        } else {
+            hk.map(|h| crate::catalog::combo_name(crate::profile::KeyCombo { vk: h.vk, mods: h.mods })).unwrap_or_else(|| "None".into())
+        };
+        let border = if armed { pal().primary } else { pal().divider };
+        ui.painter().rect_filled(fr, CornerRadius::same(6), pal().surface);
+        ui.painter().rect_stroke(fr, CornerRadius::same(6), Stroke::new(1.0, border), StrokeKind::Inside);
+        text(ui, fr.center(), Align2::CENTER_CENTER, &label, Ts::new(Fam::Reg, 12.0, if armed { pal().primary } else { pal().text }));
+        if click(ui, fr, "hk-field").clicked() && self.shot.is_none() {
+            self.hotkey_capture = true;
+        }
+        self.hotkey_scan(ui);
+    }
+
+    /// While the hotkey field is armed, store the next key-down as
+    /// `general.profile_hotkey` (egui modifiers -> `MOD_*` bits; Esc cancels)
+    /// and (re)register it on the tray window.
+    fn hotkey_scan(&mut self, ui: &Ui) {
+        if !self.hotkey_capture {
+            return;
+        }
+        for e in ui.ctx().input(|i| i.events.clone()) {
+            let egui::Event::Key { key, pressed: true, repeat: false, modifiers, .. } = e else { continue };
+            if key == egui::Key::Escape {
+                self.hotkey_capture = false;
+                return;
+            }
+            let Some(vk) = super::assign::egui_vk(key) else { continue };
+            let mut mods = 0u8;
+            if modifiers.ctrl || modifiers.command {
+                mods |= crate::profile::MOD_CTRL;
+            }
+            if modifiers.shift {
+                mods |= crate::profile::MOD_SHIFT;
+            }
+            if modifiers.alt {
+                mods |= crate::profile::MOD_ALT;
+            }
+            let hk = crate::profile::Hotkey { mods, vk };
+            self.hotkey_capture = false;
+            self.edit(move |c| c.general.profile_hotkey = Some(hk));
+            crate::win::set_profile_hotkey(Some(hk));
+            self.say(format!("Profile hotkey: {}", crate::catalog::combo_name(crate::profile::KeyCombo { vk, mods })));
+            return;
+        }
     }
 
     /// Settings > General > APP: the version + the update controls. In dev and
@@ -369,6 +440,12 @@ impl GhubApp {
             ("Game list", super::assets::source(super::assets::SourceKind::Games).label().into()),
             ("Settings file", crate::profile::Config::path().display().to_string()),
         ];
+        // Copy everything on this page as text for a bug report.
+        let cr = Rect::from_min_size(pos2(main.right() - 122.0, main.top() + 21.0), vec2(122.0, 30.0));
+        if dark_button(ui, cr, "COPY REPORT", "diag-copy", true).clicked() {
+            ui.ctx().copy_text(diag_report(&self.dev, &rows));
+            self.say("Report copied");
+        }
         let mut y = main.top() + 84.0;
         for (k, v) in rows {
             text(ui, pos2(main.left(), y), Align2::LEFT_CENTER, k, Ts::new(Fam::Reg, 12.0, pal().label));
@@ -411,4 +488,34 @@ fn row(ui: &Ui, main: Rect, y: f32, title: &str, sub: &str, on: bool, id: &str) 
     text(ui, pos2(main.left(), y), Align2::LEFT_CENTER, title, Ts::new(Fam::Bold, 15.0, pal().text).ls(0.2));
     text(ui, pos2(main.left(), y + 22.0), Align2::LEFT_CENTER, sub, Ts::new(Fam::Reg, 13.0, pal().label).ls(0.3));
     switch_sized(ui, pos2(main.right() - 24.0, y + 1.0), on, pal().primary, 1.38, id).clicked()
+}
+
+/// The Diagnostics page's COPY REPORT text: a `GHUB-X v<ver>` header, every
+/// "Key: value" row the page shows, then the HID++ feature ids in hex.
+fn diag_report(dev: &crate::device::DeviceState, rows: &[(&str, String)]) -> String {
+    let mut s = format!("GHUB-X v{}", env!("CARGO_PKG_VERSION"));
+    for (k, v) in rows {
+        s += &format!("\n{k}: {v}");
+    }
+    let feats: Vec<String> = dev.info.features.iter().map(|(_, id, _)| format!("{id:04X}")).collect();
+    s += &format!("\nFeatures: {}", feats.join(" "));
+    s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn diag_report_has_header_rows_and_feature_ids() {
+        let mut d = crate::device::DeviceState::default();
+        d.info.features = vec![(0, 0x1E00, 1), (3, 0x2201, 3), (7, 0x8070, 2)];
+        let rows = [("Device", "G502 HERO".to_string()), ("DPI", "600 (sensor default 1600)".to_string())];
+        let r = diag_report(&d, &rows);
+        assert!(r.starts_with(&format!("GHUB-X v{}", env!("CARGO_PKG_VERSION"))));
+        assert!(r.contains("\nDevice: G502 HERO"));
+        assert!(r.contains("\nDPI: 600 (sensor default 1600)"));
+        assert!(r.ends_with("\nFeatures: 1E00 2201 8070"));
+        assert_eq!(diag_report(&crate::device::DeviceState::default(), &[]), format!("GHUB-X v{}\nFeatures: ", env!("CARGO_PKG_VERSION")));
+    }
 }

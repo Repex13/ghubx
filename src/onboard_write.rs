@@ -46,6 +46,11 @@ pub fn backup(dev: &G502, dir: &Path, exact: bool) -> Result<(PathBuf, Vec<Secto
     }
     manifest += "  ]\n}\n";
     std::fs::write(target.join("manifest.json"), manifest).map_err(|e| format!("write manifest: {e}"))?;
+    if !exact {
+        // Auto-backups only: keep the newest 10 timestamped folders.
+        // Hand-named ones (`2026-11-22_before_first_write`) survive the prune.
+        let _ = crate::profile::prune_matching(dir, 10, crate::profile::is_stamp_name);
+    }
     Ok((target, all))
 }
 

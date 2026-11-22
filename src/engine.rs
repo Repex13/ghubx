@@ -163,6 +163,10 @@ pub enum UiEvent {
     Onboard(Vec<OnboardSlot>),
     /// Result of an on-board write: summary or error.
     OnboardWritten(Result<String, String>),
+    /// Tray quick-menu profile pick: switch the current app to profile `0`.
+    TrayProfile(usize),
+    /// The tray profile hotkey asks to cycle the current app's profiles.
+    TrayCycleProfile,
 }
 
 /// MOUSE_BUTTON event name for a primary-button change (spy slots 0..=2).

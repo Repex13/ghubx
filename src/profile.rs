@@ -19,6 +19,14 @@ pub struct KeyCombo {
     pub mods: u8,
 }
 
+/// A global hotkey (`RegisterHotKey` on the tray window): same `MOD_*` bits as
+/// [`KeyCombo::mods`] plus a virtual-key code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct Hotkey {
+    pub mods: u8,
+    pub vk: u16,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MouseFn {
     Primary,
@@ -903,6 +911,8 @@ pub struct General {
     pub dpi_flash: bool,
     /// Keep the DPI LEDs lit (the mouse stores this; GHUB-X also lights the level while it controls).
     pub dpi_led_always_on: bool,
+    /// Global hotkey that cycles the current app's profiles (registered on the tray window).
+    pub profile_hotkey: Option<Hotkey>,
 }
 
 impl Default for General {
@@ -917,6 +927,7 @@ impl Default for General {
             osd_profile: true,
             dpi_flash: false,
             dpi_led_always_on: false,
+            profile_hotkey: None,
         }
     }
 }
@@ -1300,8 +1311,66 @@ impl Config {
         let s = toml::to_string_pretty(self).map_err(std::io::Error::other)?;
         let tmp = p.with_extension("toml.tmp");
         std::fs::write(&tmp, s)?;
-        std::fs::rename(tmp, p)
+        std::fs::rename(&tmp, &p)?;
+        // Snapshot into backups/ afterwards; never fail the save over it.
+        if !crate::engine::observer_mode() {
+            let _ = backup_config(&p);
+        }
+        Ok(())
     }
+}
+
+// ---------------------------------------------------------------- config backups
+
+/// `YYYYMMDD-HHMMSS` (local time) for backup file names.
+fn stamp_compact() -> String {
+    let t = unsafe { windows::Win32::System::SystemInformation::GetLocalTime() };
+    format!("{:04}{:02}{:02}-{:02}{:02}{:02}", t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond)
+}
+
+/// Copy the just-written config to `<config dir>/backups/config-<ts>.toml` and
+/// prune the folder to the newest 10. Its own failure never fails the save.
+fn backup_config(config: &std::path::Path) -> std::io::Result<()> {
+    let Some(dir) = config.parent() else { return Ok(()) };
+    let backups = dir.join("backups");
+    std::fs::create_dir_all(&backups)?;
+    std::fs::copy(config, backups.join(format!("config-{}.toml", stamp_compact())))?;
+    let _ = prune(&backups, "config-", 10);
+    Ok(())
+}
+
+/// Keep only the newest `keep` `prefix*` entries in `dir` (name sort = oldest
+/// first for timestamp names). Files and dirs both count; returns how many
+/// entries were deleted.
+pub fn prune(dir: &std::path::Path, prefix: &str, keep: usize) -> std::io::Result<usize> {
+    prune_matching(dir, keep, |n| n.starts_with(prefix))
+}
+
+/// [`prune`] with a custom name filter — the on-board backup only prunes
+/// `stamp()`-shaped folders so hand-named ones survive.
+pub fn prune_matching(dir: &std::path::Path, keep: usize, pred: impl Fn(&str) -> bool) -> std::io::Result<usize> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)?
+        .filter_map(|e| e.ok())
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter(|n| pred(n))
+        .collect();
+    names.sort();
+    let extra = names.len().saturating_sub(keep);
+    let mut gone = 0usize;
+    for n in names.into_iter().take(extra) {
+        let p = dir.join(&n);
+        let r = if p.is_dir() { std::fs::remove_dir_all(&p) } else { std::fs::remove_file(&p) };
+        gone += usize::from(r.is_ok());
+    }
+    Ok(gone)
+}
+
+/// `true` for names shaped like `onboard_write::stamp()` output
+/// (`YYYY-MM-DD_HHMMSS`). Hand-named backup folders such as
+/// `2026-11-22_before_first_write` don't match, so pruning never deletes them.
+pub fn is_stamp_name(n: &str) -> bool {
+    let b = n.as_bytes();
+    n.len() == 17 && b[4] == b'-' && b[7] == b'-' && b[10] == b'_' && b.iter().all(|c| c.is_ascii_digit() || *c == b'-' || *c == b'_')
 }
 
 /// Short unique id for new macros.
@@ -2251,5 +2320,54 @@ mod tests {
         t.levels = vec![400, 800, 1600, 3200, 6400];
         assert_eq!(set_flick_dpi(&mut t, 7000), FlickLevel::Replaced);
         assert_eq!(t.levels[4], 7000);
+    }
+
+    fn prune_tmp(name: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("ghubx-prune-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn prune_keeps_only_the_newest_prefixed() {
+        let d = prune_tmp("files");
+        for i in 1..=15 {
+            std::fs::write(d.join(format!("config-202601{i:02}-120000.toml")), b"x").unwrap();
+        }
+        std::fs::write(d.join("keep-me.txt"), b"x").unwrap();
+        std::fs::write(d.join("notes.md"), b"x").unwrap();
+        assert_eq!(prune(&d, "config-", 10).unwrap(), 5);
+        let left: Vec<String> = std::fs::read_dir(&d).unwrap().map(|e| e.unwrap().file_name().into_string().unwrap()).collect();
+        assert_eq!(left.len(), 12); // 10 config backups + the two others
+        assert!(!left.contains(&"config-20260101-120000.toml".to_string()));
+        assert!(!left.contains(&"config-20260105-120000.toml".to_string()));
+        assert!(left.contains(&"config-20260106-120000.toml".to_string()));
+        assert!(left.contains(&"config-20260115-120000.toml".to_string()));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn prune_matching_keeps_hand_named_dirs() {
+        let d = prune_tmp("dirs");
+        for n in ["2026-11-19_100000", "2026-11-20_100000", "2026-11-21_100000", "2026-11-22_100000"] {
+            std::fs::create_dir_all(d.join(n)).unwrap();
+        }
+        std::fs::create_dir_all(d.join("2026-11-22_before_first_write")).unwrap();
+        assert_eq!(prune_matching(&d, 2, is_stamp_name).unwrap(), 2);
+        let left: Vec<String> = std::fs::read_dir(&d).unwrap().map(|e| e.unwrap().file_name().into_string().unwrap()).collect();
+        assert_eq!(left.len(), 3);
+        assert!(left.contains(&"2026-11-21_100000".to_string()));
+        assert!(left.contains(&"2026-11-22_100000".to_string()));
+        assert!(left.contains(&"2026-11-22_before_first_write".to_string()));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn stamp_name_shape() {
+        assert!(is_stamp_name("2026-11-22_143022"));
+        assert!(!is_stamp_name("2026-11-22_before_first_write"));
+        assert!(!is_stamp_name("config-20261122-143022.toml"));
+        assert!(!is_stamp_name("2026-11-22"));
     }
 }

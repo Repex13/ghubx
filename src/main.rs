@@ -98,6 +98,8 @@ fn main() -> eframe::Result<()> {
         }
     }
     let cfg = Arc::new(Mutex::new(config));
+    // The tray window applies it once it exists (a no-op for --shot/script).
+    ghubx::win::set_profile_hotkey(cfg.lock().unwrap().general.profile_hotkey);
     let mailbox = ghubx::fx::Mailbox::default();
     let fx = shot.is_none().then(|| ghubx::fx::Handle::spawn(mailbox.clone(), ghubx::fx::win_source));
 
@@ -114,6 +116,8 @@ fn main() -> eframe::Result<()> {
     let feed = ghubx::notify::Feed::default();
     let update = ghubx::update::Handle::spawn(feed.clone());
     let (ui_tx, ui_rx) = unbounded::<UiEvent>();
+    // Tray quick-menu picks and the profile hotkey land in the UI pump.
+    ghubx::win::set_tray_ui_sender(ui_tx.clone());
     let (done_tx, done_rx) = crossbeam_channel::bounded::<()>(1);
     {
         let (eng_tx, ui_tx) = (eng_tx.clone(), ui_tx.clone());
