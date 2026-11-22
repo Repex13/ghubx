@@ -80,6 +80,28 @@ pub fn run(cmd_rx: Receiver<DevCmd>, eng: Sender<EngineMsg>, ui: Sender<UiEvent>
                             onboard_job = Some(OnboardJob { dir: None, slots: Vec::new() });
                         }
                     }
+                    Ok(DevCmd::WriteOnboard { sectors, active }) => {
+                        let mut log = |m: String| {
+                            let _ = ui.send(UiEvent::Log(format!("On-board write: {m}")));
+                        };
+                        let res = crate::onboard_write::write_sectors(&dev, &sectors, active, &mut log);
+                        refresh(&dev, &mut st);
+                        let _ = ui.send(UiEvent::OnboardWritten(res));
+                        let _ = ui.send(UiEvent::Device(st.clone()));
+                        onboard_job = Some(OnboardJob { dir: None, slots: Vec::new() });
+                        let _ = eng.send(EngineMsg::Reapply);
+                    }
+                    Ok(DevCmd::RestoreOnboard { slots }) => {
+                        let mut log = |m: String| {
+                            let _ = ui.send(UiEvent::Log(format!("On-board restore: {m}")));
+                        };
+                        let res = crate::onboard_write::restore_slots(&dev, &slots, &mut log);
+                        refresh(&dev, &mut st);
+                        let _ = ui.send(UiEvent::OnboardWritten(res));
+                        let _ = ui.send(UiEvent::Device(st.clone()));
+                        onboard_job = Some(OnboardJob { dir: None, slots: Vec::new() });
+                        let _ = eng.send(EngineMsg::Reapply);
+                    }
                     Ok(cmd) => {
                         let take = matches!(cmd, DevCmd::TakeControl(_));
                         let r = exec(&dev, &mut st, cmd);
@@ -150,7 +172,7 @@ fn exec(dev: &G502, st: &mut DeviceState, cmd: DevCmd) -> Result<()> {
             dev.set_dpi(ap.dpi)?;
             // Report rate is host-mode only; LED writes are best effort.
             let _ = dev.set_rate_ms(ap.rate_ms);
-            for (z, led) in ap.leds.iter().enumerate() {
+            for (z, led) in ap.leds.iter().enumerate().filter(|_| ap.send_leds) {
                 let _ = dev.set_zone_effect(z as u8, led, false);
             }
             st.controlled = true;
@@ -164,6 +186,18 @@ fn exec(dev: &G502, st: &mut DeviceState, cmd: DevCmd) -> Result<()> {
             refresh(dev, st);
         }
         DevCmd::Yield => st.controlled = false,
+        DevCmd::SetDpiLedAlwaysOn(on) => {
+            // stored in the mouse: only write when it really changes
+            if st.dpi_led_always_on != Some(on) {
+                dev.set_dpi_led_always_on(on)?;
+            }
+            st.dpi_led_always_on = Some(on);
+        }
+        DevCmd::DpiLed(level) => dev.set_dpi_led_level(level)?,
+        DevCmd::SetStartupEffect(on) => {
+            dev.set_startup_effect(on)?;
+            st.startup_effect = Some(on);
+        }
         DevCmd::SetDpi(d) => {
             dev.set_dpi(d)?;
             st.dpi = d;
@@ -184,7 +218,7 @@ fn exec(dev: &G502, st: &mut DeviceState, cmd: DevCmd) -> Result<()> {
         }
         DevCmd::SetOnboardProfile(slot) => dev.set_onboard_profile(slot)?,
         DevCmd::Refresh => refresh(dev, st),
-        DevCmd::ReadOnboard | DevCmd::Quit => {}
+        DevCmd::ReadOnboard | DevCmd::WriteOnboard { .. } | DevCmd::RestoreOnboard { .. } | DevCmd::Quit => {}
     }
     Ok(())
 }
@@ -204,6 +238,8 @@ fn refresh(dev: &G502, st: &mut DeviceState) {
     if let Ok(m) = dev.spy_get_map() {
         st.spy_map = m;
     }
+    st.dpi_led_always_on = dev.get_dpi_led_always_on().ok();
+    st.startup_effect = dev.get_startup_effect().ok();
     for z in 0..2u8 {
         if let Ok(l) = dev.get_zone_effect(z) {
             st.zone_leds[z as usize] = l;

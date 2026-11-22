@@ -63,6 +63,10 @@ pub struct DeviceState {
     pub controlled: bool,
     pub ghub_running: bool,
     pub zone_leds: [[u8; 11]; 2],
+    /// DPI LED "always on" as stored in the mouse (0x1300), if readable.
+    pub dpi_led_always_on: Option<bool>,
+    /// Device startup effect enabled (0x8070 fn4), if readable.
+    pub startup_effect: Option<bool>,
 }
 
 /// Owns both HID handles. Lives on the IO thread.
@@ -300,6 +304,38 @@ impl G502 {
         p.extend_from_slice(led);
         p.push(persist as u8);
         self.request(FEAT_COLOR_LED_EFFECTS, 3, &p)?;
+        Ok(())
+    }
+
+    // ---- DPI LEDs (0x1300) and the startup effect (0x8070) ----
+
+    /// fn6 getNvConfig(0): byte 1 is 2 = always on, 4 = default.
+    pub fn get_dpi_led_always_on(&self) -> Result<bool> {
+        Ok(self.request(FEAT_LED_SW_CONTROL, 6, &[0])?.get(1).copied() == Some(2))
+    }
+
+    pub fn set_dpi_led_always_on(&self, on: bool) -> Result<()> {
+        self.request(FEAT_LED_SW_CONTROL, 7, &[0, if on { 2 } else { 4 }])?;
+        Ok(())
+    }
+
+    /// fn5 setLedState: `Some(n)` (1..=5) lights the DPI LEDs for level n, `None` turns them off.
+    pub fn set_dpi_led_level(&self, level: Option<u8>) -> Result<()> {
+        let p = match level {
+            Some(n) => [0, 0, 2, 0, n.clamp(1, 5)],
+            None => [0, 0, 1, 0, 0],
+        };
+        self.request(FEAT_LED_SW_CONTROL, 5, &p)?;
+        Ok(())
+    }
+
+    /// fn4 with `[0, 1]` -> `[0, 1, 1 on | 2 off]`.
+    pub fn get_startup_effect(&self) -> Result<bool> {
+        Ok(self.request(FEAT_COLOR_LED_EFFECTS, 4, &[0, 1])?.get(2).copied() == Some(1))
+    }
+
+    pub fn set_startup_effect(&self, on: bool) -> Result<()> {
+        self.request(FEAT_COLOR_LED_EFFECTS, 5, &[0, 1, if on { 1 } else { 2 }])?;
         Ok(())
     }
 

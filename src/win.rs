@@ -780,6 +780,82 @@ pub fn start_scroll_hook() -> bool {
     true
 }
 
+// ---------------------------------------------------------------- Windows Dynamic Lighting
+
+const WDL_ROOT: &str = r"Software\Microsoft\Lighting\Devices";
+static WDL_FAKE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn wdl_device_key() -> Option<String> {
+    use windows::Win32::Foundation::ERROR_SUCCESS;
+    use windows::Win32::System::Registry::*;
+    use windows::core::{HSTRING, PWSTR};
+    unsafe {
+        let mut root = HKEY::default();
+        if RegOpenKeyExW(HKEY_CURRENT_USER, &HSTRING::from(WDL_ROOT), None, KEY_READ, &mut root) != ERROR_SUCCESS {
+            return None;
+        }
+        let mut found = None;
+        for i in 0.. {
+            let mut buf = [0u16; 512];
+            let mut len = buf.len() as u32;
+            if RegEnumKeyExW(root, i, Some(PWSTR(buf.as_mut_ptr())), &mut len, None, None, None, None) != ERROR_SUCCESS {
+                break;
+            }
+            let name = String::from_utf16_lossy(&buf[..len as usize]);
+            if name.contains("HID_DEVICE_SYSTEM_VHF") {
+                found = Some(format!(r"{WDL_ROOT}\{name}"));
+                break;
+            }
+        }
+        let _ = RegCloseKey(root);
+        found
+    }
+}
+
+/// Windows Dynamic Lighting ("AmbientLightingEnabled") of the mouse's device key; `None` without one.
+/// In passive mode (`--dev`, `--shot`) an in-memory value that starts `Some(false)`; the registry is never touched.
+pub fn wdl_state() -> Option<bool> {
+    use windows::Win32::Foundation::ERROR_SUCCESS;
+    use windows::Win32::System::Registry::*;
+    use windows::core::HSTRING;
+    if PASSIVE.load(Ordering::Relaxed) {
+        return Some(WDL_FAKE.load(Ordering::Relaxed));
+    }
+    let key = wdl_device_key()?;
+    let mut v = 0u32;
+    let mut len = 4u32;
+    unsafe {
+        let r = RegGetValueW(HKEY_CURRENT_USER, &HSTRING::from(key), &HSTRING::from("AmbientLightingEnabled"), RRF_RT_REG_DWORD, None, Some(&mut v as *mut u32 as *mut _), Some(&mut len));
+        (r == ERROR_SUCCESS).then_some(v != 0)
+    }
+}
+
+/// Turn Windows Dynamic Lighting on or off for the mouse; false when it could not be written.
+pub fn set_wdl(on: bool) -> bool {
+    use windows::Win32::Foundation::ERROR_SUCCESS;
+    use windows::Win32::System::Registry::*;
+    use windows::core::HSTRING;
+    if PASSIVE.load(Ordering::Relaxed) {
+        WDL_FAKE.store(on, Ordering::Relaxed);
+        return true;
+    }
+    let Some(key) = wdl_device_key() else { return false };
+    let v = u32::from(on);
+    unsafe { RegSetKeyValueW(HKEY_CURRENT_USER, &HSTRING::from(key), &HSTRING::from("AmbientLightingEnabled"), REG_DWORD.0, Some(&v as *const u32 as *const _), 4) == ERROR_SUCCESS }
+}
+
+pub fn open_wdl_settings() {
+    if PASSIVE.load(Ordering::Relaxed) {
+        return;
+    }
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+    use windows::core::{HSTRING, w};
+    unsafe {
+        ShellExecuteW(None, w!("open"), &HSTRING::from("ms-settings:personalization-lighting"), None, None, SW_SHOWNORMAL);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

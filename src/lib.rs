@@ -2,6 +2,7 @@ pub mod catalog;
 pub mod device;
 pub mod engine;
 pub mod fx;
+pub mod onboard_write;
 pub mod games;
 pub mod ghub_import;
 pub mod hidpp;

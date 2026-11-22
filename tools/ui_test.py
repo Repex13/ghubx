@@ -317,11 +317,11 @@ def sensitivity():
 @scenario
 def lighting():
     res = run_script("lighting", ["wait 1500", HOME_TILE, SETTLE, RAIL_LIGHT, SETTLE,
-                                  "click 194 320",  # LOGO tab
-                                  SETTLE, "click 110 396",  # EFFECT menu
+                                  "click 194 224",  # LOGO tab
+                                  SETTLE, "click 110 300",  # EFFECT menu
                                   SETTLE, "shot {shots}/menu.png",
-                                  "click 110 430",  # menu: FIXED
-                                  SETTLE, "click 122 598",  # red preset swatch
+                                  "click 110 346",  # menu: FIXED
+                                  SETTLE, "click 122 502",  # red preset swatch
                                   SETTLE, "shot {shots}/after.png"])
     ok_run(res)
     p = prof(res.cfg)
@@ -332,12 +332,12 @@ def lighting():
 
 @scenario
 def picker_matches_pixels():
-    for i, (x, y) in enumerate([(150, 480), (300, 520)]):  # two points inside the SV square (92..370 x 435..552)
+    for i, (x, y) in enumerate([(150, 384), (300, 424)]):  # two points inside the SV square (92..370 x 339..456)
         name = f"picker_matches_pixels_{i}"
         res = run_script(name, ["wait 1500", HOME_TILE, SETTLE, RAIL_LIGHT, SETTLE,
-                                "click 194 320",  # LOGO tab
-                                SETTLE, "click 110 396",  # EFFECT menu
-                                SETTLE, "click 110 430",  # menu: FIXED
+                                "click 194 224",  # LOGO tab
+                                SETTLE, "click 110 300",  # EFFECT menu
+                                SETTLE, "click 110 346",  # menu: FIXED
                                 SETTLE, "shot {shots}/before.png",
                                 f"click {x} {y}",  # inside the SV square
                                 SETTLE])
@@ -348,17 +348,17 @@ def picker_matches_pixels():
 
 
 LIGHT_LOGO_EFFECT_MENU = ["wait 1500", HOME_TILE, SETTLE, RAIL_LIGHT, SETTLE,
-                          "click 194 320",  # LOGO tab
-                          SETTLE, "click 110 396",  # EFFECT menu
+                          "click 194 224",  # LOGO tab
+                          SETTLE, "click 110 300",  # EFFECT menu
                           SETTLE]
 
 
 @scenario
 def lighting_screen_sampler():
     res = run_script("lighting_screen_sampler", LIGHT_LOGO_EFFECT_MENU + [
-        "click 110 538",  # menu: SCREEN SAMPLER
-        SETTLE, "click 108 507",  # mini screen: top-left cell
-        SETTLE, "click 227 590",  # COLOR BOOST slider at about 75 %
+        "click 110 418",  # menu: SCREEN SAMPLER
+        SETTLE, "click 108 411",  # mini screen: top-left cell
+        SETTLE, "click 227 494",  # COLOR BOOST slider at about 75 %
         SETTLE])
     ok_run(res)
     l1, l0 = prof(res.cfg)["lighting"][1], prof(res.cfg)["lighting"][0]
@@ -370,17 +370,78 @@ def lighting_screen_sampler():
 @scenario
 def lighting_audio_visualizer():
     res = run_script("lighting_audio_visualizer", LIGHT_LOGO_EFFECT_MENU + [
-        "click 110 574",  # menu: AUDIO VISUALIZER
-        SETTLE, "click 240 442",  # BACKGROUND COLOR tab
-        SETTLE, "dclick 345 620", "text 101030", "key Enter",  # picker hex field
-        SETTLE, "click 130 692",  # ADVANCED SETTINGS row
-        SETTLE, "click 150 603",  # PULSE ON BASS ONLY
-        SETTLE, "click 150 523",  # AUTO-ADJUST SENSITIVITY
+        "click 110 442",  # menu: AUDIO VISUALIZER
+        SETTLE, "click 240 346",  # BACKGROUND COLOR tab
+        SETTLE, "dclick 345 524", "text 101030", "key Enter",  # picker hex field
+        SETTLE, "click 130 596",  # ADVANCED SETTINGS row
+        SETTLE, "click 150 507",  # PULSE ON BASS ONLY
+        SETTLE, "click 150 427",  # AUTO-ADJUST SENSITIVITY
         SETTLE])
     ok_run(res)
     l1 = prof(res.cfg)["lighting"][1]
     h = l1["host"]
     must(l1["effect"] == "Audio" and h["color2"] == [16, 16, 48] and h["bass_only"] is True and h["auto_sens"] is False, l1)
+
+
+@scenario
+def wdl_switch():
+    open_light = ["wait 1500", HOME_TILE, SETTLE, RAIL_LIGHT, SETTLE]
+    res = run_script("wdl_switch", open_light + [
+        "click 346 174",  # WINDOWS SETTINGS switch: ON, panel goes inert
+        SETTLE, "click 110 396",  # EFFECT value (inert)
+        SETTLE, "click 110 426",  # where OFF would be if the menu had opened
+        SETTLE, "click 346 174",  # switch OFF again
+        SETTLE, "click 110 300",  # EFFECT value
+        SETTLE, "click 110 346",  # menu: FIXED
+        SETTLE])
+    ok_run(res)
+    l0 = prof(res.cfg)["lighting"][0]
+    must(l0["effect"] == "Fixed", l0)
+    res = run_script("wdl_switch_inert", open_light + [
+        "click 346 174", SETTLE, "click 110 396", SETTLE, "click 110 426", SETTLE])
+    ok_run(res)
+    must(prof(res.cfg)["lighting"][0]["effect"] == "Cycle", prof(res.cfg)["lighting"][0])
+
+
+@scenario
+def effect_menu_order():
+    names = ["Off", "Fixed", "Cycle", "Breathing", "Screen", "Audio"]
+    for i, want in enumerate(names):
+        res = run_script(f"effect_menu_order_{i}", ["wait 1500", HOME_TILE, SETTLE, RAIL_LIGHT, SETTLE,
+                                                    "click 194 224",  # LOGO tab
+                                                    SETTLE, "click 110 300", SETTLE, "click 110 346",  # menu: FIXED
+                                                    SETTLE, "click 110 300", SETTLE,
+                                                    f"click 110 {322 + 24 * i}",  # menu entry i
+                                                    SETTLE])
+        ok_run(res)
+        got = prof(res.cfg)["lighting"][1]["effect"]
+        must(got == want, f"entry {i}: expected {want}, saved {got}")
+
+
+@scenario
+def onboard_replace_confirm():
+    res = run_script("onboard_replace_confirm", ["wait 1500", HOME_TILE, SETTLE,
+                                                 "click 38 724",  # Device Settings gear
+                                                 SETTLE, "click 710 392",  # slot 1 name
+                                                 SETTLE, "click 640 483",  # menu: Desktop > Default
+                                                 SETTLE, "shot {shots}/bar.png",
+                                                 "click 949 740",  # CANCEL
+                                                 SETTLE, "shot {shots}/gone.png"])
+    ok_run(res)
+    bar, gone = pixel(res, "bar.png", (30, 760)), pixel(res, "gone.png", (30, 760))
+    must(bar != (0, 0, 0), f"no confirmation bar at (30,760): {bar}")
+    must(gone == (0, 0, 0), f"bar still there after CANCEL: {gone}")
+    must(res.cfg["apps"][0]["profiles"][0]["name"] == "Default", res.cfg["apps"][0]["profiles"][0])
+
+
+@scenario
+def dpi_led_checkbox():
+    res = run_script("dpi_led_checkbox", ["wait 1500", HOME_TILE, SETTLE,
+                                          "click 38 724",  # Device Settings gear
+                                          SETTLE, "click 183 396",  # DPI LIGHTING > ALWAYS ON
+                                          SETTLE])
+    ok_run(res)
+    must(res.cfg["general"].get("dpi_led_always_on") is True, res.cfg["general"])
 
 
 @scenario
@@ -401,8 +462,8 @@ def device_settings():
     res = run_script("device_settings", ["wait 1500", HOME_TILE, SETTLE,
                                          "click 38 724",  # Device Settings gear
                                          SETTLE,
-                                         "click 183 568",  # FLASH LIGHTING ON DPI CHANGE
-                                         "click 183 481",  # scroll acceleration ENABLE
+                                         "click 183 670",  # FLASH LIGHTING ON DPI CHANGE
+                                         "click 183 588",  # scroll acceleration ENABLE
                                          SETTLE])
     ok_run(res)
     must(res.cfg["general"].get("dpi_flash") is True and res.cfg["extras"].get("scroll_accel") is True, (res.cfg["general"], res.cfg["extras"]))

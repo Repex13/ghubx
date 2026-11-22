@@ -10,6 +10,7 @@ mod light;
 pub mod palette;
 mod profiles;
 mod sens;
+mod onboard;
 mod settings;
 mod themes;
 pub mod theme;
@@ -156,6 +157,11 @@ pub struct GhubApp {
     pub(crate) onboard: Vec<crate::profile::OnboardSlot>,
     pub(crate) onboard_asked: bool,
     pub(crate) fx: Option<crate::fx::Handle>,
+    pub(crate) slot_saved_msg: Option<String>,
+    pub(crate) wdl_cache: Option<(Instant, Option<bool>)>,
+    pub(crate) slot_menu: Option<onboard::SlotMenu>,
+    pub(crate) slot_details: Option<usize>,
+    pub(crate) slot_pending: Option<onboard::SlotAction>,
     pub(crate) theme_edit: Option<themes::ThemeEditor>,
     pub(crate) theme_page: usize,
     theme_io: Option<themes::ThemeIoRx>,
@@ -225,6 +231,11 @@ impl GhubApp {
             onboard: Vec::new(),
             onboard_asked: false,
             fx,
+            slot_saved_msg: None,
+            wdl_cache: None,
+            slot_menu: None,
+            slot_details: None,
+            slot_pending: None,
             theme_edit: None,
             theme_page: 0,
             theme_io: None,
@@ -245,8 +256,8 @@ impl GhubApp {
             "home" | "dropdown" => Route::Home,
             "assign" | "assign2" | "gshift" | "macro" | "macroedit" | "macrorec" | "select" | "keys" | "actions" | "gamecmds" | "p180game" => Route::Device(DevTab::Assignments),
             "sens" => Route::Device(DevTab::Sensitivity),
-            "light" | "fixed" | "effectmenu" | "screenfx" | "audiofx" | "audiofxadv" => Route::Device(DevTab::Lighting),
-            "devset" | "onboard" => Route::DeviceSettings,
+            "light" | "fixed" | "wdl" | "effectmenu" | "screenfx" | "audiofx" | "audiofxadv" => Route::Device(DevTab::Lighting),
+            "devset" | "onboard" | "slotmenu" | "slotconfirm" | "slotdetails" => Route::DeviceSettings,
             "profiles" | "appdetail" | "addgame" => Route::Profiles,
             "settings" | "sleep" => Route::Settings(0),
             "appearance" | "themeedit" | "mythemes" => Route::Settings(1),
@@ -295,8 +306,11 @@ impl GhubApp {
             self.light.zone = 1;
             self.light.set_advanced(page == "audiofxadv");
             if page == "effectmenu" {
-                self.overlay = Some(Overlay::Effect(Rect::from_min_size(pos2(88.0, 386.0), vec2(70.0, 20.0))));
+                self.overlay = Some(Overlay::Effect(Rect::from_min_size(pos2(88.0, 289.0), vec2(70.0, 26.0))));
             }
+        }
+        if page == "wdl" {
+            crate::win::set_wdl(true);
         }
         if page == "themeedit" || page == "mythemes" {
             use crate::profile::CustomTheme;
@@ -310,7 +324,7 @@ impl GhubApp {
                 c.appearance.theme = "custom-sunset".into();
             }
         }
-        if page == "onboard" {
+        if matches!(page, "onboard" | "slotmenu" | "slotconfirm" | "slotdetails") {
             use crate::profile::{OnboardProfile, OnboardSlot, sample_sector1};
             let base = OnboardProfile::parse(&sample_sector1());
             let with = |dpi: &[u16]| {
@@ -324,6 +338,12 @@ impl GhubApp {
                 .enumerate()
                 .map(|(i, profile)| OnboardSlot { sector: i as u16 + 1, enabled: true, profile })
                 .collect();
+        }
+        match page {
+            "slotmenu" => self.slot_menu = Some(onboard::SlotMenu { slot: 5, opened_frame: u64::MAX }),
+            "slotconfirm" => self.replace_slot(1, 0, 0),
+            "slotdetails" => self.slot_details = Some(1),
+            _ => {}
         }
         if page == "addgame" {
             self.prof.open_add();
@@ -395,6 +415,13 @@ impl GhubApp {
                     self.dev = d;
                 }
                 UiEvent::Onboard(v) => self.onboard = v,
+                UiEvent::OnboardWritten(r) => {
+                    let ok = self.slot_saved_msg.take().unwrap_or_else(|| "Saved to the mouse and checked".into());
+                    self.say(match r {
+                        Ok(_) => ok,
+                        Err(e) => e,
+                    });
+                }
                 UiEvent::Buttons(m) => {
                     if self.shot.is_none() && self.script.is_none() {
                         self.mask = m;
@@ -674,7 +701,7 @@ impl GhubApp {
         let Some(kind) = &self.overlay else { return };
         let (anchor, size) = match kind {
             Overlay::Profiles(r) => (r.left_bottom() + vec2(0.0, 4.0), vec2(r.width().max(240.0), 0.0)),
-            Overlay::Effect(r) => (r.left_bottom() + vec2(0.0, 2.0), vec2(200.0, 0.0)),
+            Overlay::Effect(r) => (r.left_bottom() + vec2(0.0, 2.0), vec2(240.0, 0.0)),
             Overlay::Slot { pos, .. } | Overlay::Dpi { pos, .. } => (*pos, vec2(200.0, 0.0)),
             Overlay::Persistent(r) => (r.left_bottom() + vec2(0.0, 4.0), vec2(r.width(), 0.0)),
         };
@@ -685,17 +712,25 @@ impl GhubApp {
             .fixed_pos(anchor)
             .constrain(true)
             .show(ctx, |ui| {
-                let row_h = 36.0;
-                let h = items.len() as f32 * row_h + 12.0;
+                let flat = matches!(kind, Overlay::Effect(_));
+                let row_h = if flat { 24.0 } else { 36.0 };
+                let pad = if flat { 0.0 } else { 6.0 };
+                let h = items.len() as f32 * row_h + pad * 2.0;
                 let (rect, _) = ui.allocate_exact_size(vec2(size.x, h), Sense::hover());
-                soft_shadow(ui, rect, 6);
+                if !flat {
+                    soft_shadow(ui, rect, 6);
+                }
                 let th = pal();
-                ui.painter().rect_filled(rect, CornerRadius::same(6), if th.dark { th.surface_hi } else { th.surface });
-                if !th.dark {
+                if flat {
+                    ui.painter().rect_filled(rect, CornerRadius::same(2), th.n(0x3a));
+                } else {
+                    ui.painter().rect_filled(rect, CornerRadius::same(6), if th.dark { th.surface_hi } else { th.surface });
+                }
+                if !th.dark && !flat {
                     ui.painter().rect_stroke(rect, CornerRadius::same(6), Stroke::new(1.0, th.outline_hi), StrokeKind::Inside);
                 }
                 for (i, (label, active, enabled)) in items.iter().enumerate() {
-                    let rr = Rect::from_min_size(pos2(rect.left(), rect.top() + 6.0 + i as f32 * row_h), vec2(rect.width(), row_h));
+                    let rr = Rect::from_min_size(pos2(rect.left(), rect.top() + pad + i as f32 * row_h), vec2(rect.width(), row_h));
                     if label.is_empty() {
                         ui.painter().line_segment([pos2(rr.left() + 12.0, rr.center().y), pos2(rr.right() - 12.0, rr.center().y)], Stroke::new(1.0, pal().outline_hi));
                         continue;
@@ -704,7 +739,15 @@ impl GhubApp {
                     if r.hovered() && *enabled {
                         ui.painter().rect_filled(rr.shrink2(vec2(6.0, 1.0)), CornerRadius::same(4), pal().ink(14));
                     }
-                    let color = if !enabled { pal().disabled } else if *active { pal().primary } else { pal().text };
+                    let color = if !enabled {
+                        pal().disabled
+                    } else if flat {
+                        if *active { pal().text } else { pal().n(0x88) }
+                    } else if *active {
+                        pal().primary
+                    } else {
+                        pal().text
+                    };
                     let bold = label.chars().all(|c| !c.is_lowercase());
                     let ts = if bold { Ts::new(Fam::Bold, 12.0, color) } else { Ts::new(Fam::Pan, 14.0, color).ls(-0.2) };
                     let pos = if bold && matches!(kind, Overlay::Profiles(_)) {
@@ -713,7 +756,7 @@ impl GhubApp {
                         text(ui, pos2(rr.left() + 18.0, rr.center().y), Align2::LEFT_CENTER, label, ts)
                     };
                     let _ = pos;
-                    if *active {
+                    if *active && !flat {
                         check(ui.painter(), pos2(rr.right() - 22.0, rr.center().y), 4.5, Stroke::new(1.8, pal().primary));
                     }
                     if r.clicked() {

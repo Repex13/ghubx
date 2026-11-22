@@ -34,6 +34,12 @@ fn main() {
         Some("release") => std::process::exit(release()),
         Some("games") => std::process::exit(games()),
         Some("fx-screen") => std::process::exit(fx_screen(std::env::args().nth(2).and_then(|a| a.parse().ok()).unwrap_or(3.0))),
+        Some("onboard-backup") => std::process::exit(onboard_backup_cmd(&std::env::args().skip(2).collect::<Vec<_>>())),
+        Some("onboard-save") => std::process::exit(onboard_save_cmd(&std::env::args().skip(2).collect::<Vec<_>>())),
+        Some("onboard-restore") => std::process::exit(onboard_restore_cmd(&std::env::args().skip(2).collect::<Vec<_>>())),
+        Some("onboard-activate") => std::process::exit(onboard_activate_cmd(&std::env::args().skip(2).collect::<Vec<_>>())),
+        Some("dpi-led") => std::process::exit(toggle_cmd("dpi-led", &std::env::args().skip(2).collect::<Vec<_>>())),
+        Some("startup-effect") => std::process::exit(toggle_cmd("startup-effect", &std::env::args().skip(2).collect::<Vec<_>>())),
         Some("fx-screen-check") => std::process::exit(fx_screen_check()),
         Some("fx-audio") => std::process::exit(fx_audio(std::env::args().nth(2).and_then(|a| a.parse().ok()).unwrap_or(5.0))),
         Some("export-theme") => std::process::exit(export_theme_cmd(&std::env::args().skip(2).collect::<Vec<_>>())),
@@ -183,6 +189,196 @@ fn fx_screen(secs: f32) -> i32 {
     let (w, h) = unsafe { (windows::Win32::UI::WindowsAndMessaging::GetSystemMetrics(windows::Win32::UI::WindowsAndMessaging::SM_CXSCREEN), windows::Win32::UI::WindowsAndMessaging::GetSystemMetrics(windows::Win32::UI::WindowsAndMessaging::SM_CYSCREEN)) };
     println!("avg capture {:.1} ms over {n} samples (screen {w}x{h})", total / n.max(1) as f64);
     0
+}
+
+/// Exit 2 when something else could own the mouse.
+fn refuse_writes() -> bool {
+    if win::ghub_running() {
+        eprintln!("lghub_agent.exe is running: G HUB owns the mouse. Nothing was written.");
+        return true;
+    }
+    if win::processes().iter().any(|(_, n)| n.eq_ignore_ascii_case("ghubx.exe")) {
+        eprintln!("ghubx.exe is running: two controllers would fight over the mouse. Quit it first. Nothing was written.");
+        return true;
+    }
+    false
+}
+
+fn open_device() -> Option<G502> {
+    let api = HidApi::new().ok()?;
+    match G502::connect(&api) {
+        Ok(d) => Some(d),
+        Err(e) => {
+            eprintln!("no G502 HERO: {e}");
+            None
+        }
+    }
+}
+
+fn hex_dump(b: &[u8]) -> String {
+    b.chunks(16).enumerate().map(|(i, c)| format!("{:02X}: {}", i * 16, c.iter().map(|x| format!("{x:02x}")).collect::<Vec<_>>().join(" "))).collect::<Vec<_>>().join("
+")
+}
+
+fn onboard_backup_cmd(args: &[String]) -> i32 {
+    let Some(dir) = args.first() else {
+        eprintln!("usage: probe onboard-backup <dir>");
+        return 64;
+    };
+    let Some(dev) = open_device() else { return 1 };
+    match ghubx::onboard_write::backup(&dev, std::path::Path::new(dir), true) {
+        Ok((d, _)) => {
+            println!("backed up sectors 0..=5 and a manifest to {}", d.display());
+            0
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            1
+        }
+    }
+}
+
+fn onboard_save_cmd(args: &[String]) -> i32 {
+    use ghubx::profile::{Config, encode_onboard};
+    let nums: Vec<usize> = args.iter().filter_map(|a| a.parse().ok()).collect();
+    let (dry, activate) = (args.iter().any(|a| a == "--dry-run"), args.iter().any(|a| a == "--activate"));
+    let [slot, app, prof] = nums[..] else {
+        eprintln!("usage: probe onboard-save <slot 1..5> <app index> <profile index> [--dry-run] [--activate]");
+        return 64;
+    };
+    if !(1..=5).contains(&slot) {
+        eprintln!("slot must be 1..=5");
+        return 64;
+    }
+    let cfg = Config::load();
+    let Some(a) = cfg.apps.get(app) else {
+        eprintln!("no app {app}");
+        return 1;
+    };
+    let Some(p) = a.profiles.get(prof) else {
+        eprintln!("no profile {prof} in {}", a.name);
+        return 1;
+    };
+    let name = format!("{}: {}", a.name, p.name);
+    let enc = encode_onboard(p, &name, &a.macros);
+    println!("slot {slot} <- \"{name}\"
+{}", hex_dump(&enc.sector));
+    for (s, g, l) in &enc.not_stored {
+        println!("not stored: G{} {} ({l})", s + 1, if *g { "G-Shift" } else { "base" });
+    }
+    if dry {
+        println!("dry run: the device was not opened");
+        return 0;
+    }
+    if refuse_writes() {
+        return 2;
+    }
+    let Some(dev) = open_device() else { return 1 };
+    let mut log = |m: String| println!("{m}");
+    match ghubx::onboard_write::write_sectors(&dev, &[(slot as u16, enc.sector)], activate.then_some(slot as u8), &mut log) {
+        Ok(m) => {
+            println!("{m}");
+            0
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            1
+        }
+    }
+}
+
+fn onboard_restore_cmd(args: &[String]) -> i32 {
+    let slots: Vec<u16> = match args.first().map(String::as_str) {
+        Some("all") => (1..=5).collect(),
+        Some(s) => match s.parse::<u16>() {
+            Ok(n) if (1..=5).contains(&n) => vec![n],
+            _ => {
+                eprintln!("usage: probe onboard-restore <slot 1..5 | all>");
+                return 64;
+            }
+        },
+        None => {
+            eprintln!("usage: probe onboard-restore <slot 1..5 | all>");
+            return 64;
+        }
+    };
+    if refuse_writes() {
+        return 2;
+    }
+    let Some(dev) = open_device() else { return 1 };
+    let mut sectors = Vec::new();
+    for n in slots {
+        match ghubx::onboard_write::read_stable(&dev, 0x0100 + n) {
+            Ok(rom) => sectors.push((n, ghubx::profile::restore_from_rom(&rom))),
+            Err(e) => {
+                eprintln!("{e}");
+                return 1;
+            }
+        }
+    }
+    let mut log = |m: String| println!("{m}");
+    match ghubx::onboard_write::write_sectors(&dev, &sectors, None, &mut log) {
+        Ok(m) => {
+            println!("{m}");
+            0
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            1
+        }
+    }
+}
+
+fn onboard_activate_cmd(args: &[String]) -> i32 {
+    let Some(slot) = args.first().and_then(|a| a.parse::<u8>().ok()).filter(|n| (1..=5).contains(n)) else {
+        eprintln!("usage: probe onboard-activate <slot 1..5>");
+        return 64;
+    };
+    if refuse_writes() {
+        return 2;
+    }
+    let Some(dev) = open_device() else { return 1 };
+    let r = dev.set_mode(ghubx::device::MODE_ONBOARD).and_then(|_| dev.set_onboard_profile(slot)).and_then(|_| dev.get_onboard_profile());
+    match r {
+        Ok(now) => {
+            println!("active slot reads {now}");
+            i32::from(now != slot)
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            1
+        }
+    }
+}
+
+fn toggle_cmd(which: &str, args: &[String]) -> i32 {
+    let on = match args.first().map(String::as_str) {
+        Some("on") => true,
+        Some("off") => false,
+        _ => {
+            eprintln!("usage: probe {which} <on|off>");
+            return 64;
+        }
+    };
+    if refuse_writes() {
+        return 2;
+    }
+    let Some(dev) = open_device() else { return 1 };
+    let r = if which == "dpi-led" {
+        dev.set_dpi_led_always_on(on).and_then(|_| dev.get_dpi_led_always_on())
+    } else {
+        dev.set_startup_effect(on).and_then(|_| dev.get_startup_effect())
+    };
+    match r {
+        Ok(now) => {
+            println!("{which} now reads {}", if now { "on" } else { "off" });
+            i32::from(now != on)
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            1
+        }
+    }
 }
 
 fn fx_screen_check() -> i32 {

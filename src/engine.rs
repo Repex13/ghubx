@@ -51,6 +51,10 @@ pub fn set_observer(on: bool) {
     win::set_passive(on);
 }
 
+pub fn observer_mode() -> bool {
+    observer()
+}
+
 fn observer() -> bool {
     OBSERVER.load(Ordering::Relaxed)
 }
@@ -64,6 +68,8 @@ pub struct Applied {
     pub leds: [[u8; 11]; 2],
     /// Zones whose colour the fx thread writes (RAM only).
     pub host: [bool; 2],
+    /// False while Windows Dynamic Lighting owns the lighting: send no LED data at all.
+    pub send_leds: bool,
 }
 
 /// Commands for the device IO thread.
@@ -73,6 +79,11 @@ pub enum DevCmd {
     Release,
     /// Another program owns the mouse now: forget that we control it (no device I/O).
     Yield,
+    /// Store "DPI LEDs always on" in the mouse (0x1300).
+    SetDpiLedAlwaysOn(bool),
+    /// Light the DPI LEDs for this level (1..=5) or turn them off.
+    DpiLed(Option<u8>),
+    SetStartupEffect(bool),
     SetDpi(u16),
     SetRate(u8),
     SetMap([u8; 16]),
@@ -81,6 +92,10 @@ pub enum DevCmd {
     Refresh,
     /// Read the mouse's on-board profile memory (read-only), one sector per IO pass.
     ReadOnboard,
+    /// Write these sectors to the on-board memory (backup, verify, roll back), optionally select a slot.
+    WriteOnboard { sectors: Vec<(u16, [u8; 256])>, active: Option<u8> },
+    /// Copy the factory ROM profile of each slot (1..=5) over the user slot.
+    RestoreOnboard { slots: Vec<u16> },
     Quit,
 }
 
@@ -103,6 +118,14 @@ pub enum EngineMsg {
     OnboardSlot(u8),
     /// Ask the device thread to read the on-board profiles.
     ReadOnboard,
+    /// Device startup effect on / off (stored in the mouse).
+    SetStartupEffect(bool),
+    /// Save profile data to the mouse (sector writes).
+    WriteOnboard { sectors: Vec<(u16, [u8; 256])>, active: Option<u8> },
+    /// The mouse reloaded its stored profile (after a sector write): send everything again.
+    Reapply,
+    /// Restore slots from the mouse's ROM copies.
+    RestoreOnboard { slots: Vec<u16> },
     Quit,
 }
 
@@ -126,6 +149,8 @@ pub enum UiEvent {
     Status(Status),
     Log(String),
     Onboard(Vec<OnboardSlot>),
+    /// Result of an on-board write: summary or error.
+    OnboardWritten(Result<String, String>),
 }
 
 struct Held {
@@ -147,6 +172,10 @@ pub struct Engine {
     toggles: HashMap<String, Arc<AtomicBool>>,
     asleep: bool,
     pub(crate) osd: Box<dyn Fn(OsdKind) + Send>,
+    dpi_led_nv: Option<bool>,
+    pub(crate) wdl: Box<dyn FnMut() -> Option<bool> + Send>,
+    wdl_on: bool,
+    pub(crate) dpi_led_off_at: Option<Instant>,
     pub(crate) fx: Box<dyn FnMut([Option<Lighting>; 2]) + Send>,
     fx_last: [Option<Lighting>; 2],
     pub(crate) persist: bool,
@@ -169,6 +198,10 @@ impl Engine {
             toggles: HashMap::new(),
             asleep: false,
             osd: Box::new(osd::show),
+            dpi_led_nv: None,
+            wdl: Box::new(win::wdl_state),
+            wdl_on: false,
+            dpi_led_off_at: None,
             fx: Box::new(|_| {}),
             fx_last: [None, None],
             persist: true,
@@ -195,6 +228,7 @@ impl Engine {
         let ticker = tick(Duration::from_millis(250));
         let mut n: u32 = 0;
         self.st.ghub_running = win::ghub_running();
+        self.poll_wdl();
         self.reconcile();
         loop {
             select! {
@@ -245,6 +279,14 @@ impl Engine {
                             let _ = self.dev.send(DevCmd::ReadOnboard);
                         }
                     }
+                    Ok(EngineMsg::WriteOnboard { sectors, active }) => self.on_write_onboard(sectors, active),
+                    Ok(EngineMsg::Reapply) => self.on_reapply(),
+                    Ok(EngineMsg::RestoreOnboard { slots }) => self.on_restore_onboard(slots),
+                    Ok(EngineMsg::SetStartupEffect(on)) => {
+                        if !observer() && self.st.connected && !self.st.ghub_running {
+                            let _ = self.dev.send(DevCmd::SetStartupEffect(on));
+                        }
+                    }
                     Ok(EngineMsg::TestMacro(steps)) => self.test_macro(steps),
                     Ok(EngineMsg::TestPerfect180 { counts }) => {
                         let e = self.cfg.lock().unwrap().extras.clone();
@@ -270,9 +312,11 @@ impl Engine {
                         let g = win::ghub_running();
                         dirty |= g != self.st.ghub_running;
                         self.st.ghub_running = g;
+                        dirty |= self.poll_wdl();
                     }
                     dirty |= self.check_sleep();
                     dirty |= self.expire_flash();
+                    self.expire_dpi_led();
                     if self.retry_at.is_some_and(|t| Instant::now() >= t) {
                         self.retry_at = None;
                         dirty = true;
@@ -288,6 +332,76 @@ impl Engine {
     fn test_macro(&self, steps: Vec<MacroStep>) {
         let input = self.input.clone();
         std::thread::spawn(move || play(&*input, &steps, None));
+    }
+
+    fn on_write_onboard(&mut self, sectors: Vec<(u16, [u8; 256])>, active: Option<u8>) {
+        let why = if observer() {
+            Some("not available in this mode")
+        } else if !self.st.connected {
+            Some("the mouse is not connected")
+        } else if self.st.ghub_running {
+            Some("G HUB is running")
+        } else {
+            None
+        };
+        match why {
+            None => {
+                let _ = self.dev.send(DevCmd::WriteOnboard { sectors, active });
+            }
+            Some(w) => {
+                let _ = self.ui.send(UiEvent::OnboardWritten(Err(format!("Not saved: {w}"))));
+            }
+        }
+    }
+
+    fn on_restore_onboard(&mut self, slots: Vec<u16>) {
+        if observer() || !self.st.connected || self.st.ghub_running {
+            let _ = self.ui.send(UiEvent::OnboardWritten(Err("Not restored: not available right now".into())));
+        } else {
+            let _ = self.dev.send(DevCmd::RestoreOnboard { slots });
+        }
+    }
+
+    /// A sector write reloads the mouse's stored profile; forget what we applied and send it all again.
+    fn on_reapply(&mut self) {
+        if self.applied.take().is_some() {
+            self.st.controlled = false;
+        }
+        self.reconcile();
+    }
+
+    /// Show the active DPI level on the mouse's LEDs (always on) or briefly (then off after 2 s).
+    fn dpi_led_sync(&mut self, always: bool, show: bool) {
+        let level = {
+            let cfg = self.cfg.lock().unwrap();
+            let Some(p) = cfg.profile_at(self.st.active) else { return };
+            let dpi = self.applied.as_ref().map_or(p.dpi.active, |a| a.dpi);
+            (p.dpi.levels.iter().position(|&d| d == dpi).unwrap_or(0) + 1).min(5) as u8
+        };
+        if always {
+            let _ = self.dev.send(DevCmd::DpiLed(Some(level)));
+            self.dpi_led_off_at = None;
+        } else if show {
+            let _ = self.dev.send(DevCmd::DpiLed(Some(level)));
+            self.dpi_led_off_at = Some(Instant::now() + Duration::from_secs(2));
+        }
+    }
+
+    /// Re-read the Windows Dynamic Lighting switch; true when it changed.
+    pub(crate) fn poll_wdl(&mut self) -> bool {
+        let on = (self.wdl)() == Some(true);
+        let changed = on != self.wdl_on;
+        self.wdl_on = on;
+        changed
+    }
+
+    pub(crate) fn expire_dpi_led(&mut self) {
+        if self.dpi_led_off_at.is_some_and(|t| Instant::now() >= t) {
+            self.dpi_led_off_at = None;
+            if self.applied.is_some() {
+                let _ = self.dev.send(DevCmd::DpiLed(None));
+            }
+        }
     }
 
     fn on_control_lost(&mut self) {
@@ -369,7 +483,7 @@ impl Engine {
             } else {
                 [p.lighting[0].to_led(), p.lighting[1].to_led()]
             };
-            let host = if flashing || self.asleep { [false; 2] } else { [p.lighting[0].effect.is_host(), p.lighting[1].effect.is_host()] };
+            let host = if flashing || self.asleep || self.wdl_on { [false; 2] } else { [p.lighting[0].effect.is_host(), p.lighting[1].effect.is_host()] };
             self.set_fx([0, 1].map(|z| host[z].then_some(p.lighting[z])), false);
             let target = Applied {
                 map: p.spy_map(),
@@ -377,7 +491,10 @@ impl Engine {
                 rate_ms: p.rate_ms,
                 leds,
                 host,
+                send_leds: !self.wdl_on,
             };
+            let was_none = self.applied.is_none();
+            let mut dpi_changed = false;
             match &self.applied {
                 None => {
                     let _ = self.dev.send(DevCmd::TakeControl(target.clone()));
@@ -388,12 +505,13 @@ impl Engine {
                     }
                     if old.dpi != target.dpi {
                         let _ = self.dev.send(DevCmd::SetDpi(target.dpi));
+                        dpi_changed = true;
                     }
                     if old.rate_ms != target.rate_ms {
                         let _ = self.dev.send(DevCmd::SetRate(target.rate_ms));
                     }
                     for z in 0..2 {
-                        if !target.host[z] && (old.leds[z] != target.leds[z] || old.host[z]) {
+                        if target.send_leds && !target.host[z] && (old.leds[z] != target.leds[z] || old.host[z] || !old.send_leds) {
                             let _ = self.dev.send(DevCmd::SetZone { zone: z as u8, led: target.leds[z] });
                         }
                     }
@@ -401,6 +519,18 @@ impl Engine {
             }
             self.applied = Some(target);
             self.st.controlled = true;
+            let always = cfg.general.dpi_led_always_on;
+            let nv_changed = self.dpi_led_nv != Some(always);
+            if nv_changed {
+                let _ = self.dev.send(DevCmd::SetDpiLedAlwaysOn(always));
+                self.dpi_led_nv = Some(always);
+                if !always && !was_none {
+                    let _ = self.dev.send(DevCmd::DpiLed(None));
+                }
+            }
+            if was_none || dpi_changed || (nv_changed && always) {
+                self.dpi_led_sync(always, !was_none && dpi_changed);
+            }
         } else if self.applied.is_some() {
             self.set_fx([None, None], true);
             self.release_all();
@@ -648,7 +778,7 @@ impl Engine {
         if osd_on {
             (self.osd)(OsdKind::Dpi { value, levels, active: index as u8 });
         }
-        if flash_on && !self.asleep && self.applied.is_some() {
+        if flash_on && !self.asleep && !self.wdl_on && self.applied.is_some() {
             self.set_fx([None, None], true);
             let led = Lighting { effect: Effect::Fixed, color: dpi_flash_color(index), ..Default::default() }.to_led();
             for zone in 0..2u8 {
@@ -973,6 +1103,18 @@ mod tests {
     }
 
     #[test]
+    fn unassigned_gshift_slot_keeps_the_base_assignment() {
+        let mut r = rig(|c| {
+            base(c, 5, Assignment::System(SystemFn::GShift));
+            base(c, 3, Assignment::Key(KeyCombo { vk: 0x42, mods: 0 }));
+        });
+        r.take_control();
+        r.e.on_mask(1 << 5);
+        r.e.on_mask((1 << 5) | (1 << 3));
+        assert_eq!(r.rec.events(), vec![Ev::Key(0x42, true)]);
+    }
+
+    #[test]
     fn gshift_layer_switches_assignment() {
         let mut r = rig(|c| {
             base(c, 5, Assignment::System(SystemFn::GShift));
@@ -1101,6 +1243,108 @@ mod tests {
         let cfg = r.cfg.lock().unwrap();
         let p = &cfg.apps[0].profiles[0];
         assert_eq!(own, vec![(0, p.lighting[0].to_led()), (1, p.lighting[1].to_led())]);
+    }
+
+    #[test]
+    fn onboard_write_is_forwarded_only_when_allowed() {
+        let mut r = rig(|_| {});
+        r.e.on_write_onboard(vec![(1, [0u8; 256])], None);
+        assert!(matches!(r.cmds().as_slice(), [DevCmd::WriteOnboard { .. }]));
+        r.e.st.ghub_running = true;
+        r.e.on_write_onboard(vec![(1, [0u8; 256])], None);
+        assert!(r.cmds().is_empty());
+        r.e.st.ghub_running = false;
+        set_observer(true);
+        r.e.on_write_onboard(vec![(1, [0u8; 256])], None);
+        assert!(r.cmds().is_empty());
+    }
+
+    #[test]
+    fn reapply_sends_a_fresh_take_control() {
+        let mut r = rig(|_| {});
+        r.take_control();
+        r.e.reconcile();
+        assert!(r.cmds().is_empty());
+        r.e.on_reapply();
+        assert!(matches!(r.cmds().first(), Some(DevCmd::TakeControl(_))));
+    }
+
+    fn led_cmds(cmds: Vec<DevCmd>) -> Vec<Option<u8>> {
+        cmds.into_iter().filter_map(|c| if let DevCmd::DpiLed(l) = c { Some(l) } else { None }).collect()
+    }
+
+    #[test]
+    fn dpi_leds_follow_the_level_when_always_on() {
+        let mut r = rig(|c| c.general.dpi_led_always_on = true);
+        r.e.reconcile();
+        let cmds = r.cmds();
+        assert!(cmds.iter().any(|c| matches!(c, DevCmd::SetDpiLedAlwaysOn(true))));
+        assert_eq!(led_cmds(cmds), vec![Some(1)]);
+        r.press(7);
+        assert_eq!(led_cmds(r.cmds()), vec![Some(2)]);
+    }
+
+    #[test]
+    fn dpi_leds_show_the_level_then_turn_off() {
+        let mut r = rig(|_| {});
+        r.take_control();
+        r.press(7);
+        assert_eq!(led_cmds(r.cmds()), vec![Some(2)]);
+        assert!(r.e.dpi_led_off_at.is_some());
+        r.e.expire_dpi_led();
+        assert!(r.cmds().is_empty());
+        r.e.dpi_led_off_at = Some(Instant::now() - Duration::from_millis(1));
+        r.e.expire_dpi_led();
+        assert_eq!(led_cmds(r.cmds()), vec![None]);
+    }
+
+    #[test]
+    fn dpi_led_commands_are_inert_in_observer_mode() {
+        let mut r = rig(|c| c.general.dpi_led_always_on = true);
+        set_observer(true);
+        r.e.reconcile();
+        assert!(r.cmds().is_empty());
+    }
+
+    fn wdl_rig(edit: impl FnOnce(&mut Config)) -> (Rig, Arc<Mutex<Option<bool>>>) {
+        let mut r = rig(edit);
+        let state = Arc::new(Mutex::new(Some(true)));
+        let s = state.clone();
+        r.e.wdl = Box::new(move || *s.lock().unwrap());
+        (r, state)
+    }
+
+    #[test]
+    fn windows_lighting_on_means_no_lighting_data() {
+        let (mut r, state) = wdl_rig(|c| {
+            c.general.dpi_flash = true;
+            host_logo(Effect::Screen)(c);
+        });
+        let log = fx_rec(&mut r);
+        assert!(r.e.poll_wdl());
+        r.e.reconcile();
+        let cmds = r.cmds();
+        let Some(DevCmd::TakeControl(ap)) = cmds.first() else { panic!("no TakeControl") };
+        assert!(!ap.send_leds && ap.host == [false, false]);
+        assert!(log.lock().unwrap().is_empty());
+        r.press(7);
+        assert!(zone_cmds(r.cmds()).is_empty());
+        assert!(r.e.flash_until.is_none());
+        *state.lock().unwrap() = Some(false);
+        assert!(r.e.poll_wdl());
+        r.e.reconcile();
+        let zones = zone_cmds(r.cmds());
+        assert_eq!(zones.iter().map(|z| z.0).collect::<Vec<_>>(), vec![0]);
+        assert!(last_fx(&log).0[1].is_some());
+    }
+
+    #[test]
+    fn windows_lighting_off_changes_nothing() {
+        let (mut r, state) = wdl_rig(|_| {});
+        *state.lock().unwrap() = Some(false);
+        assert!(!r.e.poll_wdl());
+        *state.lock().unwrap() = None;
+        assert!(!r.e.poll_wdl());
     }
 
     #[test]

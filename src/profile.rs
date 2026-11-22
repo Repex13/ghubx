@@ -435,9 +435,11 @@ impl Profile {
         l
     }
 
-    /// Resolved function for a slot in a layer (`Default` -> native).
+    /// Resolved function for a slot in a layer (`Default` -> native; a `Default`
+    /// G-Shift slot keeps the base layer's assignment, as G HUB does).
     pub fn effective(&self, slot: usize, gshift: bool) -> Assignment {
         match self.layer(gshift).get(slot) {
+            None | Some(Assignment::Default) if gshift => self.effective(slot, false),
             None | Some(Assignment::Default) => native(slot),
             Some(a) => a.clone(),
         }
@@ -613,6 +615,8 @@ pub struct General {
     pub osd_profile: bool,
     /// Flash both lighting zones in the speed's color after a DPI button.
     pub dpi_flash: bool,
+    /// Keep the DPI LEDs lit (the mouse stores this; GHUB-X also lights the level while it controls).
+    pub dpi_led_always_on: bool,
 }
 
 impl Default for General {
@@ -626,6 +630,7 @@ impl Default for General {
             osd_dpi: true,
             osd_profile: true,
             dpi_flash: false,
+            dpi_led_always_on: false,
         }
     }
 }
@@ -952,6 +957,11 @@ pub struct OnboardProfile {
     pub dpi: Vec<u16>,
     pub name: String,
     pub leds: [[u8; 11]; 2],
+    /// Active DPI level index and DPI shift level index.
+    pub active_dpi: usize,
+    pub shift_dpi: usize,
+    /// Button entries of the base and G-Shift layer (G1..G11).
+    pub layers: [[[u8; 4]; SLOTS]; 2],
 }
 
 impl OnboardProfile {
@@ -963,8 +973,14 @@ impl OnboardProfile {
             .map(|i| u16::from_le_bytes([s[3 + i * 2], s[4 + i * 2]]))
             .filter(|&d| d != 0 && d != 0xFFFF)
             .collect();
-        let raw_name = &s[0xA0..0xA0 + 48];
-        let end = raw_name.iter().position(|&c| c == 0 || c == 0xFF).unwrap_or(48);
+        let units: Vec<u16> = s[0xA0..0xD0].as_chunks::<2>().0.iter().map(|c| u16::from_le_bytes(*c)).take_while(|&u| u != 0 && u != 0xFFFF).collect();
+        let mut layers = [[[0u8; 4]; SLOTS]; 2];
+        for (li, layer) in layers.iter_mut().enumerate() {
+            for (slot, e) in layer.iter_mut().enumerate() {
+                let o = 0x20 + li * 0x40 + slot * 4;
+                e.copy_from_slice(&s[o..o + 4]);
+            }
+        }
         let mut leds = [[0u8; 11]; 2];
         leds[0].copy_from_slice(&s[0xD0..0xDB]);
         leds[1].copy_from_slice(&s[0xDB..0xE6]);
@@ -972,10 +988,237 @@ impl OnboardProfile {
             rate_ms: s[0],
             default_dpi: s[1] as usize,
             dpi,
-            name: String::from_utf8_lossy(&raw_name[..end]).into_owned(),
+            name: String::from_utf16_lossy(&units),
             leds,
+            active_dpi: s[1] as usize,
+            shift_dpi: s[2] as usize,
+            layers,
         })
     }
+}
+
+
+/// A profile as stored in an on-board sector, plus what could not be stored.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OnboardEncoding {
+    pub sector: [u8; SECTOR_SIZE],
+    /// (slot, G-Shift layer, label of what the mouse cannot store).
+    pub not_stored: Vec<(usize, bool, String)>,
+}
+
+fn hid_usage_of(vk: u16) -> Option<u8> {
+    (0u32..=0xE7).find(|&u| crate::ghub_import::hid_to_vk(u) == Some(vk)).map(|u| u as u8)
+}
+
+fn consumer_usage(vk: u16) -> Option<u16> {
+    Some(match vk {
+        0xB0 => 0x00B5,
+        0xB1 => 0x00B6,
+        0xB2 => 0x00B7,
+        0xB3 => 0x00CD,
+        0xAD => 0x00E2,
+        0xAF => 0x00E9,
+        0xAE => 0x00EA,
+        _ => return None,
+    })
+}
+
+fn assignment_label(a: &Assignment, macros: &[Macro]) -> String {
+    match a {
+        Assignment::Macro(id) => macros.iter().find(|m| m.id == *id).map(|m| format!("{} (macro)", m.name)).unwrap_or_else(|| "macro".into()),
+        Assignment::Launch { name, .. } => format!("{name} (launch)"),
+        Assignment::Perfect180 { .. } => "Perfect 180".into(),
+        Assignment::ToggleScrollAccel => "scroll acceleration".into(),
+        Assignment::System(SystemFn::ReportRateCycle) => "report rate cycle".into(),
+        Assignment::Mouse(MouseFn::DoubleClick) => "double click".into(),
+        Assignment::Key(k) | Assignment::Shortcut { combo: k, .. } => format!("key {:#04X}", k.vk),
+        _ => "button".into(),
+    }
+}
+
+/// 4-byte button entry; `None` when the mouse cannot store the assignment.
+fn encode_button(a: &Assignment) -> Option<[u8; 4]> {
+    let special = |c: u8| Some([0x90, c, 0, 0]);
+    match a {
+        Assignment::Default => None,
+        Assignment::Disabled => special(0),
+        Assignment::Mouse(m) => match m {
+            MouseFn::Primary => Some([0x80, 1, 0, 1]),
+            MouseFn::Secondary => Some([0x80, 1, 0, 2]),
+            MouseFn::Middle => Some([0x80, 1, 0, 4]),
+            MouseFn::Back => Some([0x80, 1, 0, 8]),
+            MouseFn::Forward => Some([0x80, 1, 0, 16]),
+            MouseFn::WheelLeft => special(0x01),
+            MouseFn::WheelRight => special(0x02),
+            MouseFn::WheelDown => special(0x10),
+            MouseFn::WheelUp => special(0x11),
+            MouseFn::DoubleClick => None,
+        },
+        Assignment::Key(k) | Assignment::Shortcut { combo: k, .. } => {
+            if let Some(c) = consumer_usage(k.vk) {
+                return Some([0x80, 3, (c >> 8) as u8, c as u8]);
+            }
+            hid_usage_of(k.vk).map(|u| [0x80, 2, k.mods & 0x0F, u])
+        }
+        Assignment::System(s) => match s {
+            SystemFn::DpiUp => special(0x03),
+            SystemFn::DpiDown => special(0x04),
+            SystemFn::DpiCycle => special(0x05),
+            SystemFn::DpiDefault => special(0x06),
+            SystemFn::DpiShift => special(0x07),
+            SystemFn::OnboardProfileCycle | SystemFn::ProfileCycle => special(0x0A),
+            SystemFn::GShift => special(0x0B),
+            SystemFn::ReportRateCycle => None,
+        },
+        _ => None,
+    }
+}
+
+/// Zone payload as stored on-board: like `Lighting::to_led` but the intensity byte is the brightness.
+fn onboard_zone(l: &Lighting) -> [u8; 11] {
+    let host = l.effect.is_host();
+    let eff = if host { Effect::Fixed } else { l.effect };
+    let mut b = Lighting { effect: eff, ..*l }.to_led();
+    let br = l.brightness.clamp(1, 100);
+    match eff {
+        Effect::Breathing => b[7] = br,
+        Effect::Cycle => b[8] = br,
+        _ => {}
+    }
+    b
+}
+
+/// The sector G HUB writes for this profile (byte-exact).
+pub fn encode_onboard(p: &Profile, name: &str, macros: &[Macro]) -> OnboardEncoding {
+    let mut s = [0xFFu8; SECTOR_SIZE];
+    s[0] = p.rate_ms;
+    let idx = |d: u16| p.dpi.levels.iter().position(|&x| x == d).unwrap_or(0) as u8;
+    s[1] = idx(p.dpi.active);
+    s[2] = idx(p.dpi.shift);
+    for i in 0..5 {
+        let v = p.dpi.levels.get(i).copied().unwrap_or(0);
+        s[3 + i * 2..5 + i * 2].copy_from_slice(&v.to_le_bytes());
+    }
+    s[0x11] = 0;
+    let mut not_stored = Vec::new();
+    for (li, gshift) in [(0usize, false), (1, true)] {
+        let base = 0x20 + li * 0x40;
+        for slot in 0..16 {
+            let entry = if slot >= SLOTS {
+                [0xFF; 4]
+            } else {
+                let own = p.layer(gshift).get(slot).cloned().unwrap_or_default();
+                let a = if own == Assignment::Default && gshift { p.base.get(slot).cloned().unwrap_or_default() } else { own };
+                let a = if a == Assignment::Default { native(slot) } else { a };
+                match encode_button(&a) {
+                    Some(e) => e,
+                    None => {
+                        not_stored.push((slot, gshift, assignment_label(&a, macros)));
+                        [0x90, 0, 0, 0]
+                    }
+                }
+            };
+            s[base + slot * 4..base + slot * 4 + 4].copy_from_slice(&entry);
+        }
+    }
+    s[0xA0..0xD0].fill(0);
+    for (i, u) in name.encode_utf16().take(23).enumerate() {
+        s[0xA0 + i * 2..0xA2 + i * 2].copy_from_slice(&u.to_le_bytes());
+    }
+    s[0xD0..0xDB].copy_from_slice(&onboard_zone(&p.lighting[0]));
+    s[0xDB..0xE6].copy_from_slice(&onboard_zone(&p.lighting[1]));
+    s[0xFC] = 0;
+    set_crc(&mut s);
+    OnboardEncoding { sector: s, not_stored }
+}
+
+fn set_crc(s: &mut [u8; SECTOR_SIZE]) {
+    let c = crc16(&s[..SECTOR_SIZE - 2]).to_be_bytes();
+    s[SECTOR_SIZE - 2..].copy_from_slice(&c);
+}
+
+/// Sector 0 for five slots (sectors 1..=5) with the given enabled flags.
+pub fn encode_directory(enabled: [bool; 5]) -> [u8; SECTOR_SIZE] {
+    let mut s = [0xFFu8; SECTOR_SIZE];
+    for (i, en) in enabled.iter().enumerate() {
+        s[i * 4..i * 4 + 4].copy_from_slice(&[0, i as u8 + 1, u8::from(*en), 0]);
+    }
+    s[20..24].copy_from_slice(&[0xFF, 0xFF, 0, 0]);
+    set_crc(&mut s);
+    s
+}
+
+/// A ROM sector (0x0101..) as the user sector: same bytes, CRC recomputed.
+pub fn restore_from_rom(rom: &[u8; SECTOR_SIZE]) -> [u8; SECTOR_SIZE] {
+    let mut s = *rom;
+    set_crc(&mut s);
+    s
+}
+
+/// Plain-language text of one 4-byte button entry.
+pub fn describe_button(e: [u8; 4]) -> String {
+    match e[0] {
+        0x80 => match e[1] {
+            1 => match e[3] {
+                1 => "Left click".into(),
+                2 => "Right click".into(),
+                4 => "Middle click".into(),
+                8 => "Back".into(),
+                16 => "Forward".into(),
+                b => format!("Mouse button {b:#04X}"),
+            },
+            2 => {
+                let mut t = String::new();
+                for (bit, n) in [(MOD_CTRL, "Ctrl+"), (MOD_SHIFT, "Shift+"), (MOD_ALT, "Alt+"), (MOD_WIN, "Win+")] {
+                    if e[2] & bit != 0 {
+                        t += n;
+                    }
+                }
+                match crate::ghub_import::hid_to_vk(e[3] as u32) {
+                    Some(vk @ 0x41..=0x5A) | Some(vk @ 0x30..=0x39) => format!("Key {t}{}", vk as u8 as char),
+                    _ => format!("Key {t}#{:02X}", e[3]),
+                }
+            }
+            3 => match u16::from_be_bytes([e[2], e[3]]) {
+                0xB5 => "Next track".into(),
+                0xB6 => "Previous track".into(),
+                0xB7 => "Stop".into(),
+                0xCD => "Play / pause".into(),
+                0xE2 => "Mute".into(),
+                0xE9 => "Volume up".into(),
+                0xEA => "Volume down".into(),
+                u => format!("Media {u:#06X}"),
+            },
+            _ => "Unknown".into(),
+        },
+        0x90 => match e[1] {
+            0 => "Nothing".into(),
+            1 => "Wheel left".into(),
+            2 => "Wheel right".into(),
+            3 => "DPI up".into(),
+            4 => "DPI down".into(),
+            5 => "DPI cycle".into(),
+            6 => "DPI default".into(),
+            7 => "DPI shift".into(),
+            0x0A => "Profile cycle".into(),
+            0x0B => "G-Shift".into(),
+            0x10 => "Wheel down".into(),
+            0x11 => "Wheel up".into(),
+            c => format!("Special {c:#04X}"),
+        },
+        _ => "Unused".into(),
+    }
+}
+
+/// Buttons of a stored profile (base layer) that differ from the factory layout: "G4: Nothing".
+pub fn button_diffs(p: &OnboardProfile) -> Vec<String> {
+    (0..SLOTS)
+        .filter_map(|slot| {
+            let now = describe_button(p.layers[0][slot]);
+            let factory = describe_button(encode_button(&native(slot)).unwrap_or([0xFF; 4]));
+            (now != factory).then(|| format!("G{}: {now}", slot + 1))
+        })
+        .collect()
 }
 
 /// Sector 1 as read from a G502 HERO (used by the `onboard` shot page and tests).
@@ -1154,6 +1397,54 @@ mod tests {
         assert!(!plain.contains("host"), "default host written out");
         let back: Config = toml::from_str(&plain).unwrap();
         assert_eq!(back.apps[0].profiles[0].lighting[0].host, HostFx::default());
+    }
+
+    fn fixture(b: &[u8]) -> [u8; 256] {
+        b.try_into().expect("256 byte fixture")
+    }
+
+    fn ghub_default_profile() -> (Profile, Vec<Macro>) {
+        let macros = vec![
+            Macro { id: "jump".into(), name: "jump".into(), kind: MacroKind::default(), steps: vec![] },
+            Macro { id: "cl".into(), name: "cl".into(), kind: MacroKind::default(), steps: vec![] },
+        ];
+        let mut p = Profile { name: "Default".into(), dpi: DpiTable { levels: vec![600, 1000, 1600], active: 600, default: 1600, shift: 600 }, rate_ms: 1, base: default_slots(), gshift: default_slots(), lighting: [Lighting::default(); 2], turn: None };
+        p.base[3] = Assignment::Macro("jump".into());
+        p.base[4] = Assignment::Macro("cl".into());
+        p.base[5] = Assignment::Key(KeyCombo { vk: 0x53, mods: 0 });
+        p.lighting = [Lighting { effect: Effect::Cycle, period_ms: 8000, brightness: 100, ..Default::default() }; 2];
+        (p, macros)
+    }
+
+    #[test]
+    fn encodes_the_sector_ghub_wrote() {
+        let (p, macros) = ghub_default_profile();
+        let e = encode_onboard(&p, "PROFILE_NAME_DEFAULT", &macros);
+        assert_eq!(e.sector, fixture(include_bytes!("../tests/fixtures/ghub_slot5_desktop_default.bin")));
+        let mut got: Vec<(usize, bool)> = e.not_stored.iter().map(|(s, g, _)| (*s, *g)).collect();
+        got.sort();
+        assert_eq!(got, vec![(3, false), (3, true), (4, false), (4, true)]);
+    }
+
+    #[test]
+    fn encodes_directory_and_rom_restore() {
+        assert_eq!(encode_directory([true; 5]), fixture(include_bytes!("../tests/fixtures/factory_directory.bin")));
+        assert_eq!(restore_from_rom(&fixture(include_bytes!("../tests/fixtures/rom_slot5.bin"))), fixture(include_bytes!("../tests/fixtures/factory_slot5.bin")));
+    }
+
+    #[test]
+    fn encoded_profile_parses_back() {
+        let (mut p, macros) = ghub_default_profile();
+        p.lighting[1] = Lighting { effect: Effect::Breathing, color: [0, 0xDC, 0xFF], period_ms: 8000, brightness: 100, ..Default::default() };
+        let e = encode_onboard(&p, "Desktop: Default", &macros);
+        let back = OnboardProfile::parse(&e.sector).unwrap();
+        assert_eq!((back.dpi.clone(), back.rate_ms, back.name.as_str()), (vec![600, 1000, 1600], 1, "Desktop: Default"));
+        assert_eq!(back.leds[0], onboard_zone(&p.lighting[0]));
+        assert_eq!(back.leds[1], onboard_zone(&p.lighting[1]));
+        let rom2 = fixture(include_bytes!("../tests/fixtures/factory_slot2.bin"));
+        let mut mine = onboard_zone(&p.lighting[1]);
+        mine[7] = rom2[0xD0 + 7];
+        assert_eq!(mine, rom2[0xD0..0xDB]);
     }
 
     #[test]

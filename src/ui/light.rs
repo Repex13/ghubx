@@ -10,12 +10,12 @@ use egui::ecolor::Hsva;
 use egui::{Align2, Color32, CornerRadius, Mesh, Pos2, Rect, Sense, Shape, Stroke, StrokeKind, Ui, pos2, vec2};
 
 pub const EFFECTS: [(&str, Effect); 6] = [
+    ("OFF", Effect::Off),
     ("FIXED", Effect::Fixed),
-    ("BREATHING", Effect::Breathing),
     ("CYCLE", Effect::Cycle),
+    ("BREATHING", Effect::Breathing),
     ("SCREEN SAMPLER", Effect::Screen),
     ("AUDIO VISUALIZER", Effect::Audio),
-    ("OFF", Effect::Off),
 ];
 
 const SWATCHES: [[u8; 3]; 9] = [
@@ -89,26 +89,54 @@ impl GhubApp {
         let top = panel.top();
         text(ui, pos2(x0, top + 17.0), Align2::LEFT_TOP, "LIGHTSYNC", t_panel_title());
 
-        let info = Rect::from_min_size(pos2(x0 + 12.0, top + 64.0), vec2(266.0, 72.0));
-        ui.painter().rect_filled(info, CornerRadius::same(8), pal().surface_hi);
-        burst(ui.painter(), pos2(info.left() + 22.0, info.top() + 22.0), pal().primary);
-        text(ui, pos2(info.left() + 42.0, info.top() + 22.0), Align2::LEFT_CENTER, "DEVICE LIGHTING", Ts::new(Fam::Bold, 12.0, pal().primary));
-        para(ui, pos2(info.left() + 14.0, info.top() + 38.0), 240.0, "If Windows Dynamic Lighting controls this mouse it can override these effects.", Ts::new(Fam::Reg, 11.0, pal().text_high).ls(0.4));
+        let wdl = match self.wdl_cache {
+            Some((at, v)) if at.elapsed().as_millis() < 1000 => v,
+            _ => {
+                let v = crate::win::wdl_state();
+                self.wdl_cache = Some((std::time::Instant::now(), v));
+                v
+            }
+        };
+        let wdl_on = wdl == Some(true);
+        let dy = if wdl_on { 0.0 } else { -96.0 };
+        if let Some(on) = wdl {
+            let ry = top + 78.0;
+            burst(ui.painter(), pos2(x0 + 22.0, ry), pal().primary);
+            let tr = text(ui, pos2(x0 + 42.0, ry), Align2::LEFT_CENTER, "WINDOWS SETTINGS", Ts::new(Fam::Bold, 14.0, pal().primary));
+            if click(ui, tr.expand(4.0), "wdl-open").clicked() {
+                crate::win::open_wdl_settings();
+            }
+            let qc = pos2(x0 + 215.0, ry);
+            ui.painter().circle_stroke(qc, 8.0, Stroke::new(1.3, pal().label));
+            text(ui, qc, Align2::CENTER_CENTER, "?", Ts::new(Fam::Bold, 11.0, pal().label));
+            if hit(ui, Rect::from_center_size(qc, vec2(20.0, 20.0)), "wdl-help", Sense::hover()).hovered() {
+                super::device::tooltip(ui, pos2(qc.x + 12.0, qc.y + 26.0), "Windows controls this device's lighting while this is on.");
+            }
+            if switch(ui, pos2(x0 + 254.0, ry), on, pal().primary, "wdl-switch").clicked() {
+                crate::win::set_wdl(!on);
+                self.wdl_cache = None;
+            }
+        }
+        if wdl_on {
+            let info = Rect::from_min_size(pos2(x0 + 12.0, top + 116.0), vec2(266.0, 72.0));
+            ui.painter().rect_filled(info, CornerRadius::same(8), pal().surface_hi);
+            para(ui, pos2(info.left() + 14.0, info.top() + 14.0), 240.0, "To configure LIGHTSYNC, disable Windows Settings above", Ts::new(Fam::Reg, 12.0, pal().text_high).ls(0.4));
+        }
 
-        if let Some(z) = tabs(ui, pos2(x0, top + 216.0), &ZONE_NAMES, self.light.zone, 16.0, "zones") {
+        if let Some(z) = tabs(ui, pos2(x0, top + 216.0 + dy), &ZONE_NAMES, self.light.zone, 16.0, "zones") {
             self.light.zone = z;
         }
         let zone = self.light.zone;
         let l = prof.lighting[zone];
-        text(ui, pos2(x0, top + 264.0), Align2::LEFT_TOP, "EFFECT", t_section());
-        let er = text(ui, pos2(x0, top + 302.0), Align2::LEFT_CENTER, effect_name(l.effect), Ts::new(Fam::Light, 12.0, pal().text).ls(1.0));
+        text(ui, pos2(x0, top + 264.0 + dy), Align2::LEFT_TOP, "EFFECT", t_section());
+        let er = text(ui, pos2(x0, top + 302.0 + dy), Align2::LEFT_CENTER, effect_name(l.effect), Ts::new(Fam::Light, 12.0, pal().text).ls(1.0));
         chevron(ui.painter(), pos2(er.right() + 12.0, er.center().y), 4.0, false, Stroke::new(1.5, pal().text));
         let eresp = click(ui, Rect::from_min_max(er.min - vec2(4.0, 6.0), pos2(er.right() + 22.0, er.bottom() + 6.0)), "effect-dd");
-        if eresp.clicked() {
+        if eresp.clicked() && !wdl_on {
             self.open_overlay(ui.ctx(), Overlay::Effect(eresp.rect));
         }
 
-        let mut y = top + 338.0;
+        let mut y = top + 338.0 + dy;
         let mut new_l = l;
         if matches!(l.effect, Effect::Fixed | Effect::Breathing) {
             if let Some(c) = Self::color_picker(ui, pos2(x0, y), l.color, &mut self.light.picker, "light", &SWATCHES) {
@@ -149,14 +177,18 @@ impl GhubApp {
         } else {
             y += 8.0;
         }
-        if dark_button(ui, Rect::from_min_size(pos2(x0, y), vec2(278.0, 32.0)), "SYNC LIGHTING ZONES", "sync-zones", true).clicked() {
+        if dark_button(ui, Rect::from_min_size(pos2(x0, y), vec2(278.0, 32.0)), "SYNC LIGHTING ZONES", "sync-zones", true).clicked() && !wdl_on {
             self.edit(|c| {
                 let p = c.current_profile_mut();
                 p.lighting[1 - zone] = p.lighting[zone];
             });
             self.say("Both zones now use the same effect");
         }
-        if new_l != l {
+        if wdl_on {
+            let dim = Rect::from_min_max(pos2(panel.left() + 4.0, top + 200.0), pos2(panel.right() - 4.0, panel.bottom() - 4.0));
+            ui.painter().rect_filled(dim, CornerRadius::same(6), pal().surface.gamma_multiply(0.62));
+            hit(ui, dim, "wdl-block", Sense::click_and_drag());
+        } else if new_l != l {
             self.edit(|c| c.current_profile_mut().lighting[zone] = new_l);
         }
 

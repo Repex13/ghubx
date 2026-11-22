@@ -141,6 +141,20 @@ impl GhubApp {
         // left column: GHUB-X / Basilisk options
         let lx = win.left() + 176.0;
         let mut y = win.top() + 372.0;
+        text(ui, pos2(lx, y), Align2::LEFT_CENTER, "DPI LIGHTING", t_small_label());
+        y += 24.0;
+        if checkbox(ui, pos2(lx, y - 7.0), "ALWAYS ON", cfg.general.dpi_led_always_on, true, "ds-dpi-led").clicked() {
+            self.edit(|c| c.general.dpi_led_always_on = !c.general.dpi_led_always_on);
+        }
+        y += 32.0;
+        text(ui, pos2(lx, y), Align2::LEFT_CENTER, "DEVICE STARTUP EFFECT", t_small_label());
+        y += 24.0;
+        let can_write = !crate::engine::observer_mode() && !self.status.ghub_running && self.dev.connected;
+        let startup = self.dev.startup_effect.unwrap_or(true);
+        if checkbox(ui, pos2(lx, y - 7.0), "ENABLE", startup, can_write || self.shot.is_some(), "ds-startup").clicked() && can_write {
+            let _ = self.eng.send(EngineMsg::SetStartupEffect(!startup));
+        }
+        y += 32.0;
         text(ui, pos2(lx, y), Align2::LEFT_CENTER, "SOFTWARE CONTROL", t_small_label());
         y += 24.0;
         if checkbox(ui, pos2(lx, y - 7.0), "TAKE CONTROL WHEN G HUB IS CLOSED", cfg.general.take_control, true, "ds-take").clicked() {
@@ -149,7 +163,7 @@ impl GhubApp {
         y += 22.0;
         let (st, col) = self.control_text();
         para(ui, pos2(lx + 24.0, y - 6.0), 300.0, &st, Ts::new(Fam::Reg, 11.0, col).ls(0.4));
-        y += 40.0;
+        y += 34.0;
         text(ui, pos2(lx, y), Align2::LEFT_CENTER, "SCROLL ACCELERATION", t_small_label());
         y += 24.0;
         if checkbox(ui, pos2(lx, y - 7.0), "ENABLE", cfg.extras.scroll_accel, true, "ds-accel").clicked() {
@@ -163,7 +177,7 @@ impl GhubApp {
         text(ui, pos2(sr.right() + 14.0, y), Align2::LEFT_CENTER, &format!("{:.1}x", cfg.extras.scroll_boost), t_body_bold());
         y += 22.0;
         para(ui, pos2(lx + 24.0, y - 6.0), 300.0, "Fast flicks of the wheel scroll further, like Razer's scroll acceleration.", Ts::new(Fam::Reg, 11.0, pal().muted).ls(0.4));
-        y += 42.0;
+        y += 36.0;
         text(ui, pos2(lx, y), Align2::LEFT_CENTER, "DPI FEEDBACK", t_small_label());
         y += 24.0;
         if checkbox(ui, pos2(lx, y - 7.0), "FLASH LIGHTING ON DPI CHANGE", cfg.general.dpi_flash, true, "ds-flash").clicked() {
@@ -171,7 +185,7 @@ impl GhubApp {
         }
         y += 22.0;
         para(ui, pos2(lx + 24.0, y - 6.0), 300.0, "Both lighting zones show the speed's color for a moment.", Ts::new(Fam::Reg, 11.0, pal().muted).ls(0.4));
-        y += 42.0;
+        y += 36.0;
         text(ui, pos2(lx, y), Align2::LEFT_CENTER, "PERFECT 180", t_small_label());
         para(ui, pos2(lx, y + 14.0), 330.0, "Calibrate and assign it from Assignments > ACTIONS.", Ts::new(Fam::Reg, 11.0, pal().muted).ls(0.4));
 
@@ -205,9 +219,10 @@ impl GhubApp {
             text(ui, pos2(ox + 21.0, y), Align2::LEFT_CENTER, &format!("SLOT {slot}"), Ts::new(Fam::Reg, 12.0, if enabled { pal().text } else { pal().n(0x55) }));
             let stored = self.onboard.get(slot as usize - 1).and_then(|o| o.profile.as_ref());
             let ts = Ts::new(Fam::Reg, 12.0, if enabled { pal().primary } else { pal().primary_disabled });
+            let dim = self.onboard.get(slot as usize - 1).is_some_and(|o| !o.enabled);
             let label = match stored {
-                Some(p) => {
-                    let mut s = crate::profile::onboard_summary(p);
+                Some(p) if !p.name.is_empty() => {
+                    let mut s = p.name.clone();
                     let max_w = win.right() - 24.0 - (ox + 78.0);
                     while s.chars().count() > 1 && galley(ui, &s, ts, f32::INFINITY).size().x > max_w {
                         s.pop();
@@ -219,9 +234,14 @@ impl GhubApp {
                     }
                     s
                 }
-                None => format!("PROFILE {slot}"),
+                _ => format!("PROFILE {slot}"),
             };
-            text(ui, pos2(ox + 78.0, y), Align2::LEFT_CENTER, &label, ts);
+            let ts = if dim { Ts::new(Fam::Reg, 12.0, pal().n(0x55)) } else { ts };
+            let name_r = text(ui, pos2(ox + 78.0, y), Align2::LEFT_CENTER, &label, ts);
+            let link = click(ui, name_r.expand2(vec2(4.0, 6.0)), ("slot-name", slot));
+            if link.clicked() {
+                self.slot_menu = Some(super::onboard::SlotMenu { slot: slot as usize, opened_frame: ui.ctx().cumulative_frame_nr() });
+            }
             if let Some(p) = stored {
                 let name = |l: &[u8; 11]| crate::profile::Lighting::from_led(l).map_or("unknown", |l| super::light::effect_name(l.effect));
                 let start = p.dpi.get(p.default_dpi).map_or_else(|| "?".to_string(), |d| d.to_string());
@@ -235,6 +255,11 @@ Logo: {}", name(&p.leds[0]), name(&p.leds[1])));
             y += 25.5;
         }
         y += 8.0;
+        let rb = para(ui, pos2(ox, y), 210.0, "RESTORE ALL PROFILE SLOTS TO DEFAULT", Ts::new(Fam::Reg, 12.0, pal().text).ls(0.6));
+        if click(ui, rb.expand(3.0), "slot-restore-all").clicked() {
+            self.restore_all_slots();
+        }
+        y += rb.height() + 14.0;
         para(
             ui,
             pos2(ox, y),
@@ -246,6 +271,14 @@ Logo: {}", name(&p.leds[0]), name(&p.leds[1])));
             },
             Ts::new(Fam::Reg, 11.0, pal().muted).ls(0.4),
         );
+        if !matches!(self.route, Route::DeviceSettings) {
+            self.slot_menu = None;
+            self.slot_pending = None;
+            self.slot_details = None;
+        }
+        self.slot_details_ui(ui, win);
+        self.slot_menu_ui(ui, pos2(ox - 8.0, win.top() + 347.0));
+        self.slot_bar(ui, win);
     }
 }
 
