@@ -7,6 +7,7 @@ mod assign;
 mod device;
 mod home;
 mod light;
+mod lua_editor;
 pub mod palette;
 mod profiles;
 mod sens;
@@ -161,6 +162,10 @@ pub struct GhubApp {
     pub(crate) onboard_asked: bool,
     pub(crate) fx: Option<crate::fx::Handle>,
     pub(crate) obs: crate::obs::Handle,
+    /// Lua worker handle for the script editor's CONSOLE pane (fixed in dev/shot).
+    pub(crate) lua: crate::lua::Handle,
+    /// Full-window Lua editor opened from an app detail's SCRIPTING block.
+    pub(crate) script_editor: Option<lua_editor::ScriptEditor>,
     pub(crate) slot_saved_msg: Option<String>,
     pub(crate) wdl_cache: Option<(Instant, Option<bool>)>,
     pub(crate) slot_menu: Option<onboard::SlotMenu>,
@@ -187,6 +192,7 @@ impl GhubApp {
         shot: Option<Shot>,
         fx: Option<crate::fx::Handle>,
         obs: crate::obs::Handle,
+        lua: crate::lua::Handle,
     ) -> Self {
         let stash = Stash::default();
         if shot.is_none() {
@@ -243,6 +249,8 @@ impl GhubApp {
             onboard_asked: false,
             fx,
             obs,
+            lua,
+            script_editor: None,
             slot_saved_msg: None,
             wdl_cache: None,
             slot_menu: None,
@@ -271,7 +279,7 @@ impl GhubApp {
             "sens" => Route::Device(DevTab::Sensitivity),
             "light" | "fixed" | "wdl" | "effectmenu" | "screenfx" | "screenfxmine" | "sampleedit" | "audiofx" | "audiofxadv" => Route::Device(DevTab::Lighting),
             "devset" | "onboard" | "slotmenu" | "slotconfirm" | "slotdetails" => Route::DeviceSettings,
-            "profiles" | "appdetail" | "addgame" => Route::Profiles,
+            "profiles" | "appdetail" | "addgame" | "scriptedit" => Route::Profiles,
             "settings" | "sleep" => Route::Settings(0),
             "appearance" | "themeedit" | "mythemes" => Route::Settings(1),
             "ghub" => Route::Settings(2),
@@ -401,6 +409,10 @@ impl GhubApp {
         }
         if page == "appdetail" {
             self.prof.open_detail(0);
+        }
+        if page == "scriptedit" {
+            self.prof.open_detail(0);
+            self.script_editor = Some(lua_editor::ScriptEditor::new((0, 0), lua_editor::TEMPLATE.into()));
         }
         if page == "dropdown" {
             self.overlay = Some(Overlay::Profiles(Rect::from_min_size(pos2(670.0, 38.0), vec2(208.0, 42.0))));
@@ -1084,6 +1096,7 @@ impl eframe::App for GhubApp {
         let win = ui.max_rect();
         ui.painter().rect_filled(win, CornerRadius::ZERO, pal().bg);
         match self.route {
+            _ if self.script_editor.is_some() => self.script_overlay(ui, win),
             _ if self.sample_edit.is_some() => self.samples_overlay(ui, win),
             _ if self.asg.editor.is_some() => self.macro_overlay(ui, win),
             Route::Home => {

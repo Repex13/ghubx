@@ -24,7 +24,7 @@ SEED = Path(__file__).resolve().parent / "ui_seed_config.toml"
 PAGES = [
     "home", "dropdown", "assign", "assign2", "gshift", "select", "keys", "actions", "p180game", "gamecmds",
     "macro", "macroname", "macrotype", "macroseq", "macroedit", "macrorec", "macromenu", "macrocustom", "macrofold", "macroconfirm", "macroaction", "obsactions", "obsnew", "p180warn", "sens", "light", "fixed", "effectmenu", "screenfx", "screenfxmine", "sampleedit", "audiofx", "audiofxadv", "devset", "onboard", "slotmenu", "slotconfirm", "slotdetails", "wdl",
-    "profiles", "appdetail", "addgame", "settings", "sleep", "appearance", "themeedit", "mythemes", "ghub", "diag",
+    "profiles", "appdetail", "addgame", "scriptedit", "settings", "sleep", "appearance", "themeedit", "mythemes", "ghub", "diag",
 ]
 
 

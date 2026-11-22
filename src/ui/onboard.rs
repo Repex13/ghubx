@@ -4,7 +4,7 @@
 use super::theme::*;
 use super::GhubApp;
 use crate::engine::EngineMsg;
-use crate::profile::{OnboardSlot, button_diffs, encode_directory, encode_onboard, onboard_summary};
+use crate::profile::{NOT_A_SLOT, OnboardSlot, button_diffs, encode_directory, encode_onboard, onboard_summary};
 use egui::{Align2, CornerRadius, Rect, Stroke, Ui, pos2, vec2};
 
 /// What the confirmation bar will do.
@@ -132,7 +132,7 @@ impl GhubApp {
         let enc = encode_onboard(p, &name, &a.macros);
         let mut seen = Vec::new();
         for (s, _, label) in &enc.not_stored {
-            let t = format!("G{} {label}", s + 1);
+            let t = if *s == NOT_A_SLOT { label.clone() } else { format!("G{} {label}", s + 1) };
             if !seen.contains(&t) {
                 seen.push(t);
             }

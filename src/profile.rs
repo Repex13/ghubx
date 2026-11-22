@@ -607,6 +607,10 @@ pub struct Profile {
     /// Perfect 180 calibration for this profile only (falls back to `Extras`).
     #[serde(default)]
     pub turn: Option<TurnCal>,
+    /// Lua `OnEvent` script run while GHUB-X controls the mouse with this profile active.
+    /// `""` = NONE (Profiles -> app detail -> SCRIPTING).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub script: String,
 }
 
 /// Perfect 180 calibration stored with a profile.
@@ -636,6 +640,7 @@ impl Profile {
             gshift: default_slots(),
             lighting: Default::default(),
             turn: None,
+            script: String::new(),
         }
     }
 
@@ -1339,11 +1344,14 @@ impl OnboardProfile {
 }
 
 
+/// `not_stored` slot for entries that are not a button at all (the Lua script).
+pub const NOT_A_SLOT: usize = usize::MAX;
+
 /// A profile as stored in an on-board sector, plus what could not be stored.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OnboardEncoding {
     pub sector: [u8; SECTOR_SIZE],
-    /// (slot, G-Shift layer, label of what the mouse cannot store).
+    /// (slot or `NOT_A_SLOT`, G-Shift layer, label of what the mouse cannot store).
     pub not_stored: Vec<(usize, bool, String)>,
 }
 
@@ -1471,6 +1479,9 @@ pub fn encode_onboard(p: &Profile, name: &str, macros: &[Macro]) -> OnboardEncod
     s[0xDB..0xE6].copy_from_slice(&onboard_zone(&p.lighting[1]));
     s[0xFC] = 0;
     set_crc(&mut s);
+    if !p.script.is_empty() {
+        not_stored.push((NOT_A_SLOT, false, "Lua script".into()));
+    }
     OnboardEncoding { sector: s, not_stored }
 }
 
@@ -1667,6 +1678,25 @@ mod tests {
     }
 
     #[test]
+    fn script_round_trips_and_is_not_stored_on_the_mouse() {
+        let mut a = sample_app();
+        a.profiles[0].script = "function OnEvent(event, arg) end".into();
+        // .ghubx keeps it; a file without the field still loads (serde default)
+        let text = export_app(&a);
+        assert!(text.contains("function OnEvent"), "{text}");
+        assert_eq!(import_app(&text).unwrap().profiles[0].script, a.profiles[0].script);
+        let old = text.lines().filter(|l| !l.starts_with("script")).collect::<Vec<_>>().join("\n");
+        assert!(import_app(&old).unwrap().profiles[0].script.is_empty());
+        // empty scripts are not written into the config at all
+        let plain = toml::to_string_pretty(&Config::default()).unwrap();
+        assert!(!plain.contains("script"), "{plain}");
+        assert!(toml::from_str::<Config>(&plain).unwrap().apps[0].profiles[0].script.is_empty());
+        // and they cannot be stored on the mouse
+        let enc = encode_onboard(&a.profiles[0], "x", &a.macros);
+        assert!(enc.not_stored.iter().any(|(s, _, l)| *s == NOT_A_SLOT && l == "Lua script"), "{:?}", enc.not_stored);
+    }
+
+    #[test]
     fn import_rejects_garbage() {
         assert!(import_app("hello").is_err());
         assert!(import_app("format = 2\n").is_err());
@@ -1852,7 +1882,7 @@ mod tests {
             Macro { id: "jump".into(), name: "jump".into(), ..Default::default() },
             Macro { id: "cl".into(), name: "cl".into(), ..Default::default() },
         ];
-        let mut p = Profile { name: "Default".into(), dpi: DpiTable { levels: vec![600, 1000, 1600], active: 600, default: 1600, shift: 600 }, rate_ms: 1, base: default_slots(), gshift: default_slots(), lighting: [Lighting::default(); 2], turn: None };
+        let mut p = Profile { name: "Default".into(), dpi: DpiTable { levels: vec![600, 1000, 1600], active: 600, default: 1600, shift: 600 }, rate_ms: 1, base: default_slots(), gshift: default_slots(), lighting: [Lighting::default(); 2], turn: None, script: String::new() };
         p.base[3] = Assignment::Macro("jump".into());
         p.base[4] = Assignment::Macro("cl".into());
         p.base[5] = Assignment::Key(KeyCombo { vk: 0x53, mods: 0 });

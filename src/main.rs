@@ -93,6 +93,12 @@ fn main() -> eframe::Result<()> {
     let obs = if dev || shot.is_some() { ghubx::obs::Handle::fixed(ghubx::obs::ObsStatus::NotRunning) } else { ghubx::obs::Handle::spawn() };
     let (dev_tx, dev_rx) = unbounded::<DevCmd>();
     let (eng_tx, eng_rx) = unbounded::<EngineMsg>();
+    // Lua worker: only a controlling instance ever creates a state (fixed elsewhere).
+    let lua = if dev || shot.is_some() {
+        ghubx::lua::Handle::fixed()
+    } else {
+        ghubx::lua::Handle::spawn_with(std::sync::Arc::new(ghubx::engine::RealInput), std::sync::Arc::new(ghubx::win::is_vk_down), Some(eng_tx.clone()))
+    };
     let (ui_tx, ui_rx) = unbounded::<UiEvent>();
     let (done_tx, done_rx) = crossbeam_channel::bounded::<()>(1);
     {
@@ -110,7 +116,7 @@ fn main() -> eframe::Result<()> {
         if let Some(h) = fx.clone() {
             engine = engine.with_host_lighting(h);
         }
-        engine = engine.with_loopback(eng_tx.clone()).with_obs(obs.clone());
+        engine = engine.with_loopback(eng_tx.clone()).with_obs(obs.clone()).with_lua(lua.clone());
         std::thread::Builder::new().name("engine".into()).spawn(move || engine.run(eng_rx)).expect("spawn engine thread");
     }
 
@@ -146,7 +152,7 @@ fn main() -> eframe::Result<()> {
                     },
                 );
             }
-            let mut app = GhubApp::new(cc, cfg, eng_tx, ui_rx, exit, shot, fx, obs);
+            let mut app = GhubApp::new(cc, cfg, eng_tx, ui_rx, exit, shot, fx, obs, lua);
             if let Some(r) = script {
                 app.set_script(r);
             }

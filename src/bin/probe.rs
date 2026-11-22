@@ -267,7 +267,11 @@ fn onboard_save_cmd(args: &[String]) -> i32 {
     println!("slot {slot} <- \"{name}\"
 {}", hex_dump(&enc.sector));
     for (s, g, l) in &enc.not_stored {
-        println!("not stored: G{} {} ({l})", s + 1, if *g { "G-Shift" } else { "base" });
+        if *s == ghubx::profile::NOT_A_SLOT {
+            println!("not stored: {l}");
+        } else {
+            println!("not stored: G{} {} ({l})", s + 1, if *g { "G-Shift" } else { "base" });
+        }
     }
     if dry {
         println!("dry run: the device was not opened");

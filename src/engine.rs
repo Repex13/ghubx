@@ -165,6 +165,11 @@ pub enum UiEvent {
     OnboardWritten(Result<String, String>),
 }
 
+/// MOUSE_BUTTON event name for a primary-button change (spy slots 0..=2).
+fn mb(down: bool) -> &'static str {
+    if down { "MOUSE_BUTTON_PRESSED" } else { "MOUSE_BUTTON_RELEASED" }
+}
+
 struct Held {
     a: Assignment,
     passthrough: bool,
@@ -195,6 +200,10 @@ pub struct Engine {
     pub(crate) flash_until: Option<Instant>,
     pub(crate) input: Arc<dyn Input>,
     loopback: Option<Sender<EngineMsg>>,
+    /// The active profile's script runs here; `Handle::fixed()` in dev/shot mode.
+    pub(crate) lua: crate::lua::Handle,
+    /// The script text currently loaded on the worker ("" = none).
+    lua_script: String,
 }
 
 impl Engine {
@@ -223,6 +232,8 @@ impl Engine {
             flash_until: None,
             input: Arc::new(RealInput),
             loopback: None,
+            lua: crate::lua::Handle::fixed(),
+            lua_script: String::new(),
         }
     }
 
@@ -235,6 +246,12 @@ impl Engine {
     /// Channel back into this engine, for macro steps that run a SYSTEM command.
     pub fn with_loopback(mut self, tx: Sender<EngineMsg>) -> Self {
         self.loopback = Some(tx);
+        self
+    }
+
+    /// Run the active profile's Lua script through this handle.
+    pub fn with_lua(mut self, h: crate::lua::Handle) -> Self {
+        self.lua = h;
         self
     }
 
@@ -472,6 +489,7 @@ impl Engine {
     fn drop_control_state(&mut self) {
         self.set_fx([None, None], true);
         self.release_all();
+        self.lua_stop();
         self.applied = None;
         self.st.controlled = false;
         self.mask = 0;
@@ -480,6 +498,7 @@ impl Engine {
 
     fn release_device(&mut self) {
         self.set_fx([None, None], true);
+        self.lua_stop();
         if self.applied.is_some() {
             self.release_all();
             let _ = self.dev.send(DevCmd::Release);
@@ -590,7 +609,9 @@ impl Engine {
             }
             self.applied = None;
             self.st.controlled = false;
+            self.lua_stop();
         }
+        self.lua_sync(&cfg);
         self.send_status();
     }
 
@@ -598,6 +619,39 @@ impl Engine {
         let cfg = self.cfg.lock().unwrap();
         let p = cfg.profile_at(self.st.active)?.clone();
         Some((p, cfg.apps[self.st.active.0].macros.clone(), cfg.extras.clone()))
+    }
+
+    /// A spy-bitmap change the Lua worker should see, in G HUB's naming:
+    /// slots 0/1/2 are MOUSE_BUTTON 1/3/2, the rest G1..G11 (slot + 1).
+    fn lua_event(&self, slot: usize, down: bool) {
+        let (name, arg) = match slot {
+            0 => (mb(down), 1),
+            1 => (mb(down), 3),
+            2 => (mb(down), 2),
+            s => (if down { "G_PRESSED" } else { "G_RELEASED" }, s as i32 + 1),
+        };
+        self.lua.send(crate::lua::LuaMsg::Event(name, arg));
+    }
+
+    /// Push the active profile's script when it changed while we control the
+    /// mouse (takeover, profile switch, script saved on the active profile).
+    fn lua_sync(&mut self, cfg: &Config) {
+        if !self.st.controlled {
+            return;
+        }
+        let want = cfg.profile_at(self.st.active).map(|p| p.script.clone()).unwrap_or_default();
+        if want != self.lua_script {
+            self.lua.send(crate::lua::LuaMsg::Script(want.clone()));
+            self.lua_script = want;
+        }
+    }
+
+    /// Control ended: the script's PROFILE_DEACTIVATED fires on the worker.
+    fn lua_stop(&mut self) {
+        if !self.lua_script.is_empty() {
+            self.lua.send(crate::lua::LuaMsg::Stop);
+            self.lua_script.clear();
+        }
     }
 
     fn on_mask(&mut self, mask: u16) {
@@ -610,7 +664,10 @@ impl Engine {
         for slot in 0..SLOTS {
             let bit = 1u16 << slot;
             if changed & bit != 0 {
-                if mask & bit != 0 { self.press(slot) } else { self.release(slot) }
+                let down = mask & bit != 0;
+                // The script sees the event too; it does not replace the assignment.
+                self.lua_event(slot, down);
+                if down { self.press(slot) } else { self.release(slot) }
             }
         }
     }
@@ -729,7 +786,8 @@ impl Engine {
                 None
             }
             Assignment::Macro(id) => {
-                let m = macros.iter().find(|m| &m.id == id)?.clone();
+                // Lua's PlayMacro carries a name, buttons carry an id: try both.
+                let m = macros.iter().find(|m| &m.id == id).or_else(|| macros.iter().find(|m| &m.name == id))?.clone();
                 match m.kind {
                     MacroKind::NoRepeat => {
                         let p = self.player();
@@ -1833,5 +1891,48 @@ mod tests {
         r.e.st.ghub_running = true;
         r.e.reconcile();
         assert!(matches!(r.cmds().as_slice(), [DevCmd::Yield]));
+    }
+
+    #[test]
+    fn lua_messages_follow_the_lifecycle() {
+        use crate::lua::LuaMsg;
+        let mut r = rig(|c| {
+            c.apps[0].profiles[0].script = "function OnEvent() end".into();
+            base(c, 3, Assignment::Key(KeyCombo { vk: 0x41, mods: 0 }));
+        });
+        let (spy, rx) = crate::lua::spy();
+        r.e.lua = spy;
+        // takeover loads the active profile's script
+        r.take_control();
+        assert_eq!(rx.try_iter().collect::<Vec<_>>(), vec![LuaMsg::Script("function OnEvent() end".into())]);
+        // spy-bitmap changes become G HUB events: slot 0 -> MOUSE_BUTTON 1, slot 3 -> G4
+        r.e.on_mask((1 << 3) | 1);
+        r.e.on_mask(0);
+        assert_eq!(
+            rx.try_iter().collect::<Vec<_>>(),
+            vec![
+                LuaMsg::Event("MOUSE_BUTTON_PRESSED", 1),
+                LuaMsg::Event("G_PRESSED", 4),
+                LuaMsg::Event("MOUSE_BUTTON_RELEASED", 1),
+                LuaMsg::Event("G_RELEASED", 4),
+            ]
+        );
+        // losing control stops the worker; regaining it reloads the script
+        r.e.on_control_lost();
+        assert_eq!(rx.try_iter().collect::<Vec<_>>(), vec![LuaMsg::Stop]);
+        r.e.st.ghub_running = false;
+        r.e.retry_at = None;
+        r.take_control();
+        assert_eq!(rx.try_iter().collect::<Vec<_>>(), vec![LuaMsg::Script("function OnEvent() end".into())]);
+        // editing the active profile's script reloads it (SAVE & RUN)
+        r.cfg.lock().unwrap().apps[0].profiles[0].script = "function OnEvent() -- v2\nend".into();
+        r.e.reconcile();
+        assert_eq!(rx.try_iter().collect::<Vec<_>>(), vec![LuaMsg::Script("function OnEvent() -- v2\nend".into())]);
+        // clearing it pushes Script(""); with nothing live, quitting sends nothing extra
+        r.cfg.lock().unwrap().apps[0].profiles[0].script.clear();
+        r.e.reconcile();
+        assert_eq!(rx.try_iter().collect::<Vec<_>>(), vec![LuaMsg::Script(String::new())]);
+        r.e.release_device();
+        assert_eq!(rx.try_iter().collect::<Vec<_>>(), Vec::<LuaMsg>::new());
     }
 }

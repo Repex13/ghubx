@@ -8,6 +8,7 @@ pub mod games;
 pub mod ghub_import;
 pub mod hidpp;
 pub mod io;
+pub mod lua;
 pub mod osd;
 pub mod profile;
 pub mod script;

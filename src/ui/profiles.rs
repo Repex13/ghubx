@@ -1,12 +1,14 @@
 //! Profiles: "All Games & Apps", profile switching, persistent profile and
 //! per-app profile management.
 
+use super::lua_editor::{self, ScriptEditor};
 use super::theme::*;
 use super::{GhubApp, Overlay};
 use crate::games::{self, Installed};
 use crate::profile::*;
 use crossbeam_channel::Receiver;
 use egui::{Align2, Color32, CornerRadius, Mesh, Rect, Shape, Stroke, StrokeKind, Ui, UiBuilder, pos2, vec2};
+use std::time::{Duration, Instant};
 
 #[derive(Default)]
 enum GameScan {
@@ -32,6 +34,8 @@ pub struct ProfState {
     adding: Option<String>,
     detail: Option<usize>,
     renaming: Option<(usize, String)>,
+    /// CLEAR in the SCRIPTING block was clicked once (3 s to confirm).
+    script_clear: Option<Instant>,
 }
 
 impl ProfState {
@@ -41,6 +45,7 @@ impl ProfState {
 
     pub fn open_detail(&mut self, app: usize) {
         self.detail = Some(app);
+        self.script_clear = None;
     }
 }
 
@@ -511,6 +516,41 @@ impl GhubApp {
             self.prof.detail = None;
             self.say("Removed");
             return;
+        }
+        // SCRIPTING: the active profile's Lua script, edited in the full-window editor.
+        let spi = app.active_profile.min(app.profiles.len() - 1);
+        let has = !app.profiles[spi].script.is_empty();
+        let sy = y + 52.0;
+        text(ui, pos2(main.left(), sy), Align2::LEFT_CENTER, "ACTIVE LUA SCRIPT", t_section());
+        let srow = Rect::from_min_size(pos2(main.left(), sy + 20.0), vec2(main.width(), 48.0));
+        ui.painter().rect_filled(srow, CornerRadius::same(8), pal().surface);
+        text(ui, pos2(srow.left() + 22.0, srow.center().y), Align2::LEFT_CENTER, if has { "LUA SCRIPT" } else { "NONE" }, Ts::new(Fam::Bold, 12.0, pal().text));
+        let armed = self.prof.script_clear.is_some_and(|t| t.elapsed() < Duration::from_secs(3));
+        if !has {
+            let b = Rect::from_min_size(pos2(srow.right() - 16.0 - 208.0, srow.center().y - 14.0), vec2(208.0, 28.0));
+            if dark_button(ui, b, "+ CREATE A NEW LUA SCRIPT", ("script-new", ai), true).clicked() {
+                self.script_editor = Some(ScriptEditor::new((ai, spi), lua_editor::TEMPLATE.into()));
+            }
+        } else {
+            let eb = Rect::from_min_size(pos2(srow.right() - 16.0 - 96.0, srow.center().y - 14.0), vec2(96.0, 28.0));
+            let cb = Rect::from_min_size(pos2(eb.left() - 8.0 - 60.0, srow.center().y - 14.0), vec2(60.0, 28.0));
+            if dark_button(ui, cb, if armed { "SURE?" } else { "CLEAR" }, ("script-clear", ai), true).clicked() {
+                if armed {
+                    self.edit(move |c| {
+                        if let Some(p) = c.apps.get_mut(ai).and_then(|a| a.profiles.get_mut(spi)) {
+                            p.script.clear();
+                        }
+                    });
+                }
+                self.prof.script_clear = (!armed).then(Instant::now);
+            }
+            if armed {
+                ui.ctx().request_repaint_after(Duration::from_secs(1));
+            }
+            if dark_button(ui, eb, "EDIT SCRIPT", ("script-edit", ai), true).clicked() {
+                self.prof.script_clear = None;
+                self.script_editor = Some(ScriptEditor::new((ai, spi), app.profiles[spi].script.clone()));
+            }
         }
         if let Some((pi, s)) = rename_commit {
             let s = s.trim().to_string();

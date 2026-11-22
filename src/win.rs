@@ -138,6 +138,35 @@ pub fn hwheel(delta: i32) {
     send(&[mouse_input(0, 0, delta, MOUSEEVENTF_HWHEEL)]);
 }
 
+/// Whether a virtual key is held right now (`GetAsyncKeyState`; Lua's IsKeyPressed).
+pub fn is_vk_down(vk: u16) -> bool {
+    unsafe { (GetAsyncKeyState(vk as i32) as u16 & 0x8000) != 0 }
+}
+
+/// Whether a toggle key (caps/num/scroll lock) is latched on (`GetKeyState` low bit; Lua's IsKeyLockOn).
+pub fn is_vk_toggled(vk: i32) -> bool {
+    unsafe { (GetKeyState(vk) & 1) != 0 }
+}
+
+/// Cursor position in screen coordinates (Lua's GetMousePosition).
+pub fn cursor_pos() -> (i32, i32) {
+    let mut pt = POINT::default();
+    unsafe {
+        let _ = GetCursorPos(&mut pt);
+    }
+    (pt.x, pt.y)
+}
+
+/// Move the cursor in screen coordinates (Lua's SetMousePosition); a no-op in passive mode.
+pub fn set_cursor_pos(x: i32, y: i32) {
+    if PASSIVE.load(Ordering::Relaxed) {
+        return;
+    }
+    unsafe {
+        let _ = SetCursorPos(x, y);
+    }
+}
+
 /// Full image path of the foreground window's process.
 pub fn foreground_path() -> Option<String> {
     use windows::Win32::System::Threading::{

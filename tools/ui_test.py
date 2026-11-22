@@ -692,6 +692,40 @@ def profiles_crud():
 
 
 @scenario
+def lua_create_edit_save():
+    res = run_script("lua_create_edit_save", ["wait 1500", HOME_NAV_PROFILES, SETTLE,
+                                              "click 498 400",  # Desktop tile -> app detail
+                                              SETTLE, "shot {shots}/detail.png",
+                                              "click 860 400",  # + CREATE A NEW LUA SCRIPT
+                                              SETTLE, "shot {shots}/editor.png",
+                                              "click 500 300",  # into the code field
+                                              "key End",
+                                              "text -- typed-by-ui-test",
+                                              "key Enter",
+                                              "text OutputLogMessage(\"hi\")",
+                                              SETTLE,
+                                              "click 912 60",  # SAVE & RUN
+                                              SETTLE])
+    ok_run(res)
+    s = prof(res.cfg).get("script", "")
+    must("This is the script GHUB-X runs" in s and "typed-by-ui-test" in s and "OutputLogMessage" in s, s[:200])
+
+
+@scenario
+def lua_clear():
+    cfg = seed_config().replace('name = "Default"\nrate_ms = 1',
+                                'name = "Default"\nrate_ms = 1\nscript = "function OnEvent() end"', 1)
+    res = run_script("lua_clear", ["wait 1500", HOME_NAV_PROFILES, SETTLE,
+                                   "click 498 400", SETTLE,
+                                   "click 830 400",  # CLEAR (first click arms)
+                                   SETTLE,
+                                   "click 830 400",  # CLEAR confirm
+                                   SETTLE], config=cfg)
+    ok_run(res)
+    must(not prof(res.cfg).get("script"), prof(res.cfg))
+
+
+@scenario
 def device_settings():
     res = run_script("device_settings", ["wait 1500", HOME_TILE, SETTLE,
                                          "click 38 724",  # Device Settings gear
