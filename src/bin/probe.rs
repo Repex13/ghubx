@@ -33,6 +33,8 @@ fn main() {
         Some("takeover-test") => std::process::exit(takeover_test()),
         Some("release") => std::process::exit(release()),
         Some("games") => std::process::exit(games()),
+        Some("export-theme") => std::process::exit(export_theme_cmd(&std::env::args().skip(2).collect::<Vec<_>>())),
+        Some("import-theme") => std::process::exit(import_theme_cmd(&std::env::args().skip(2).collect::<Vec<_>>())),
         Some("game-sens") => {
             for (name, id) in [("Counter-Strike 2", Some("ca572e6a-c76d-4e34-bd64-3665c0d0b0c1")), ("Valorant", Some("48574816-5d5d-4e5b-b616-9c3af2c15bbf"))] {
                 match ghubx::games::game_sensitivity_file(id, name) {
@@ -157,6 +159,48 @@ fn onboard_cmd() -> i32 {
         }
     }
     0
+}
+
+fn export_theme_cmd(args: &[String]) -> i32 {
+    let (Some(idx), Some(file)) = (args.first().and_then(|a| a.parse::<usize>().ok()), args.get(1)) else {
+        eprintln!("usage: probe export-theme <custom theme index> <file>");
+        return 64;
+    };
+    let Some(cfg) = ghubx::profile::Config::load_existing() else {
+        eprintln!("no config at {}", ghubx::profile::Config::path().display());
+        return 1;
+    };
+    let Some(t) = cfg.appearance.custom.get(idx) else {
+        eprintln!("no custom theme {idx} (config has {})", cfg.appearance.custom.len());
+        return 1;
+    };
+    match std::fs::write(file, ghubx::profile::export_theme(t)) {
+        Ok(()) => {
+            println!("exported theme {:?} to {file}", t.name);
+            0
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            1
+        }
+    }
+}
+
+fn import_theme_cmd(args: &[String]) -> i32 {
+    let Some(file) = args.first() else {
+        eprintln!("usage: probe import-theme <file>");
+        return 64;
+    };
+    match std::fs::read_to_string(file).map_err(|e| e.to_string()).and_then(|t| ghubx::profile::import_theme(&t)) {
+        Ok(t) => {
+            println!("theme {:?}: bg {:?} surface {:?} text {:?} accent {:?} (nothing was written)", t.name, t.bg, t.surface, t.text, t.accent);
+            0
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            1
+        }
+    }
 }
 
 fn games() -> i32 {

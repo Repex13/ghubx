@@ -150,7 +150,7 @@ def theme_tile():
 @scenario
 def accent_swatch():
     res = run_script("accent_swatch", ["wait 1500", GEAR, SETTLE, NAV_APPEARANCE, SETTLE,
-                                       "click 471 365"])  # green accent swatch
+                                       "click 471 515"])  # green accent swatch
     ok_run(res)
     must(res.cfg["appearance"].get("accent") == [68, 214, 44], res.cfg["appearance"])
 
@@ -158,8 +158,8 @@ def accent_swatch():
 @scenario
 def appearance_toggles():
     res = run_script("appearance_toggles", ["wait 1500", GEAR, SETTLE, NAV_APPEARANCE, SETTLE,
-                                            "click 952 406",  # Match mouse lighting switch
-                                            "click 952 643"])  # Show DPI changes switch
+                                            "click 952 556",  # Match mouse lighting switch
+                                            "click 952 658"])  # Show DPI changes switch
     ok_run(res)
     must(res.cfg["appearance"].get("follow_lighting") is True, res.cfg["appearance"])
     must(res.cfg["general"].get("osd_dpi") is False, res.cfg["general"])
@@ -376,10 +376,79 @@ def _osd_hook(p):
 @scenario
 def osd_preview():
     res = run_script("osd_preview", ["wait 1500", GEAR, SETTLE, NAV_APPEARANCE, SETTLE,
-                                     "click 921 613",  # ON-SCREEN DISPLAY > PREVIEW
+                                     "click 921 629",  # ON-SCREEN DISPLAY > PREVIEW
                                      "wait 900"], during=_osd_hook)
     ok_run(res)
     must(res.hook["found"], "no visible GHUBX_OSD window owned by the script's process")
+
+
+NEW_THEME_TILE = "click 442 395"  # MY THEMES > "+ NEW" tile (first slot)
+THEME_NAME_END = "click 650 214"  # right end of the editor's NAME box (cursor goes to the end)
+ROLE_BG = "click 500 303"  # editor colour rows: Background
+ROLE_PANELS = "click 500 347"  # Panels
+ROLE_ACCENT = "click 500 435"  # Accent
+PICKER_HEX = "dclick 950 447"  # picker hex field (double-click selects the digits)
+THEME_SAVE = "click 444 641"  # editor SAVE
+THEME_CANCEL = "click 566 641"  # editor CANCEL
+THEME_DELETE = "click 921 641"  # editor DELETE
+MYTHEMES_EDIT = "click 778 333"  # MY THEMES > EDIT (active custom theme)
+CUSTOM_SEED = ('\n[[appearance.custom]]\nid = "custom-test"\nname = "Neon"\nbg = [26, 16, 35]\n'
+               'surface = [30, 20, 40]\ntext = [255, 255, 255]\naccent = [255, 122, 89]\n')
+
+
+def custom_seed_config() -> str:
+    text = re.sub(r'(?m)^theme\s*=.*$', 'theme = "custom-test"', seed_config())
+    return text + CUSTOM_SEED
+
+
+def open_appearance():
+    return ["wait 1500", GEAR, SETTLE, NAV_APPEARANCE, SETTLE]
+
+
+@scenario
+def theme_custom_create():
+    res = run_script("theme_custom_create", open_appearance() + [
+        NEW_THEME_TILE, SETTLE, THEME_NAME_END] + ["key Backspace"] * 8 + ["text Neon",
+        ROLE_BG, SETTLE, PICKER_HEX, "text 1A1023", "key Enter", SETTLE,
+        ROLE_ACCENT, SETTLE, PICKER_HEX, "text FF7A59", "key Enter", SETTLE,
+        "shot {shots}/editing.png",
+        THEME_SAVE, "wait 600", "shot {shots}/saved.png"])
+    ok_run(res)
+    ap = res.cfg["appearance"]
+    must(len(ap.get("custom", [])) == 1, ap)
+    t = ap["custom"][0]
+    must(t["name"] == "Neon" and t["bg"] == [26, 16, 35] and t["accent"] == [255, 122, 89], t)
+    must(ap["theme"] == t["id"] and "accent" not in ap, ap)
+    for shot in ("editing.png", "saved.png"):
+        px = pixel(res, shot, (10, 400))
+        must(px == (26, 16, 35), f"{shot}: background at (10,400) is {px}")
+
+
+@scenario
+def theme_custom_cancel():
+    res = run_script("theme_custom_cancel", open_appearance() + [
+        NEW_THEME_TILE, SETTLE, ROLE_BG, SETTLE, PICKER_HEX, "text 1A1023", "key Enter", SETTLE,
+        THEME_CANCEL, "wait 600", "shot {shots}/after.png"])
+    ok_run(res)
+    ap = res.cfg["appearance"]
+    must(not ap.get("custom") and ap["theme"] == "ghub-dark", ap)
+    px = pixel(res, "after.png", (10, 400))
+    must(px == (0, 0, 0), f"background at (10,400) is {px}")
+
+
+@scenario
+def theme_custom_edit_delete():
+    res = run_script("theme_custom_edit", open_appearance() + [
+        MYTHEMES_EDIT, SETTLE, ROLE_PANELS, SETTLE, PICKER_HEX, "text 2A1B3D", "key Enter", SETTLE,
+        THEME_SAVE, SETTLE], config=custom_seed_config())
+    ok_run(res)
+    ap = res.cfg["appearance"]
+    must(len(ap["custom"]) == 1 and ap["custom"][0]["surface"] == [42, 27, 61] and ap["custom"][0]["id"] == "custom-test", ap)
+    res = run_script("theme_custom_delete", open_appearance() + [
+        MYTHEMES_EDIT, SETTLE, THEME_DELETE, SETTLE, THEME_DELETE, SETTLE], config=custom_seed_config())
+    ok_run(res)
+    ap = res.cfg["appearance"]
+    must(not ap.get("custom") and ap["theme"] == "ghub-dark", ap)
 
 
 def main():

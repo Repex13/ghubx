@@ -1,7 +1,7 @@
 //! Runtime colour palette: five presets, a custom accent and the global the
 //! UI reads every frame. `ghub_dark` holds the original G HUB tokens verbatim.
 
-use crate::profile::Appearance;
+use crate::profile::{Appearance, CustomTheme};
 use egui::Color32;
 use std::sync::RwLock;
 
@@ -315,10 +315,55 @@ pub fn palette_for(id: &str) -> Palette {
     }
 }
 
-/// Preset palette with the accent precedence: lighting colour (when following
-/// and available), then the custom accent, then the preset's own.
+fn to_hex(c: Color32) -> u32 {
+    ((c.r() as u32) << 16) | ((c.g() as u32) << 8) | c.b() as u32
+}
+
+fn rgb(c: [u8; 3]) -> Color32 {
+    Color32::from_rgb(c[0], c[1], c[2])
+}
+
+/// WCAG contrast ratio between two colours (1.0 to 21.0).
+pub fn contrast(a: Color32, b: Color32) -> f32 {
+    let (la, lb) = (luminance(a), luminance(b));
+    (la.max(lb) + 0.05) / (la.min(lb) + 0.05)
+}
+
+/// Palette of a user-made theme: four chosen colours, everything else derived.
+pub fn custom_palette(t: &CustomTheme) -> Palette {
+    let (bg, surface, text) = (rgb(t.bg), rgb(t.surface), rgb(t.text));
+    let dark = luminance(text) >= luminance(bg);
+    let m = |a: Color32, b: Color32, f: f32| to_hex(mix(a, b, f));
+    let (amber, gshift, error) = if dark { (0xffbf00, 0xff003e, 0xf54155) } else { (0xc58a00, 0xe6003a, 0xe8364c) };
+    Palette::from_seed(Seed {
+        dark,
+        bg: to_hex(bg),
+        surface: to_hex(surface),
+        surface_hi: m(surface, text, 0.045),
+        button: m(surface, text, 0.11),
+        track: m(surface, text, 0.26),
+        disabled: m(bg, text, 0.42),
+        muted: m(bg, text, 0.53),
+        label: m(bg, text, 0.67),
+        text: to_hex(text),
+        nav: m(bg, text, 0.82),
+        divider: m(bg, text, 0.17),
+        row_line: m(bg, text, 0.25),
+        leader: m(bg, text, 0.24),
+        primary: to_hex(rgb(t.accent)),
+        amber,
+        gshift,
+        error,
+    })
+}
+
+/// The theme's palette (preset or custom) with the accent precedence: lighting
+/// colour (when following and available), then the custom accent, then the theme's own.
 pub fn resolve(a: &Appearance, lighting_accent: Option<[u8; 3]>) -> Palette {
-    let p = palette_for(&a.theme);
+    let p = match a.custom.iter().find(|c| c.id == a.theme) {
+        Some(t) => custom_palette(t),
+        None => palette_for(&a.theme),
+    };
     match (a.follow_lighting.then_some(lighting_accent).flatten(), a.accent) {
         (Some(c), _) | (None, Some(c)) => p.with_accent(c),
         (None, None) => p,
@@ -401,6 +446,57 @@ mod tests {
         assert_eq!(Palette::ghub_dark().with_accent([0x11, 0x96, 0xff]).on_primary, Color32::WHITE);
     }
 
+    fn sunset() -> CustomTheme {
+        CustomTheme { id: "custom-sunset".into(), name: "Sunset".into(), bg: [0x1A, 0x10, 0x23], surface: [0x2A, 0x1B, 0x3D], text: [0xF6, 0xEE, 0xFC], accent: [0xFF, 0x7A, 0x59] }
+    }
+
+    fn paper() -> CustomTheme {
+        CustomTheme { id: "custom-paper".into(), name: "Paper".into(), bg: [0xF4, 0xF1, 0xEA], surface: [0xFF, 0xFF, 0xFF], text: [0x1D, 0x1C, 0x1A], accent: [0xC2, 0x41, 0x0C] }
+    }
+
+    #[test]
+    fn custom_palette_keeps_the_chosen_colors() {
+        for t in [sunset(), paper()] {
+            let p = custom_palette(&t);
+            assert_eq!((p.bg, p.surface, p.text, p.primary), (rgb(t.bg), rgb(t.surface), rgb(t.text), rgb(t.accent)));
+        }
+        assert!(custom_palette(&sunset()).dark);
+        let light = custom_palette(&paper());
+        assert!(!light.dark);
+        assert_eq!(light.ink(26), Color32::from_black_alpha(26));
+    }
+
+    #[test]
+    fn custom_neutral_ramp_moves_toward_the_text_color() {
+        for t in [sunset(), paper()] {
+            let p = custom_palette(&t);
+            let lt = luminance(p.text);
+            let d: Vec<f32> = [p.button, p.track, p.muted, p.label, p.text].iter().map(|c| (luminance(*c) - lt).abs()).collect();
+            assert!(d.windows(2).all(|w| w[1] < w[0]), "{} {d:?}", t.name);
+        }
+    }
+
+    #[test]
+    fn contrast_ratio() {
+        assert!((contrast(Color32::BLACK, Color32::WHITE) - 21.0).abs() < 0.01);
+        let c = Color32::from_rgb(10, 120, 200);
+        assert_eq!(contrast(c, c), 1.0);
+        let d = Color32::from_rgb(240, 30, 60);
+        assert_eq!(contrast(c, d), contrast(d, c));
+    }
+
+    #[test]
+    fn resolve_custom_themes() {
+        let t = sunset();
+        let mut a = Appearance { theme: t.id.clone(), custom: vec![t.clone()], ..Appearance::default() };
+        assert_eq!(resolve(&a, None), custom_palette(&t));
+        a.accent = Some([1, 2, 3]);
+        let p = resolve(&a, None);
+        assert_eq!((p.primary, p.bg), (Color32::from_rgb(1, 2, 3), rgb(t.bg)));
+        let missing = Appearance { theme: "custom-gone".into(), ..Appearance::default() };
+        assert_eq!(resolve(&missing, None), Palette::ghub_dark());
+    }
+
     #[test]
     fn unknown_theme_falls_back() {
         assert_eq!(palette_for("nope"), Palette::ghub_dark());
@@ -410,7 +506,7 @@ mod tests {
     fn resolve_precedence() {
         let lighting = [0x10, 0x20, 0x30];
         let custom = [0xaa, 0xbb, 0xcc];
-        let mut a = Appearance { theme: "ember".into(), accent: Some(custom), follow_lighting: true };
+        let mut a = Appearance { theme: "ember".into(), accent: Some(custom), follow_lighting: true, ..Appearance::default() };
         assert_eq!(resolve(&a, Some(lighting)).primary, Color32::from_rgb(0x10, 0x20, 0x30));
         assert_eq!(resolve(&a, None).primary, Color32::from_rgb(0xaa, 0xbb, 0xcc));
         a.follow_lighting = false;

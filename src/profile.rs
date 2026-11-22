@@ -538,21 +538,111 @@ pub fn dpi_flash_color(level: usize) -> [u8; 3] {
     [[0xFF, 0x3B, 0x30], [0x34, 0xC7, 0x59], [0x0A, 0x84, 0xFF], [0xFF, 0xD6, 0x0A], [0xBF, 0x5A, 0xF2]][level % 5]
 }
 
+/// A user-made colour theme (Settings > Appearance > MY THEMES).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CustomTheme {
+    /// `custom-<new_id()>`; never shown.
+    pub id: String,
+    pub name: String,
+    pub bg: [u8; 3],
+    pub surface: [u8; 3],
+    pub text: [u8; 3],
+    pub accent: [u8; 3],
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Appearance {
-    /// Preset id (see `ui::palette::THEMES`).
+    /// Preset id (see `ui::palette::THEMES`) or the id of a custom theme.
     pub theme: String,
-    /// Custom accent colour; `None` keeps the preset's own.
+    /// Custom accent colour; `None` keeps the theme's own.
     pub accent: Option<[u8; 3]>,
     /// Use the logo zone's lighting colour as the accent.
     pub follow_lighting: bool,
+    pub custom: Vec<CustomTheme>,
 }
 
 impl Default for Appearance {
     fn default() -> Self {
-        Self { theme: "ghub-dark".into(), accent: None, follow_lighting: false }
+        Self { theme: "ghub-dark".into(), accent: None, follow_lighting: false, custom: Vec::new() }
     }
+}
+
+impl Appearance {
+    pub const MAX_CUSTOM: usize = 20;
+
+    /// Add a custom theme with a trimmed, unique name and a fresh id. `None` at the limit.
+    pub fn add_theme(&mut self, mut t: CustomTheme) -> Option<usize> {
+        if self.custom.len() >= Self::MAX_CUSTOM {
+            return None;
+        }
+        let name: String = t.name.trim().chars().take(24).collect();
+        t.name = if name.is_empty() { "My Theme".to_string() } else { name };
+        t.name = self.unique_name(&t.name, None);
+        if t.id.is_empty() || self.custom.iter().any(|c| c.id == t.id) {
+            let mut id = format!("custom-{}", new_id());
+            let mut n = 2;
+            while self.custom.iter().any(|c| c.id == id) {
+                id = format!("custom-{}-{n}", new_id());
+                n += 1;
+            }
+            t.id = id;
+        }
+        self.custom.push(t);
+        Some(self.custom.len() - 1)
+    }
+
+    /// `name`, or `name (2)`, `name (3)`... when another theme (not `skip`) already uses it.
+    pub fn unique_name(&self, name: &str, skip: Option<usize>) -> String {
+        let taken = |n: &str| self.custom.iter().enumerate().any(|(i, c)| Some(i) != skip && c.name.eq_ignore_ascii_case(n));
+        let mut out = name.to_string();
+        let mut n = 2;
+        while taken(&out) {
+            out = format!("{name} ({n})");
+            n += 1;
+        }
+        out
+    }
+}
+
+/// A custom theme as a shareable `.ghubxtheme` file (TOML, id not included).
+pub fn export_theme(t: &CustomTheme) -> String {
+    #[derive(Serialize)]
+    struct Body<'a> {
+        name: &'a str,
+        bg: [u8; 3],
+        surface: [u8; 3],
+        text: [u8; 3],
+        accent: [u8; 3],
+    }
+    #[derive(Serialize)]
+    struct File<'a> {
+        format: u32,
+        theme: Body<'a>,
+    }
+    toml::to_string_pretty(&File { format: 1, theme: Body { name: &t.name, bg: t.bg, surface: t.surface, text: t.text, accent: t.accent } }).unwrap_or_default()
+}
+
+pub fn import_theme(text: &str) -> Result<CustomTheme, String> {
+    #[derive(Deserialize)]
+    struct Body {
+        name: String,
+        bg: [u8; 3],
+        surface: [u8; 3],
+        text: [u8; 3],
+        accent: [u8; 3],
+    }
+    #[derive(Deserialize)]
+    struct File {
+        format: Option<u32>,
+        theme: Option<Body>,
+    }
+    let f: File = toml::from_str(text).map_err(|e| format!("Not a GHUB-X theme file: {e}"))?;
+    if f.format != Some(1) {
+        return Err("Unsupported theme file format".into());
+    }
+    let b = f.theme.ok_or("The file has no theme")?;
+    Ok(CustomTheme { id: String::new(), name: b.name, bg: b.bg, surface: b.surface, text: b.text, accent: b.accent })
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -913,6 +1003,53 @@ mod tests {
         let (i, linked) = c.add_imported(dir_app("Other", Some("CS2.EXE"), None));
         assert!(!linked);
         assert_eq!(c.apps[i].name, "Other (2)");
+    }
+
+    fn sample_theme(name: &str) -> CustomTheme {
+        CustomTheme { id: String::new(), name: name.into(), bg: [0x1A, 0x10, 0x23], surface: [0x2A, 0x1B, 0x3D], text: [0xF6, 0xEE, 0xFC], accent: [0xFF, 0x7A, 0x59] }
+    }
+
+    #[test]
+    fn theme_export_import_round_trip() {
+        let mut t = sample_theme("Sunset");
+        t.id = "custom-x".into();
+        let back = import_theme(&export_theme(&t)).unwrap();
+        assert_eq!(back, CustomTheme { id: String::new(), ..t });
+    }
+
+    #[test]
+    fn import_theme_rejects_garbage() {
+        assert!(import_theme("hello").is_err());
+        assert!(import_theme("format = 2\n").is_err());
+        assert!(import_theme("format = 1\n").is_err());
+    }
+
+    #[test]
+    fn add_theme_names_ids_and_limit() {
+        let mut a = Appearance::default();
+        let i = a.add_theme(sample_theme("Sunset")).unwrap();
+        let j = a.add_theme(sample_theme("sunset")).unwrap();
+        assert_eq!((a.custom[i].name.as_str(), a.custom[j].name.as_str()), ("Sunset", "sunset (2)"));
+        assert!(a.custom[i].id.starts_with("custom-") && a.custom[j].id.starts_with("custom-"));
+        assert_ne!(a.custom[i].id, a.custom[j].id);
+        let k = a.add_theme(sample_theme("   ")).unwrap();
+        assert_eq!(a.custom[k].name, "My Theme");
+        while a.custom.len() < Appearance::MAX_CUSTOM {
+            a.add_theme(sample_theme("Filler")).unwrap();
+        }
+        assert!(a.add_theme(sample_theme("One too many")).is_none());
+    }
+
+    #[test]
+    fn custom_themes_survive_the_config_file() {
+        let mut c = Config::default();
+        c.appearance.add_theme(sample_theme("Sunset"));
+        c.appearance.add_theme(sample_theme("Paper"));
+        c.appearance.theme = c.appearance.custom[1].id.clone();
+        let back: Config = toml::from_str(&toml::to_string_pretty(&c).unwrap()).unwrap();
+        assert_eq!(back.appearance, c.appearance);
+        let old: Config = toml::from_str("apps = []").unwrap();
+        assert!(old.appearance.custom.is_empty());
     }
 
     #[test]

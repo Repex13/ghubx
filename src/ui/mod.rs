@@ -11,6 +11,7 @@ pub mod palette;
 mod profiles;
 mod sens;
 mod settings;
+mod themes;
 pub mod theme;
 
 use crate::device::DeviceState;
@@ -154,6 +155,9 @@ pub struct GhubApp {
     pub(crate) ghub_autostart: Option<Option<bool>>,
     pub(crate) onboard: Vec<crate::profile::OnboardSlot>,
     pub(crate) onboard_asked: bool,
+    pub(crate) theme_edit: Option<themes::ThemeEditor>,
+    pub(crate) theme_page: usize,
+    theme_io: Option<themes::ThemeIoRx>,
     script: Option<crate::script::Runner>,
     script_shot_pending: Arc<std::sync::atomic::AtomicBool>,
     script_png: Option<(PathBuf, bool)>,
@@ -218,6 +222,9 @@ impl GhubApp {
             ghub_autostart: None,
             onboard: Vec::new(),
             onboard_asked: false,
+            theme_edit: None,
+            theme_page: 0,
+            theme_io: None,
             script: None,
             script_shot_pending: Default::default(),
             script_png: None,
@@ -239,7 +246,7 @@ impl GhubApp {
             "devset" | "onboard" => Route::DeviceSettings,
             "profiles" | "appdetail" | "addgame" => Route::Profiles,
             "settings" | "sleep" => Route::Settings(0),
-            "appearance" => Route::Settings(1),
+            "appearance" | "themeedit" | "mythemes" => Route::Settings(1),
             "ghub" => Route::Settings(2),
             "diag" => Route::Settings(3),
             _ => Route::Home,
@@ -267,6 +274,18 @@ impl GhubApp {
             p.lighting[1] = crate::profile::Lighting { effect: crate::profile::Effect::Fixed, color: [0x00, 0xB8, 0xFC], period_ms: 4000, brightness: 80 };
             drop(c);
             self.light.zone = 1;
+        }
+        if page == "themeedit" || page == "mythemes" {
+            use crate::profile::CustomTheme;
+            let sunset = CustomTheme { id: "custom-sunset".into(), name: "Sunset".into(), bg: [0x1A, 0x10, 0x23], surface: [0x2A, 0x1B, 0x3D], text: [0xF6, 0xEE, 0xFC], accent: [0xFF, 0x7A, 0x59] };
+            if page == "themeedit" {
+                self.open_theme_editor(CustomTheme { id: String::new(), ..sunset }, None, 3);
+            } else {
+                let paper = CustomTheme { id: "custom-paper".into(), name: "Paper".into(), bg: [0xF4, 0xF1, 0xEA], surface: [0xFF, 0xFF, 0xFF], text: [0x1D, 0x1C, 0x1A], accent: [0xC2, 0x41, 0x0C] };
+                let mut c = self.cfg.lock().unwrap();
+                c.appearance.custom = vec![sunset, paper];
+                c.appearance.theme = "custom-sunset".into();
+            }
         }
         if page == "onboard" {
             use crate::profile::{OnboardProfile, OnboardSlot, sample_sector1};
@@ -388,6 +407,9 @@ impl GhubApp {
     /// Preset + accent from the config. The lighting accent follows the logo zone
     /// of the profile the UI is showing.
     fn wanted_palette(&self, ctx: &egui::Context) -> Palette {
+        if let Some(ed) = &self.theme_edit {
+            return palette::custom_palette(&ed.draft);
+        }
         let cfg = self.cfg.lock().unwrap();
         let lighting = if cfg.appearance.follow_lighting {
             let l = cfg.current().1.lighting[1];
@@ -846,6 +868,9 @@ impl eframe::App for GhubApp {
             if self.script_quit && !self.script_shot_pending.load(std::sync::atomic::Ordering::Relaxed) {
                 ctx.send_viewport_cmd(ViewportCommand::Close);
             }
+        }
+        if !matches!(self.route, Route::Settings(1)) {
+            self.theme_edit = None;
         }
         let want = self.wanted_palette(&ctx);
         if want != pal() {

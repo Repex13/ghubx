@@ -25,6 +25,12 @@ const SWATCHES: [[u8; 3]; 9] = [
 #[derive(Default)]
 pub struct LightState {
     pub zone: usize,
+    picker: PickerState,
+}
+
+/// State of one colour picker (SV square, hue bar and hex field).
+#[derive(Default)]
+pub struct PickerState {
     hsv: Option<(f32, f32, f32)>,
     hsv_for: Option<[u8; 3]>,
     hex: String,
@@ -83,7 +89,7 @@ impl GhubApp {
         let mut y = top + 338.0;
         let mut new_l = l;
         if matches!(l.effect, Effect::Fixed | Effect::Breathing) {
-            if let Some(c) = self.color_picker(ui, pos2(x0, y), l.color) {
+            if let Some(c) = Self::color_picker(ui, pos2(x0, y), l.color, &mut self.light.picker, "light", &SWATCHES) {
                 new_l.color = c;
             }
             y += 196.0;
@@ -152,15 +158,15 @@ impl GhubApp {
     }
 
     /// Saturation/value square + hue bar + swatches + hex. Returns a new colour.
-    fn color_picker(&mut self, ui: &mut Ui, origin: Pos2, color: [u8; 3]) -> Option<[u8; 3]> {
-        if self.light.hsv_for != Some(color) {
+    pub(super) fn color_picker(ui: &mut Ui, origin: Pos2, color: [u8; 3], st: &mut PickerState, salt: &str, swatches: &[[u8; 3]]) -> Option<[u8; 3]> {
+        if st.hsv_for != Some(color) {
             let h = Hsva::from_srgb(color);
-            let keep_h = self.light.hsv.map(|x| x.0).unwrap_or(h.h);
-            self.light.hsv = Some((if h.s > 0.001 && h.v > 0.001 { h.h } else { keep_h }, h.s, h.v));
-            self.light.hsv_for = Some(color);
-            self.light.hex = format!("{:02X}{:02X}{:02X}", color[0], color[1], color[2]);
+            let keep_h = st.hsv.map(|x| x.0).unwrap_or(h.h);
+            st.hsv = Some((if h.s > 0.001 && h.v > 0.001 { h.h } else { keep_h }, h.s, h.v));
+            st.hsv_for = Some(color);
+            st.hex = format!("{:02X}{:02X}{:02X}", color[0], color[1], color[2]);
         }
-        let (mut h, mut s, mut v) = self.light.hsv.unwrap_or((0.55, 1.0, 1.0));
+        let (mut h, mut s, mut v) = st.hsv.unwrap_or((0.55, 1.0, 1.0));
         let sv = Rect::from_min_size(origin, vec2(278.0, 118.0));
         let hue = Rect::from_min_size(pos2(origin.x, sv.bottom() + 12.0), vec2(278.0, 12.0));
         let pure = Hsva::new(h, 1.0, 1.0, 1.0).to_srgb();
@@ -188,7 +194,7 @@ impl GhubApp {
         }
         ui.painter().add(Shape::mesh(hm));
         let mut changed = false;
-        let r = hit(ui, sv, "sv", Sense::click_and_drag());
+        let r = hit(ui, sv, ("sv", salt), Sense::click_and_drag());
         if (r.dragged() || r.clicked())
             && let Some(p) = r.interact_pointer_pos()
         {
@@ -196,7 +202,7 @@ impl GhubApp {
             v = 1.0 - ((p.y - sv.top()) / sv.height()).clamp(0.0, 1.0);
             changed = true;
         }
-        let hr = hit(ui, hue.expand2(vec2(0.0, 4.0)), "hue", Sense::click_and_drag());
+        let hr = hit(ui, hue.expand2(vec2(0.0, 4.0)), ("hue", salt), Sense::click_and_drag());
         if (hr.dragged() || hr.clicked())
             && let Some(p) = hr.interact_pointer_pos()
         {
@@ -212,9 +218,9 @@ impl GhubApp {
         // swatches + hex
         let sy = hue.bottom() + 22.0;
         let mut out = None;
-        for (i, c) in SWATCHES.iter().enumerate() {
+        for (i, c) in swatches.iter().enumerate() {
             let center = pos2(origin.x + 9.0 + i as f32 * 22.0, sy);
-            let sr = click(ui, Rect::from_center_size(center, vec2(18.0, 18.0)), ("sw", i));
+            let sr = click(ui, Rect::from_center_size(center, vec2(18.0, 18.0)), ("sw", salt, i));
             ui.painter().circle_filled(center, 8.0, Color32::from_rgb(c[0], c[1], c[2]));
             if *c == color || sr.hovered() {
                 ui.painter().circle_stroke(center, 10.5, Stroke::new(1.5, Color32::WHITE));
@@ -226,16 +232,16 @@ impl GhubApp {
         let hr = Rect::from_min_size(pos2(origin.x + 206.0, sy - 12.0), vec2(72.0, 24.0));
         ui.painter().rect_stroke(hr, CornerRadius::same(4), Stroke::new(1.0, pal().outline_hi), StrokeKind::Inside);
         text(ui, pos2(hr.left() + 8.0, hr.center().y), Align2::LEFT_CENTER, "#", Ts::new(Fam::Reg, 12.0, pal().muted));
-        let mut hex = self.light.hex.clone();
+        let mut hex = st.hex.clone();
         let te = egui::TextEdit::singleline(&mut hex).frame(egui::Frame::NONE).char_limit(6).font(Ts::new(Fam::Reg, 12.0, pal().text).font()).text_color(pal().text);
         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(hr));
         let resp = child.put(Rect::from_min_max(pos2(hr.left() + 18.0, hr.top() + 4.0), hr.right_bottom() - vec2(4.0, 2.0)), te);
-        if hex != self.light.hex {
-            self.light.hex = hex.to_uppercase().chars().filter(|c| c.is_ascii_hexdigit()).collect();
+        if hex != st.hex {
+            st.hex = hex.to_uppercase().chars().filter(|c| c.is_ascii_hexdigit()).collect();
         }
         if (resp.lost_focus() || ui.ctx().input(|i| i.key_pressed(egui::Key::Enter)))
-            && self.light.hex.len() == 6
-            && let Ok(n) = u32::from_str_radix(&self.light.hex, 16)
+            && st.hex.len() == 6
+            && let Ok(n) = u32::from_str_radix(&st.hex, 16)
         {
             let c = [(n >> 16) as u8, (n >> 8) as u8, n as u8];
             if c != color {
@@ -243,10 +249,10 @@ impl GhubApp {
             }
         }
         if changed {
-            self.light.hsv = Some((h, s, v));
+            st.hsv = Some((h, s, v));
             let c = Hsva::new(h, s, v, 1.0).to_srgb();
-            self.light.hsv_for = Some(c);
-            self.light.hex = format!("{:02X}{:02X}{:02X}", c[0], c[1], c[2]);
+            st.hsv_for = Some(c);
+            st.hex = format!("{:02X}{:02X}{:02X}", c[0], c[1], c[2]);
             out = Some(c);
         }
         out

@@ -206,6 +206,9 @@ impl GhubApp {
     }
 
     fn appearance(&mut self, ui: &mut Ui, main: Rect) {
+        if self.theme_edit.is_some() {
+            return self.theme_editor_page(ui, main);
+        }
         let th = pal();
         let full = self.cfg();
         let ap = full.appearance;
@@ -218,24 +221,18 @@ impl GhubApp {
             let tile = Rect::from_min_size(pos2(main.left() + i as f32 * 120.0, y), vec2(106.0, 84.0));
             let r = click(ui, tile, ("theme", i));
             let selected = ap.theme == *id;
-            let pv = palette_for(id);
-            let p = ui.painter();
-            p.rect_filled(tile, CornerRadius::same(8), pv.bg);
-            p.rect_filled(Rect::from_min_size(tile.min + vec2(10.0, 10.0), vec2(34.0, 52.0)), CornerRadius::same(4), pv.surface);
-            p.rect_filled(Rect::from_min_size(tile.min + vec2(54.0, 14.0), vec2(36.0, 6.0)), CornerRadius::same(3), pv.text_high);
-            p.rect_filled(Rect::from_min_size(tile.min + vec2(54.0, 28.0), vec2(24.0, 6.0)), CornerRadius::same(3), pv.label);
-            p.rect_filled(Rect::from_min_size(tile.right_bottom() - vec2(40.0, 20.0), vec2(30.0, 10.0)), CornerRadius::same(5), pv.primary);
-            let stroke = if selected { Stroke::new(2.0, th.primary) } else { Stroke::new(1.0, th.outline_hi) };
-            p.rect_stroke(tile, CornerRadius::same(8), stroke, StrokeKind::Inside);
+            super::themes::theme_tile(ui, tile, &palette_for(id), selected);
             text(ui, pos2(tile.center().x, tile.bottom() + 14.0), Align2::CENTER_CENTER, name, Ts::new(Fam::Reg, 12.0, if selected { th.text } else { th.label }));
             if r.clicked() {
                 self.set_theme(id);
             }
         }
         y += 84.0 + 46.0;
+        self.my_themes_section(ui, main, y, &ap);
+        y += 20.0 + 84.0 + 46.0;
         text(ui, pos2(main.left(), y), Align2::LEFT_CENTER, "ACCENT COLOR", t_section());
         let cy = y + 32.0;
-        let preset = palette_for(&ap.theme);
+        let preset = super::palette::resolve(&crate::profile::Appearance { accent: None, follow_lighting: false, ..ap.clone() }, None);
         let mut choice: Option<Option<[u8; 3]>> = None;
         for i in 0..=ACCENTS.len() {
             let center = pos2(main.left() + 14.0 + i as f32 * 34.0, cy);
@@ -293,21 +290,6 @@ impl GhubApp {
             self.edit(|c| c.appearance.follow_lighting = !c.appearance.follow_lighting);
         }
         y += 50.0;
-        ui.painter().line_segment([pos2(main.left(), y), pos2(main.right(), y)], Stroke::new(1.0, th.divider));
-        y += 26.0;
-        text(ui, pos2(main.left(), y), Align2::LEFT_CENTER, "PREVIEW", t_section());
-        y += 22.0;
-        let x = main.left();
-        blue_button(ui, Rect::from_min_size(pos2(x, y), vec2(110.0, 32.0)), "BUTTON", "pv-blue");
-        dark_button(ui, Rect::from_min_size(pos2(x + 122.0, y), vec2(110.0, 32.0)), "BUTTON", "pv-dark", true);
-        switch(ui, pos2(x + 268.0, y + 16.0), true, th.primary, "pv-switch");
-        checkbox(ui, pos2(x + 320.0, y + 9.0), "OPTION", true, true, "pv-check");
-        y += 44.0;
-        let mut v = 0.6;
-        slider(ui, Rect::from_min_size(pos2(x, y + 15.0), vec2(160.0, 2.0)), &mut v, 0.0..=1.0, "pv-slider");
-        pill(ui, Rect::from_min_size(pos2(x + 196.0, y + 5.0), vec2(58.0, 22.0)), "10 MIN", true, "pv-pill-on");
-        pill(ui, Rect::from_min_size(pos2(x + 262.0, y + 5.0), vec2(58.0, 22.0)), "30 MIN", false, "pv-pill-off");
-        y += 44.0;
         ui.painter().line_segment([pos2(main.left(), y), pos2(main.right(), y)], Stroke::new(1.0, th.divider));
         y += 24.0;
         text(ui, pos2(main.left(), y), Align2::LEFT_CENTER, "ON-SCREEN DISPLAY", t_section());
