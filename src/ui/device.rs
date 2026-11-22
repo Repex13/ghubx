@@ -259,7 +259,12 @@ Logo: {}", name(&p.leds[0]), name(&p.leds[1])));
         if click(ui, rb.expand(3.0), "slot-restore-all").clicked() {
             self.restore_all_slots();
         }
-        y += rb.height() + 14.0;
+        y += rb.height() + 6.0;
+        let ab = para(ui, pos2(ox, y), 210.0, "ASSIGN PROFILES TO SLOTS", Ts::new(Fam::Reg, 12.0, pal().text).ls(0.6));
+        if click(ui, ab.expand(3.0), "slot-assign").clicked() {
+            self.open_slot_assign(ui.ctx().cumulative_frame_nr());
+        }
+        y += ab.height() + 14.0;
         para(
             ui,
             pos2(ox, y),
@@ -275,8 +280,10 @@ Logo: {}", name(&p.leds[0]), name(&p.leds[1])));
             self.slot_menu = None;
             self.slot_pending = None;
             self.slot_details = None;
+            self.slot_assign = None;
         }
         self.slot_details_ui(ui, win);
+        self.slot_assign_ui(ui, win);
         self.slot_menu_ui(ui, pos2(ox - 8.0, win.top() + 347.0));
         self.slot_bar(ui, win);
     }

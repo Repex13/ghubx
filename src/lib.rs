@@ -7,6 +7,7 @@ pub mod obs;
 pub mod onboard_write;
 pub mod games;
 pub mod ghub_import;
+pub mod ghub_watch;
 pub mod hidpp;
 pub mod io;
 pub mod lua;

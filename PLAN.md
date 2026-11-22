@@ -55,15 +55,25 @@ Now that the repo is public (`https://github.com/Repex13/ghubx`):
 
 ## 3. Remaining G HUB parity gaps
 
-- **On-board slot manager** `[proposed]` — map any of your profiles to
+- **On-board slot manager** `[done TBD]` — map any of your profiles to
   slots 1-5 and write them in one pass; slot 1 already proven.
-- **Settings watcher** `[proposed]` — notice `settings.db` changing
-  (you tweaked G HUB) and offer a one-click re-import diff.
-- **Lua parity** `[proposed]` — syntax highlighting, unsaved-changes
+  Device Settings > ASSIGN PROFILES TO SLOTS opens an overlay with five
+  dropdowns pre-filled from the read directory; one pending action feeds
+  the same gated WRITE TO MOUSE bar.
+- **Settings watcher** `[done TBD]` — notice `settings.db` changing
+  (you tweaked G HUB) and offer a one-click re-import diff. The watcher
+  (`ghub_watch::DbWatch`, ~5 s poll, 2 s quiet debounce) sets a CHANGED
+  hint beside IMPORT and drops a feed note; the explicit diff view is
+  still open.
+- **Lua parity** `[done TBD]` — syntax highlighting, unsaved-changes
   prompt, remaining API (`SetMKeyState`, `GetMKeyState`, `AbortMacro`,
-  ...). Editor currently plaintext; documented gap.
-- **Macro polish** `[proposed]` — recording indicator, loop-count
-  limits, random delay ranges (a GHUB-X extra G HUB lacks).
+  `OutputDebugMessage`, `IsModifierPressed`, `MoveMouseTo` done; anything
+  still impossible sits on the explicit unsupported list). The editor
+  colours source and shows an UNSAVED CHANGES bar.
+- **Macro polish** `[done TBD]` — recording indicator, loop-count
+  limits, random delay ranges (a GHUB-X extra G HUB lacks). Done as
+  `Macro.repeat_count` (UNTIL RELEASED / N TIMES) plus per-step `jitter`
+  edited next to each delay chip.
 - `[won't]` Community profiles, Logitech account sync, firmware updates,
   other devices — need Logitech's servers or different hardware. Keep
   G HUB installed-but-closed for firmware checks.

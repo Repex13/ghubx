@@ -276,6 +276,10 @@ impl GhubApp {
         text(ui, pos2(main.left(), y + 22.0), Align2::LEFT_CENTER, "Copy profiles, macros, DPI and lighting from G HUB", Ts::new(Fam::Reg, 13.0, pal().label).ls(0.3));
         let armed = self.import_armed.is_some_and(|t| t.elapsed().as_secs_f32() < 4.0);
         let ib = Rect::from_min_size(pos2(main.right() - 190.0, y - 5.0), vec2(190.0, 32.0));
+        // settings.db changed on disk since the last import — the watcher set the flag
+        if self.ghub_db_changed {
+            text(ui, pos2(ib.left() - 14.0, ib.center().y), Align2::RIGHT_CENTER, "CHANGED", Ts::new(Fam::Bold, 10.0, pal().amber).ls(0.8));
+        }
         let label = if armed { "CLICK AGAIN TO REPLACE" } else { "IMPORT" };
         if dark_button(ui, ib, label, "s-import", crate::ghub_import::settings_db().is_some()).clicked() {
             if armed {
@@ -284,6 +288,7 @@ impl GhubApp {
                 match crate::ghub_import::import(&mut c) {
                     Ok(s) => {
                         self.edit(|cfg| *cfg = c);
+                        self.ghub_db_changed = false;
                         self.say(format!("Imported {} profile(s), {} macro(s), {} assignment(s)", s.profiles, s.macros, s.assignments));
                     }
                     Err(e) => self.say(format!("Import failed: {e}")),

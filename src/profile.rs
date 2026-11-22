@@ -185,14 +185,23 @@ pub struct MacroStep {
     pub down: bool,
     /// Wait this long before the step.
     pub delay_ms: u32,
+    /// Random extra wait before the step: the engine sleeps
+    /// `delay_ms + sample`, sample drawn uniformly from `0..=jitter` (GHUB-X
+    /// extra — G HUB has only fixed delays).
+    #[serde(default, skip_serializing_if = "zero")]
+    pub jitter: u32,
     /// When set: `vk == 0` and `down == false`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub act: Option<StepAct>,
 }
 
+fn zero(v: &u32) -> bool {
+    *v == 0
+}
+
 impl MacroStep {
     pub fn key(vk: u16, down: bool, delay_ms: u32) -> Self {
-        Self { vk, down, delay_ms, act: None }
+        Self { vk, down, delay_ms, jitter: 0, act: None }
     }
 
     pub fn pause(delay_ms: u32) -> Self {
@@ -200,11 +209,11 @@ impl MacroStep {
     }
 
     pub fn text(text: impl Into<String>, delay_ms: u32) -> Self {
-        Self { vk: 0, down: false, delay_ms, act: Some(StepAct::Text(text.into())) }
+        Self { vk: 0, down: false, delay_ms, jitter: 0, act: Some(StepAct::Text(text.into())) }
     }
 
     pub fn run(a: Assignment, delay_ms: u32) -> Self {
-        Self { vk: 0, down: false, delay_ms, act: Some(StepAct::Do(a)) }
+        Self { vk: 0, down: false, delay_ms, jitter: 0, act: Some(StepAct::Do(a)) }
     }
 
     pub fn is_pause(&self) -> bool {
@@ -241,11 +250,15 @@ pub struct Macro {
     pub show_up_down: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color: Option<[u8; 3]>,
+    /// GHUB-X extra: stop the repeat loops after this many passes.
+    /// `None` = until released / toggled off (G HUB behaviour). Ignored by NO REPEAT.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repeat_count: Option<u32>,
 }
 
 impl Default for Macro {
     fn default() -> Self {
-        Self { id: String::new(), name: String::new(), kind: MacroKind::NoRepeat, steps: vec![], hold: vec![], release: vec![], std_delay: None, show_up_down: true, color: None }
+        Self { id: String::new(), name: String::new(), kind: MacroKind::NoRepeat, steps: vec![], hold: vec![], release: vec![], std_delay: None, show_up_down: true, color: None, repeat_count: None }
     }
 }
 
@@ -259,6 +272,9 @@ impl Macro {
         let mut found: Option<u32> = None;
         for list in [&self.steps, &self.hold, &self.release] {
             for (i, s) in list.iter().enumerate() {
+                if s.jitter > 0 {
+                    return None;
+                }
                 if i == 0 && !s.is_pause() && s.delay_ms == 0 {
                     continue;
                 }
@@ -284,6 +300,7 @@ impl Macro {
             list.retain(|s| !s.is_pause());
             for (i, s) in list.iter_mut().enumerate() {
                 s.delay_ms = if i == 0 { 0 } else { ms };
+                s.jitter = 0; // standard delays are uniform: no jitter
             }
             if n + 1 == looping && !list.is_empty() {
                 list.push(MacroStep::pause(ms));
@@ -1101,6 +1118,16 @@ impl Config {
             p.gshift.resize(SLOTS, Assignment::Default);
             if p.dpi.levels.is_empty() {
                 p.dpi = DpiTable::default();
+            }
+        }
+        for m in &mut a.macros {
+            // NO REPEAT never loops, and 0 would mean "never play": both normalize to None.
+            if m.kind == MacroKind::NoRepeat || m.repeat_count == Some(0) {
+                m.repeat_count = None;
+            }
+            for s in m.steps.iter_mut().chain(&mut m.hold).chain(&mut m.release) {
+                s.delay_ms = s.delay_ms.min(600_000);
+                s.jitter = s.jitter.min(600_000);
             }
         }
     }
@@ -2037,7 +2064,7 @@ mod tests {
             MacroStep::run(Assignment::Shortcut { name: "Copy".into(), combo: KeyCombo { vk: 0x43, mods: MOD_CTRL } }, 3),
             MacroStep::run(Assignment::ToggleScrollAccel, 4),
         ];
-        Macro { id: "m".into(), name: "rich".into(), kind: MacroKind::Sequence, hold: steps.clone(), release: steps[..2].to_vec(), steps, std_delay: Some(35), show_up_down: false, color: Some([1, 2, 3]) }
+        Macro { id: "m".into(), name: "rich".into(), kind: MacroKind::Sequence, hold: steps.clone(), release: steps[..2].to_vec(), steps, std_delay: Some(35), show_up_down: false, color: Some([1, 2, 3]), repeat_count: None }
     }
 
     #[test]

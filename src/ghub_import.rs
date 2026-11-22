@@ -276,6 +276,7 @@ fn sequence(card: &Value) -> Option<Macro> {
         std_delay,
         show_up_down: seq.get("showUpDown").and_then(|b| b.as_bool()).unwrap_or(true),
         color: macro_color(mac),
+        ..Default::default()
     })
 }
 

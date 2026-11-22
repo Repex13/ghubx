@@ -9,7 +9,7 @@ use crate::osd::{self, OsdKind};
 use crate::win;
 use crossbeam_channel::{Receiver, Sender, select, tick};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -138,6 +138,10 @@ pub enum EngineMsg {
     Reapply,
     /// Restore slots from the mouse's ROM copies.
     RestoreOnboard { slots: Vec<u16> },
+    /// A toggle macro's `repeat_count` ended its loop: forget the toggle (id).
+    MacroLoopEnd(String),
+    /// Lua `AbortMacro()`: stop every looping macro (toggles and held repeats).
+    AbortMacros,
     Quit,
 }
 
@@ -342,6 +346,19 @@ impl Engine {
                     }
                     Ok(EngineMsg::TestMacro(m)) => self.test_macro(*m),
                     Ok(EngineMsg::Tap(a)) => self.tap(a),
+                    Ok(EngineMsg::MacroLoopEnd(id)) => {
+                        self.toggles.remove(&id);
+                    }
+                    Ok(EngineMsg::AbortMacros) => {
+                        for (_, f) in self.toggles.drain() {
+                            f.store(true, Ordering::Relaxed);
+                        }
+                        for h in self.held.iter_mut().flatten() {
+                            if let Some(s) = &h.stop {
+                                s.store(true, Ordering::Relaxed);
+                            }
+                        }
+                    }
                     Ok(EngineMsg::TestPerfect180 { counts }) => {
                         let e = self.cfg.lock().unwrap().extras.clone();
                         let input = self.input.clone();
@@ -795,14 +812,14 @@ impl Engine {
                 match m.kind {
                     MacroKind::NoRepeat => {
                         let p = self.player();
-                        std::thread::spawn(move || play(&p, &m.steps, None));
+                        std::thread::spawn(move || play(&p, &m.steps, None, None));
                         None
                     }
                     MacroKind::RepeatWhileHolding => {
                         let stop = Arc::new(AtomicBool::new(false));
                         let s = stop.clone();
                         let p = self.player();
-                        std::thread::spawn(move || play(&p, &m.steps, Some(&s)));
+                        std::thread::spawn(move || play(&p, &m.steps, Some(&s), m.repeat_count));
                         Some(stop)
                     }
                     MacroKind::Sequence => {
@@ -819,7 +836,15 @@ impl Engine {
                             let stop = Arc::new(AtomicBool::new(false));
                             self.toggles.insert(m.id.clone(), stop.clone());
                             let p = self.player();
-                            std::thread::spawn(move || play(&p, &m.steps, Some(&stop)));
+                            let (id, lb) = (m.id.clone(), self.loopback.clone());
+                            std::thread::spawn(move || {
+                                // the count ended the loop: forget the toggle so the next press restarts it
+                                if play(&p, &m.steps, Some(&stop), m.repeat_count)
+                                    && let Some(tx) = &lb
+                                {
+                                    let _ = tx.send(EngineMsg::MacroLoopEnd(id));
+                                }
+                            });
                         }
                         None
                     }
@@ -975,14 +1000,35 @@ struct Player {
     engine: Option<Sender<EngineMsg>>,
 }
 
+/// Tiny xorshift64* for delay jitter — no rand dep; seeded once per macro play.
+fn rng_next(s: &mut u64) -> u32 {
+    *s ^= *s >> 12;
+    *s ^= *s << 25;
+    *s ^= *s >> 27;
+    (*s >> 11) as u32
+}
+
+fn rng_seed() -> u64 {
+    static COUNTER: AtomicU64 = AtomicU64::new(0x9E37_79B9_7F4A_7C15);
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(0x1234_5678);
+    (nanos ^ COUNTER.fetch_add(0x9E37_79B9_7F4A_7C15, Ordering::Relaxed)) | 1
+}
+
+/// How long to wait before this step: `delay_ms` plus a uniform sample from
+/// `0..=jitter` when the step has jitter.
+fn step_delay(s: &MacroStep, rng: &mut u64) -> u32 {
+    s.delay_ms + if s.jitter > 0 { rng_next(rng) % (s.jitter + 1) } else { 0 }
+}
+
 impl Player {
     /// One pass over `steps`; returns the milliseconds slept. Keys left down are tracked in `down`.
-    fn pass(&self, steps: &[MacroStep], down: &mut Vec<u16>) -> u32 {
+    fn pass(&self, steps: &[MacroStep], down: &mut Vec<u16>, rng: &mut u64) -> u32 {
         let mut slept = 0;
         for s in steps {
-            if s.delay_ms > 0 {
-                std::thread::sleep(Duration::from_millis(s.delay_ms as u64));
-                slept += s.delay_ms;
+            let d = step_delay(s, rng);
+            if d > 0 {
+                std::thread::sleep(Duration::from_millis(d as u64));
+                slept += d;
             }
             if let Some(a) = &s.act {
                 self.act(a);
@@ -1050,11 +1096,13 @@ fn release_all_down(p: &Player, down: Vec<u16>) {
     }
 }
 
-/// SEQUENCE: ON PRESS once, WHILE HOLDING repeated until `stop`, ON RELEASE once. Keys left down by a
-/// section stay down for the next one; the end releases what is still down.
+/// SEQUENCE: ON PRESS once, WHILE HOLDING repeated until `stop` or `repeat_count`
+/// passes, ON RELEASE once. Keys left down by a section stay down for the next
+/// one; the end releases what is still down.
 fn play_sequence(p: &Player, m: &Macro, stop: &AtomicBool) {
     let mut down = Vec::new();
-    p.pass(&m.steps, &mut down);
+    let mut rng = rng_seed();
+    p.pass(&m.steps, &mut down, &mut rng);
     if m.hold.is_empty() {
         while !stop.load(Ordering::Relaxed) {
             std::thread::sleep(Duration::from_millis(5));
@@ -1066,32 +1114,42 @@ fn play_sequence(p: &Player, m: &Macro, stop: &AtomicBool) {
         {
             std::thread::sleep(Duration::from_millis(d as u64));
         }
-        while !stop.load(Ordering::Relaxed) {
-            if p.pass(&m.hold, &mut down) == 0 {
+        let mut n = 0u32;
+        while !stop.load(Ordering::Relaxed) && m.repeat_count.is_none_or(|c| n < c) {
+            if p.pass(&m.hold, &mut down, &mut rng) == 0 {
                 std::thread::sleep(Duration::from_millis(10));
             }
+            n += 1;
         }
     }
-    p.pass(&m.release, &mut down);
+    p.pass(&m.release, &mut down, &mut rng);
     release_all_down(p, down);
 }
 
 /// The editor's TEST: press, one pass of hold, release.
 fn play_once(p: &Player, m: &Macro) {
     let mut down = Vec::new();
-    p.pass(&m.steps, &mut down);
+    let mut rng = rng_seed();
+    p.pass(&m.steps, &mut down, &mut rng);
     if m.kind == MacroKind::Sequence {
-        p.pass(&m.hold, &mut down);
-        p.pass(&m.release, &mut down);
+        p.pass(&m.hold, &mut down, &mut rng);
+        p.pass(&m.release, &mut down, &mut rng);
     }
     release_all_down(p, down);
 }
 
-/// NoRepeat / RepeatWhileHolding / Toggle: loop `steps` until `stop` (one pass without it).
-fn play(p: &Player, steps: &[MacroStep], stop: Option<&AtomicBool>) {
+/// NoRepeat / RepeatWhileHolding / Toggle: loop `steps` until `stop` or `count`
+/// passes (one pass without either). Returns true when the count ended the loop.
+fn play(p: &Player, steps: &[MacroStep], stop: Option<&AtomicBool>, count: Option<u32>) -> bool {
     let mut down: Vec<u16> = Vec::new();
+    let mut rng = rng_seed();
+    let mut n = 0u32;
     loop {
-        let slept = p.pass(steps, &mut down);
+        let slept = p.pass(steps, &mut down, &mut rng);
+        n += 1;
+        if count.is_some_and(|c| n >= c) {
+            break;
+        }
         match stop {
             Some(f) if !f.load(Ordering::Relaxed) => {
                 if slept == 0 {
@@ -1104,6 +1162,7 @@ fn play(p: &Player, steps: &[MacroStep], stop: Option<&AtomicBool>) {
     for vk in down {
         p.input.key(vk, false);
     }
+    count.is_some_and(|c| n >= c)
 }
 
 /// Basilisk V4 "Perfect 180": inject `counts` of horizontal motion spread
@@ -1226,11 +1285,25 @@ mod tests {
             self.dev_rx.try_iter().collect()
         }
 
-        /// Feed queued macro `Tap`s into the engine, as its run loop does.
+        /// Feed queued loopback messages into the engine, as its run loop does.
         fn feed_taps(&mut self) {
             while let Ok(m) = self.lb_rx.try_recv() {
-                if let EngineMsg::Tap(a) = m {
-                    self.e.tap(a);
+                match m {
+                    EngineMsg::Tap(a) => self.e.tap(a),
+                    EngineMsg::MacroLoopEnd(id) => {
+                        self.e.toggles.remove(&id);
+                    }
+                    EngineMsg::AbortMacros => {
+                        for (_, f) in self.e.toggles.drain() {
+                            f.store(true, Ordering::Relaxed);
+                        }
+                        for h in self.e.held.iter_mut().flatten() {
+                            if let Some(s) = &h.stop {
+                                s.store(true, Ordering::Relaxed);
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
@@ -1938,5 +2011,96 @@ mod tests {
         assert_eq!(rx.try_iter().collect::<Vec<_>>(), vec![LuaMsg::Script(String::new())]);
         r.e.release_device();
         assert_eq!(rx.try_iter().collect::<Vec<_>>(), Vec::<LuaMsg>::new());
+    }
+
+    #[test]
+    fn repeat_count_stops_a_repeat_macro() {
+        // 3 loops of [down, up, 50ms pause]; the button stays held the whole time
+        let mut m = macro_of("jump", MacroKind::RepeatWhileHolding, &[(0x20, true, 0), (0x20, false, 40), (0, false, 10)]);
+        m.repeat_count = Some(3);
+        let mut r = rig(|c| {
+            c.apps[0].macros.push(m);
+            base(c, 3, Assignment::Macro("jump".into()));
+        });
+        r.take_control();
+        r.e.on_mask(1 << 3);
+        pause(300);
+        let ev = r.rec.events();
+        assert_eq!(alternates_down_up(&ev, 0x20), 3, "{ev:?}");
+        // it stays stopped while the button is still held
+        pause(200);
+        assert_eq!(r.rec.events().len(), ev.len());
+        r.e.on_mask(0);
+    }
+
+    #[test]
+    fn repeat_count_ends_a_toggle_and_the_press_restarts_it() {
+        let mut m = macro_of("ping", MacroKind::Toggle, &[(0x04, true, 0), (0x04, false, 30), (0, false, 10)]);
+        m.repeat_count = Some(2);
+        let mut r = rig(|c| {
+            c.apps[0].macros.push(m);
+            base(c, 3, Assignment::Macro("ping".into()));
+        });
+        r.take_control();
+        r.press(3);
+        pause(200);
+        let ev = r.rec.events();
+        assert_eq!(alternates_down_up(&ev, 0x04), 2, "{ev:?}");
+        // the loopback told the engine the count ended the toggle
+        r.feed_taps();
+        assert!(r.e.toggles.is_empty());
+        // one press restarts a fresh loop (not a "toggle off")
+        r.press(3);
+        pause(120);
+        assert!(!r.e.toggles.is_empty());
+        r.press(3);
+        pause(200);
+    }
+
+    #[test]
+    fn repeat_count_ignores_no_repeat() {
+        let mut m = macro_of("once", MacroKind::NoRepeat, &[(0x41, true, 0), (0x41, false, 20)]);
+        m.repeat_count = Some(5); // sanitized away in real configs; the player ignores it anyway
+        let mut r = rig(|c| {
+            c.apps[0].macros.push(m);
+            base(c, 3, Assignment::Macro("once".into()));
+        });
+        r.take_control();
+        r.press(3);
+        pause(150);
+        assert_eq!(r.rec.events(), vec![Ev::Key(0x41, true), Ev::Key(0x41, false)]);
+    }
+
+    #[test]
+    fn step_delay_stays_inside_the_jitter_band() {
+        let mut s = MacroStep::key(0x41, true, 100);
+        s.jitter = 40;
+        let mut rng = 0x9E37_79B9_7F4A_7C15u64;
+        let mut seen_min = u32::MAX;
+        let mut seen_max = 0;
+        for _ in 0..200 {
+            let d = step_delay(&s, &mut rng);
+            assert!((100..=140).contains(&d), "{d}");
+            seen_min = seen_min.min(d);
+            seen_max = seen_max.max(d);
+        }
+        assert!(seen_min < seen_max, "jitter should vary: {seen_min}..{seen_max}");
+        // no jitter keeps the fixed delay
+        let s2 = MacroStep::key(0x41, true, 100);
+        assert_eq!(step_delay(&s2, &mut rng), 100);
+    }
+
+    #[test]
+    fn jittered_pause_plays_between_the_bounds() {
+        // 200 passes: sleep time per pass must land in [delay, delay + jitter]
+        let mut s = MacroStep::pause(10);
+        s.jitter = 20;
+        let p = Player { input: Arc::new(Rec::default()), engine: None };
+        let mut rng = rng_seed();
+        let mut down = Vec::new();
+        for _ in 0..20 {
+            let slept = p.pass(&[s.clone()], &mut down, &mut rng);
+            assert!((10..=30).contains(&slept), "{slept}");
+        }
     }
 }

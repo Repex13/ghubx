@@ -185,7 +185,15 @@ pub struct GhubApp {
     pub(crate) wdl_cache: Option<(Instant, Option<bool>)>,
     pub(crate) slot_menu: Option<onboard::SlotMenu>,
     pub(crate) slot_details: Option<usize>,
+    /// ASSIGN PROFILES overlay state (Device Settings ON-BOARD column).
+    pub(crate) slot_assign: Option<onboard::SlotAssign>,
     pub(crate) slot_pending: Option<onboard::SlotAction>,
+    /// Debounced watcher of G HUB's settings.db mtime.
+    ghub_db: crate::ghub_watch::DbWatch,
+    /// The next time the settings.db watcher may poll.
+    ghub_db_check: Instant,
+    /// settings.db changed on disk since the last successful import.
+    pub(crate) ghub_db_changed: bool,
     pub(crate) theme_edit: Option<themes::ThemeEditor>,
     pub(crate) sample_edit: Option<samples::SampleEditor>,
     pub(crate) theme_page: usize,
@@ -278,7 +286,11 @@ impl GhubApp {
             wdl_cache: None,
             slot_menu: None,
             slot_details: None,
+            slot_assign: None,
             slot_pending: None,
+            ghub_db: Default::default(),
+            ghub_db_check: Instant::now(),
+            ghub_db_changed: false,
             theme_edit: None,
             sample_edit: None,
             theme_page: 0,
@@ -301,7 +313,7 @@ impl GhubApp {
             "assign" | "assign2" | "gshift" | "macro" | "macroname" | "macrotype" | "macroseq" | "macroedit" | "macrorec" | "macromenu" | "macrocustom" | "macrofold" | "macroconfirm" | "macroaction" | "select" | "keys" | "actions" | "obsactions" | "obsnew" | "p180warn" | "gamecmds" | "p180game" => Route::Device(DevTab::Assignments),
             "sens" => Route::Device(DevTab::Sensitivity),
             "light" | "fixed" | "wdl" | "effectmenu" | "screenfx" | "screenfxmine" | "sampleedit" | "audiofx" | "audiofxadv" => Route::Device(DevTab::Lighting),
-            "devset" | "onboard" | "slotmenu" | "slotconfirm" | "slotdetails" => Route::DeviceSettings,
+            "devset" | "onboard" | "slotmenu" | "slotconfirm" | "slotdetails" | "slotassign" => Route::DeviceSettings,
             "profiles" | "appdetail" | "addgame" | "scriptedit" => Route::Profiles,
             "settings" | "sleep" => Route::Settings(0),
             "appearance" | "themeedit" | "mythemes" => Route::Settings(1),
@@ -397,7 +409,7 @@ impl GhubApp {
                 c.appearance.theme = "custom-sunset".into();
             }
         }
-        if matches!(page, "onboard" | "slotmenu" | "slotconfirm" | "slotdetails") {
+        if matches!(page, "onboard" | "slotmenu" | "slotconfirm" | "slotdetails" | "slotassign") {
             use crate::profile::{OnboardProfile, OnboardSlot, sample_sector1};
             let base = OnboardProfile::parse(&sample_sector1());
             let with = |dpi: &[u16]| {
@@ -416,6 +428,13 @@ impl GhubApp {
             "slotmenu" => self.slot_menu = Some(onboard::SlotMenu { slot: 5, opened_frame: u64::MAX }),
             "slotconfirm" => self.replace_slot(1, 0, 0),
             "slotdetails" => self.slot_details = Some(1),
+            "slotassign" => {
+                self.open_slot_assign(u64::MAX);
+                if let Some(sa) = self.slot_assign.as_mut() {
+                    // one picked row so the dropdown contents are visible
+                    sa.sel[0] = onboard::Sel::Pick(0, 0);
+                }
+            }
             _ => {}
         }
         if page == "addgame" {
@@ -547,6 +566,7 @@ impl GhubApp {
                 let mut e = macros::MacroEditor::new_of("rec", MacroKind::NoRepeat);
                 e.m.lists[0] = vec![k(0x48, true, 0), k(0x48, false, 50), k(0x49, true, 50), k(0x49, false, 50)];
                 e.rec = Some(0);
+                e.rec_at = Some(std::time::Instant::now());
                 e
             }
             "macromenu" => {
@@ -758,6 +778,21 @@ impl GhubApp {
             if let Err(e) = self.cfg.lock().unwrap().save() {
                 self.log.push_front(format!("Saving settings failed: {e}"));
             }
+        }
+    }
+
+    /// Every ~5 s: has G HUB's settings.db been rewritten? A settled change
+    /// puts a note on the bell and a CHANGED hint on the IMPORT button.
+    /// Never watched in shot/script mode (screenshots must stay deterministic).
+    fn watch_ghub_db(&mut self) {
+        if self.shot.is_some() || self.scripted() || self.ghub_db_check.elapsed() < Duration::from_secs(5) {
+            return;
+        }
+        self.ghub_db_check = Instant::now();
+        let mtime = crate::ghub_import::settings_db().and_then(|p| std::fs::metadata(p).ok()).and_then(|m| m.modified().ok());
+        if self.ghub_db.poll(mtime, std::time::SystemTime::now(), Duration::from_secs(2)) {
+            self.feed.push("G HUB settings changed — re-import to keep GHUB-X in sync", crate::notify::NoteKind::Info);
+            self.ghub_db_changed = true;
         }
     }
 
@@ -1323,6 +1358,7 @@ impl eframe::App for GhubApp {
             self.hide_to_tray();
         }
         self.pump(&ctx);
+        self.watch_ghub_db();
         if let Some(e) = self.obs.take_error() {
             self.say(e);
         }

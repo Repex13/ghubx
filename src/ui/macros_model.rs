@@ -30,7 +30,9 @@ pub enum ItemKind {
     Obs(String),
     Launch(String),
     Fold(String),
-    Delay { ms: u32, pause: bool },
+    /// A delay chip; `jitter` adds a uniform 0..=jitter ms random extra wait
+    /// (GHUB-X extra). Drawn "ms" with a "±J" suffix when set.
+    Delay { ms: u32, pause: bool, jitter: u32 },
 }
 
 /// Steps `id.idx..hi` of the section's list.
@@ -50,6 +52,7 @@ pub struct Snap {
     pub std_ms: u32,
     pub show_up_down: bool,
     pub color: Option<[u8; 3]>,
+    pub repeat: Option<u32>,
 }
 
 pub fn is_mouse_vk(vk: u16) -> bool {
@@ -76,13 +79,13 @@ pub fn items_of(list: &[MacroStep], sec: usize, std: bool, show_up_down: bool) -
         let s = &list[i];
         if s.is_pause() {
             if !std {
-                out.push(Item { id: ItemId { sec, idx: i, delay: true }, hi: i + 1, kind: ItemKind::Delay { ms: s.delay_ms, pause: true } });
+                out.push(Item { id: ItemId { sec, idx: i, delay: true }, hi: i + 1, kind: ItemKind::Delay { ms: s.delay_ms, pause: true, jitter: s.jitter } });
             }
             i += 1;
             continue;
         }
         if !std && s.delay_ms > 0 {
-            out.push(Item { id: ItemId { sec, idx: i, delay: true }, hi: i + 1, kind: ItemKind::Delay { ms: s.delay_ms, pause: false } });
+            out.push(Item { id: ItemId { sec, idx: i, delay: true }, hi: i + 1, kind: ItemKind::Delay { ms: s.delay_ms, pause: false, jitter: s.jitter } });
         }
         let id = ItemId { sec, idx: i, delay: false };
         if fold && let Some(end) = fold_end(list, i) {
@@ -147,6 +150,8 @@ pub struct Model {
     pub std_ms: u32,
     pub show_up_down: bool,
     pub color: Option<[u8; 3]>,
+    /// `Macro.repeat_count`: `Some(n)` = the repeat loops stop after n passes.
+    pub repeat: Option<u32>,
     pub is_new: bool,
     pub snap: Snap,
     pub active: usize,
@@ -156,7 +161,7 @@ pub struct Model {
 
 impl Model {
     pub fn fresh(name: &str, kind: MacroKind) -> Self {
-        let snap = Snap { name: name.into(), kind, lists: Default::default(), std: true, std_ms: 50, show_up_down: true, color: None };
+        let snap = Snap { name: name.into(), kind, lists: Default::default(), std: true, std_ms: 50, show_up_down: true, color: None, repeat: None };
         Self::from_snap(snap, true)
     }
 
@@ -170,6 +175,7 @@ impl Model {
             std_ms: ms.unwrap_or(50),
             show_up_down: m.show_up_down,
             color: m.color,
+            repeat: m.repeat_count,
         };
         Self::from_snap(snap, false)
     }
@@ -183,6 +189,7 @@ impl Model {
             std_ms: snap.std_ms,
             show_up_down: snap.show_up_down,
             color: snap.color,
+            repeat: snap.repeat,
             is_new,
             snap,
             active: 0,
@@ -192,7 +199,7 @@ impl Model {
     }
 
     pub fn cur(&self) -> Snap {
-        Snap { name: self.name.clone(), kind: self.kind, lists: self.lists.clone(), std: self.std, std_ms: self.std_ms, show_up_down: self.show_up_down, color: self.color }
+        Snap { name: self.name.clone(), kind: self.kind, lists: self.lists.clone(), std: self.std, std_ms: self.std_ms, show_up_down: self.show_up_down, color: self.color, repeat: self.repeat }
     }
 
     pub fn changed(&self) -> bool {
@@ -231,6 +238,7 @@ impl Model {
             self.std_ms = s.std_ms;
             self.show_up_down = s.show_up_down;
             self.color = s.color;
+            self.repeat = s.repeat;
         }
         self.sel.clear();
         self.active = 0;
@@ -275,6 +283,7 @@ impl Model {
         let (mut spans, zero) = self.spans();
         for (sec, i) in zero {
             self.lists[sec][i].delay_ms = 0;
+            self.lists[sec][i].jitter = 0;
         }
         spans.sort_by(|a, b| b.cmp(a));
         for (sec, lo, hi) in spans {
@@ -338,7 +347,7 @@ impl Model {
 
     /// The macro as SAVE stores it.
     pub fn to_macro(&self, id: &str) -> Macro {
-        let mut m = Macro { id: id.into(), name: self.name.trim().into(), kind: self.kind, show_up_down: self.show_up_down, color: self.color, ..Default::default() };
+        let mut m = Macro { id: id.into(), name: self.name.trim().into(), kind: self.kind, show_up_down: self.show_up_down, color: self.color, repeat_count: if self.kind == MacroKind::NoRepeat { None } else { self.repeat }, ..Default::default() };
         m.steps = self.lists[0].clone();
         if self.kind == MacroKind::Sequence {
             m.hold = self.lists[1].clone();
@@ -350,14 +359,18 @@ impl Model {
             for list in [&mut m.steps, &mut m.hold, &mut m.release] {
                 let n = list.len();
                 let mut pending = 0;
+                let mut pending_j = 0;
                 let mut out = Vec::new();
                 for (i, mut s) in std::mem::take(list).into_iter().enumerate() {
                     if s.is_pause() && i + 1 != n {
                         pending += s.delay_ms;
+                        pending_j += s.jitter; // merging gaps: jitter ranges add
                         continue;
                     }
                     s.delay_ms += pending;
+                    s.jitter += pending_j;
                     pending = 0;
+                    pending_j = 0;
                     out.push(s);
                 }
                 *list = out;
@@ -447,7 +460,7 @@ mod tests {
             .map(|i| match i.kind {
                 ItemKind::Key { vk, down } => format!("{}{}", vk_name(vk), if down { "v" } else { "^" }),
                 ItemKind::Fold(l) => format!("[{l}:{}]", i.hi - i.id.idx),
-                ItemKind::Delay { ms, pause } => format!("d{ms}{}", if pause { "p" } else { "" }),
+                ItemKind::Delay { ms, pause, jitter } => format!("d{ms}{}{j}", if pause { "p" } else { "" }, j = if jitter > 0 { format!("±{jitter}") } else { String::new() }),
                 ItemKind::Mouse { vk, down } => format!("m{vk}{}", if down { "v" } else { "^" }),
                 _ => "?".into(),
             })

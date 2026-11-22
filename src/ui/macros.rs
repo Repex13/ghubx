@@ -56,12 +56,19 @@ pub struct MacroEditor {
     pub m: Model,
     pub menu: Option<usize>,
     pub rec: Option<usize>,
+    /// When recording started (for the "REC 00:0N" pill).
+    pub rec_at: Option<Instant>,
     rec_last: Option<Instant>,
     rec_mods: egui::Modifiers,
     pub mode: Option<Mode>,
     pub name_edit: bool,
     std_edit: Option<String>,
-    delay_edit: Option<(ItemId, String)>,
+    /// In-place edit of a delay chip: (item, ms text, jitter text).
+    delay_edit: Option<(ItemId, String, String)>,
+    /// One of the delay edit fields held focus at least once (commit when both lose it).
+    delay_focus: bool,
+    /// In-place edit of the repeat count ("N TIMES").
+    repeat_edit: Option<String>,
     pub color_open: bool,
     picker: super::light::PickerState,
     pub test_at: Option<Instant>,
@@ -82,12 +89,15 @@ impl MacroEditor {
             m,
             menu: None,
             rec: None,
+            rec_at: None,
             rec_last: None,
             rec_mods: Default::default(),
             mode: None,
             name_edit: false,
             std_edit: None,
             delay_edit: None,
+            delay_focus: false,
+            repeat_edit: None,
             color_open: false,
             picker: Default::default(),
             test_at: None,
@@ -281,7 +291,11 @@ fn chip_w(ui: &Ui, item: &Item, editing: bool) -> f32 {
         ItemKind::Mouse { .. } => 30.0,
         ItemKind::Text(t) => (text_w(ui, &format!("\u{201c}{}\u{201d}", t.replace('\n', " ")), Ts::new(Fam::Reg, 16.0, pal().text).ls(0.0)) + 24.0).clamp(55.0, 280.0),
         ItemKind::Sys(l) | ItemKind::Launch(l) | ItemKind::Obs(l) => text_w(ui, l, Ts::new(Fam::Reg, 14.0, pal().text).ls(0.0)) + 24.0,
-        ItemKind::Delay { ms, .. } => (text_w(ui, &fmt_delay(*ms).0, Ts::new(Fam::Reg, 21.0, pal().text).ls(0.0)) + 6.0).max(40.0),
+        ItemKind::Delay { ms, jitter, .. } => {
+            let w = text_w(ui, &fmt_delay(*ms).0, Ts::new(Fam::Reg, 21.0, pal().text).ls(0.0));
+            let j = if *jitter > 0 { text_w(ui, &format!("±{jitter}"), Ts::new(Fam::Light, 14.0, pal().text).ls(0.0)) + 2.0 } else { 0.0 };
+            (w + j + 6.0).max(40.0)
+        }
     }
 }
 
@@ -615,13 +629,64 @@ impl GhubApp {
             }
         }
         ui.set_opacity(1.0);
+        // GHUB-X extra: a bounded repeat count for the looping kinds
+        if ed.m.kind != MacroKind::NoRepeat {
+            let ry = ty + 42.0;
+            ui.set_opacity(if busy { 0.2 } else { 1.0 });
+            text(ui, pos2(ox + 31.0, ry), Align2::LEFT_CENTER, "REPEAT", Ts::new(Fam::Bold, 12.0, pal().text).ls(1.0));
+            let on = ed.m.repeat.is_some();
+            let ts_off = Ts::new(Fam::Reg, 12.0, if on { pal().text_high } else { pal().primary }).ls(0.4);
+            let r1 = text(ui, pos2(ox + 31.0, ry + 22.0), Align2::LEFT_CENTER, "UNTIL RELEASED", ts_off);
+            if act && click(ui, r1.expand(4.0), "repeat-forever").clicked() {
+                ed.m.repeat = None;
+                ed.repeat_edit = None;
+            }
+            let nx = ox + 168.0;
+            match &mut ed.repeat_edit {
+                Some(buf) => {
+                    let fr = Rect::from_min_size(pos2(nx, ry + 10.0), vec2(48.0, 24.0));
+                    ui.painter().rect_filled(fr, CornerRadius::same(3), pal().bg);
+                    let te = egui::TextEdit::singleline(buf).font(Ts::new(Fam::Reg, 12.0, pal().text).font()).text_color(pal().text).frame(egui::Frame::NONE).char_limit(4).align(egui::Align2::CENTER_CENTER);
+                    let resp = ui.put(fr, te);
+                    if !resp.has_focus() && !resp.lost_focus() {
+                        resp.request_focus();
+                    }
+                    if resp.lost_focus() {
+                        ed.m.repeat = Some(buf.trim().parse().unwrap_or(1).clamp(1, 9999));
+                        ed.repeat_edit = None;
+                    }
+                    text(ui, pos2(fr.right() + 8.0, ry + 22.0), Align2::LEFT_CENTER, "TIMES", Ts::new(Fam::Reg, 12.0, pal().primary).ls(0.4));
+                }
+                None => {
+                    let label = ed.m.repeat.map_or_else(|| "N TIMES".to_owned(), |n| format!("{n} TIMES"));
+                    let ts_n = Ts::new(Fam::Reg, 12.0, if on { pal().primary } else { pal().text_high }).ls(0.4);
+                    let r2 = text(ui, pos2(nx, ry + 22.0), Align2::LEFT_CENTER, &label, ts_n);
+                    if act && click(ui, r2.expand(4.0), "repeat-n").clicked() {
+                        if ed.m.repeat.is_none() {
+                            ed.m.repeat = Some(1);
+                        }
+                        ed.repeat_edit = Some(ed.m.repeat.unwrap_or(1).to_string());
+                    }
+                }
+            }
+            ui.set_opacity(1.0);
+        }
         let popup_at = pos2(ox, y + 20.0);
         let color_row = Rect::from_min_max(pos2(ox, y - 14.0), pos2(ox + 160.0, y + 14.0));
 
-        // recording line
+        // recording line: pulsing "REC mm:ss" pill + what is being captured
         if ed.rec.is_some() {
-            ui.painter().circle_filled(pos2(l + 10.0, win.top() + 199.0), 6.0, pal().gshift);
-            text(ui, pos2(l + 20.0, win.top() + 199.0), Align2::LEFT_CENTER, "Recording keystrokes and mouse clicks", Ts::new(Fam::Reg, 14.0, pal().gshift).ls(0.0));
+            let secs = ed.rec_at.map(|t| t.elapsed().as_secs()).unwrap_or(0).min(5999);
+            let clock = if self.shot.is_some() { "REC 00:00".to_owned() } else { format!("REC {:02}:{:02}", secs / 60, secs % 60) };
+            let y = win.top() + 199.0;
+            let pill_r = Rect::from_center_size(pos2(l + 4.0 + text_w(ui, &clock, Ts::new(Fam::Bold, 12.0, pal().gshift).ls(0.6)) / 2.0 + 16.0, y), vec2(text_w(ui, &clock, Ts::new(Fam::Bold, 12.0, pal().gshift).ls(0.6)) + 30.0, 24.0));
+            ui.painter().rect_filled(pill_r, CornerRadius::same(12), pal().tint(pal().gshift, 0.12));
+            let pulse = (ui.input(|i| i.time) * 2.5).sin().abs() as f32;
+            let dot = pal().tint(pal().gshift, 0.45 + 0.55 * pulse);
+            ui.painter().circle_filled(pos2(l + 14.0, y), 4.0 + pulse * 1.6, dot);
+            text(ui, pos2(l + 26.0, y), Align2::LEFT_CENTER, &clock, Ts::new(Fam::Bold, 12.0, pal().gshift).ls(0.6));
+            text(ui, pos2(pill_r.right() + 12.0, y), Align2::LEFT_CENTER, "Recording keystrokes and mouse clicks", Ts::new(Fam::Reg, 14.0, pal().gshift).ls(0.0));
+            ui.ctx().request_repaint();
         }
 
         // sections
@@ -835,6 +900,7 @@ impl GhubApp {
         match kind {
             0 => {
                 ed.rec = Some(sec);
+                ed.rec_at = Some(Instant::now());
                 ed.rec_last = None;
                 ed.rec_mods = ui.input(|i| i.modifiers);
             }
@@ -905,7 +971,7 @@ impl GhubApp {
         let mut stop_rec = false;
         let mut finish_mode: Option<bool> = None; // true = commit, false = cancel
         let mut choose: Option<Option<MacroStep>> = None;
-        let mut delay_commit: Option<(ItemId, u32)> = None;
+        let mut delay_commit: Option<(ItemId, u32, u32)> = None;
         let outside_press = ui.input(|i| i.pointer.any_pressed()).then(|| ui.input(|i| i.pointer.interact_pos())).flatten();
 
         for (sec, (units, _)) in plans.iter().enumerate() {
@@ -969,19 +1035,35 @@ impl GhubApp {
                         } else if r.clicked() {
                             select = Some((item.id, false));
                         }
-                        if let Some((id, buf)) = &mut ed.delay_edit
+                        if let Some((id, ms_buf, jit_buf)) = &mut ed.delay_edit
                             && *id == item.id
                             && let ItemKind::Delay { .. } = item.kind
                         {
-                            let rr = Rect::from_center_size(pos2(rect.center().x, cy - 8.0), vec2(rect.width().max(56.0), 26.0));
+                            // DELAY on the chip, JITTER under it; commit when both lose focus
+                            let ms_id = sub.make_persistent_id(("delay-ms", id.sec, id.idx, id.delay));
+                            let jit_id = sub.make_persistent_id(("delay-jit", id.sec, id.idx, id.delay));
+                            let w = rect.width().max(56.0);
+                            let rr = Rect::from_center_size(pos2(rect.center().x, cy - 8.0), vec2(w, 26.0));
+                            let rr2 = Rect::from_center_size(pos2(rect.center().x, cy + 24.0), vec2(w, 22.0));
                             sub.painter().rect_filled(rr, CornerRadius::same(3), pal().bg);
-                            let te = egui::TextEdit::singleline(buf).font(Ts::new(Fam::Reg, 18.0, pal().text).font()).text_color(pal().text).frame(egui::Frame::NONE).char_limit(6).align(egui::Align2::CENTER_CENTER);
+                            sub.painter().rect_filled(rr2, CornerRadius::same(3), pal().bg);
+                            text(&sub, pos2(rr2.left() + 5.0, rr2.center().y), Align2::LEFT_CENTER, "±", Ts::new(Fam::Reg, 11.0, pal().muted).ls(0.0));
+                            let te = egui::TextEdit::singleline(ms_buf).id(ms_id).font(Ts::new(Fam::Reg, 18.0, pal().text).font()).text_color(pal().text).frame(egui::Frame::NONE).char_limit(6).align(egui::Align2::CENTER_CENTER);
                             let resp = sub.put(rr, te);
-                            if !resp.has_focus() && !resp.lost_focus() {
+                            let te2 = egui::TextEdit::singleline(jit_buf).id(jit_id).font(Ts::new(Fam::Reg, 11.0, pal().muted).font()).text_color(pal().muted).frame(egui::Frame::NONE).char_limit(6).align(egui::Align2::CENTER_CENTER);
+                            let _resp2 = sub.put(rr2, te2);
+                            let (f1, f2) = sub.memory(|m| (m.has_focus(ms_id), m.has_focus(jit_id)));
+                            if !f1 && !f2 && !ed.delay_focus && !resp.lost_focus() {
                                 resp.request_focus();
                             }
-                            if resp.lost_focus() {
-                                delay_commit = Some((*id, buf.trim().parse().unwrap_or(0)));
+                            if f1 || f2 {
+                                ed.delay_focus = true;
+                            }
+                            // a click moving between the two fields is not "lose focus"
+                            let clicked_inside = sub.input(|i| i.pointer.any_pressed() && i.pointer.interact_pos().is_some_and(|p| rr.contains(p) || rr2.contains(p)));
+                            let enter = sub.input(|i| i.key_pressed(egui::Key::Enter));
+                            if ed.delay_focus && ((!f1 && !f2 && !clicked_inside) || (enter && (f1 || f2))) {
+                                delay_commit = Some((*id, ms_buf.trim().parse().unwrap_or(0), jit_buf.trim().parse().unwrap_or(0)));
                             }
                         }
                     }
@@ -1073,11 +1155,13 @@ impl GhubApp {
                 }
             }
         }
-        if let Some((id, v)) = delay_commit {
+        if let Some((id, v, j)) = delay_commit {
             if let Some(s) = ed.m.lists[id.sec].get_mut(id.idx) {
                 s.delay_ms = v.min(600_000);
+                s.jitter = j.min(600_000);
             }
             ed.delay_edit = None;
+            ed.delay_focus = false;
         }
         if stop_rec {
             ed.rec = None;
@@ -1128,7 +1212,10 @@ impl GhubApp {
         let Some(it) = items.iter().find(|i| i.id == id) else { return };
         match &it.kind {
             ItemKind::Text(t) => ed.mode = Some(Mode::Text { sec: id.sec, idx: id.idx, buf: t.clone(), focus: true }),
-            ItemKind::Delay { ms, .. } => ed.delay_edit = Some((id, ms.to_string())),
+            ItemKind::Delay { ms, jitter, .. } => {
+                ed.delay_edit = Some((id, ms.to_string(), jitter.to_string()));
+                ed.delay_focus = false;
+            }
             _ => {}
         }
     }
@@ -1320,13 +1407,14 @@ impl GhubApp {
                 text(ui, rect.center(), Align2::CENTER_CENTER, l, Ts::new(Fam::Reg, 14.0, pal().text).ls(0.0));
                 rect
             }
-            ItemKind::Delay { ms, .. } => {
+            ItemKind::Delay { ms, jitter, .. } => {
                 let w = chip_w(ui, item, false);
                 let (v, u) = fmt_delay(*ms);
+                let unit = if *jitter > 0 { format!("{u}±{jitter}") } else { u.to_owned() };
                 let rect = Rect::from_min_size(pos2(x, cy - 24.0), vec2(w, 46.0));
                 text(ui, pos2(rect.center().x, cy - 12.0), Align2::CENTER_CENTER, &v, Ts::new(Fam::Reg, 21.0, ink).ls(0.0));
                 p.line_segment([pos2(rect.left(), cy + 1.0), pos2(rect.right(), cy + 1.0)], Stroke::new(1.0, pal().text));
-                text(ui, pos2(rect.center().x, cy + 11.0), Align2::CENTER_CENTER, u, Ts::new(Fam::Light, 14.0, ink).ls(0.0));
+                text(ui, pos2(rect.center().x, cy + 11.0), Align2::CENTER_CENTER, &unit, Ts::new(Fam::Light, 14.0, ink).ls(0.0));
                 rect
             }
         }

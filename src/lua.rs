@@ -46,6 +46,9 @@ struct Shared {
     rev: u64,
     /// `EnablePrimaryMouseButtonEvents` of the live script instance.
     primary: bool,
+    /// G HUB's virtual modifier bank `SetMKeyState`/`GetMKeyState` (M1..M3):
+    /// worker state, so it survives a script reload like G HUB's does.
+    mkeys: [bool; 3],
 }
 
 /// Owns the worker channel and the shared console; cloning shares both.
@@ -299,8 +302,20 @@ fn api(lua: &Lua, input: &Arc<dyn engine::Input>, key_down: &Arc<dyn Fn(u16) -> 
             push(&sh, s);
             Ok(())
         })?;
-        g.set("OutputLogMessage", log.clone())?;
-        g.set("OutputDebugMessage", log)?;
+        g.set("OutputLogMessage", log)?;
+    }
+    {
+        let sh = shared.clone();
+        g.set(
+            "OutputDebugMessage",
+            lua.create_function(move |lua, args: Variadic<mlua::Value>| {
+                let string: mlua::Table = lua.globals().get("string")?;
+                let format: mlua::Function = string.get("format")?;
+                let s: String = format.call(args)?;
+                push(&sh, format!("DEBUG: {s}"));
+                Ok(())
+            })?,
+        )?;
     }
     {
         let sh = shared.clone();
@@ -363,6 +378,60 @@ fn api(lua: &Lua, input: &Arc<dyn engine::Input>, key_down: &Arc<dyn Fn(u16) -> 
             })?,
         )?;
     }
+    {
+        let (kd, sh) = (key_down.clone(), shared.clone());
+        g.set(
+            "IsModifierPressed",
+            lua.create_function(move |_, name: String| {
+                Ok(match vk_of(&name) {
+                    Some(vk) if matches!(vk, 0xA0..=0xA5 | 0x5B | 0x5C) => kd(vk),
+                    Some(_) => {
+                        push(&sh, format!("'{name}' is not a modifier"));
+                        false
+                    }
+                    None => {
+                        push(&sh, format!("unknown key '{name}'"));
+                        false
+                    }
+                })
+            })?,
+        )?;
+    }
+    // ---- G HUB's virtual modifier bank (M1..M3, event-independent) -----------
+    {
+        let sh = shared.clone();
+        g.set(
+            "SetMKeyState",
+            lua.create_function(move |_, (n, down): (i64, bool)| {
+                if (1..=3).contains(&n) {
+                    sh.lock().unwrap().mkeys[n as usize - 1] = down;
+                } else {
+                    push(&sh, format!("unknown M key {n}"));
+                }
+                Ok(())
+            })?,
+        )?;
+    }
+    {
+        let sh = shared.clone();
+        g.set(
+            "GetMKeyState",
+            lua.create_function(move |lua, n: Option<i64>| {
+                let m = sh.lock().unwrap().mkeys;
+                match n {
+                    // G HUB: GetMKeyState(m) reports one key; no arg -> a table
+                    Some(n) if (1..=3).contains(&n) => Ok(mlua::Value::Boolean(m[n as usize - 1])),
+                    _ => {
+                        let t = lua.create_table()?;
+                        for (i, v) in m.iter().enumerate() {
+                            t.set(i + 1, *v)?;
+                        }
+                        Ok(mlua::Value::Table(t))
+                    }
+                }
+            })?,
+        )?;
+    }
     // ---- macros and the rest -------------------------------------------------
     {
         let (sh, rep, lb) = (shared.clone(), reported.clone(), loopback.cloned());
@@ -379,7 +448,48 @@ fn api(lua: &Lua, input: &Arc<dyn engine::Input>, key_down: &Arc<dyn Fn(u16) -> 
             })?,
         )?;
     }
-    for name in ["SetBacklightColor", "GetDeviceInfo", "SetMKeyState", "AbortMacro"] {
+    {
+        let (sh, rep, lb) = (shared.clone(), reported.clone(), loopback.cloned());
+        g.set(
+            "AbortMacro",
+            // stops every looping macro (toggles and held repeats); queued
+            // PlayMacro taps already left this thread and can't be recalled
+            lua.create_function(move |_, ()| {
+                match &lb {
+                    Some(tx) => {
+                        let _ = tx.send(engine::EngineMsg::AbortMacros);
+                    }
+                    None => unsupported(&sh, &rep, "AbortMacro"),
+                }
+                Ok(())
+            })?,
+        )?;
+    }
+    // absolute cursor moves (G HUB's name for SetMousePosition)
+    for name in ["MoveMouseTo", "MoveMouseToVirtual"] {
+        g.set(
+            name,
+            lua.create_function(|_, (x, y): (i64, i64)| {
+                crate::win::set_cursor_pos(x as i32, y as i32);
+                Ok(())
+            })?,
+        )?;
+    }
+    // documented G HUB functions we honestly can't provide (logged once each)
+    for name in [
+        "SetBacklightColor",
+        "GetDeviceInfo",
+        "GetDate", // std has no strftime; scripts can use os.date
+        "DoFile",
+        "PressMacro",
+        "ReleaseMacro",
+        "SetMouseDPITable",
+        "SetMouseDPITableIndex",
+        "SetMouseSpeed",
+        "GetMouseSpeed",
+        "IncrementMouseSpeed",
+        "DecrementMouseSpeed",
+    ] {
         let (sh, rep) = (shared.clone(), reported.clone());
         g.set(
             name,
@@ -736,5 +846,64 @@ mod tests {
         assert_eq!(ghub_button(2), Some(2));
         assert_eq!(ghub_button(3), Some(1));
         assert_eq!(ghub_mouse_vk(5), Some(0x06));
+    }
+
+    #[test]
+    fn mkeys_are_a_shared_modifier_bank() {
+        let rec = Arc::new(Rec::default());
+        let h = spawn(&rec);
+        h.send(LuaMsg::Script(
+            r#"function OnEvent(e, a)
+                if e == "SET" then SetMKeyState(2, true)
+                elseif e == "GET" then
+                    local t = GetMKeyState()
+                    OutputLogMessage("m %s %s %s one:%s", t[1], t[2], t[3], GetMKeyState(2))
+                end
+            end"#
+                .into(),
+        ));
+        h.send(LuaMsg::Event("SET", 0));
+        h.send(LuaMsg::Event("GET", 0));
+        assert!(wait_for(|| lines(&h).iter().any(|l| l == "m false true false one:true")), "{:?}", lines(&h));
+        // the bank lives on the worker, so a script reload keeps it
+        h.send(LuaMsg::Script(r#"function OnEvent(e, a) if e == "GET" then OutputLogMessage("still %s", GetMKeyState()[2]) end end"#.into()));
+        h.send(LuaMsg::Event("GET", 0));
+        assert!(wait_for(|| lines(&h).iter().any(|l| l == "still true")), "{:?}", lines(&h));
+    }
+
+    #[test]
+    fn abort_macro_goes_over_the_loopback() {
+        let rec = Arc::new(Rec::default());
+        let input: Arc<dyn engine::Input> = rec.clone();
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let h = Handle::spawn_with(input, Arc::new(|_| false), Some(tx));
+        h.send(LuaMsg::Script(r#"function OnEvent(e, a) if e == "STOP" then AbortMacro() end end"#.into()));
+        h.send(LuaMsg::Event("STOP", 0));
+        assert!(wait_for(|| rx.try_iter().any(|m| matches!(m, engine::EngineMsg::AbortMacros))));
+        // without a loopback it degrades to a once-logged unsupported
+        let h2 = spawn(&rec);
+        h2.send(LuaMsg::Script(r#"function OnEvent(e, a) AbortMacro() end"#.into()));
+        h2.send(LuaMsg::Event("X", 0));
+        assert!(wait_for(|| lines(&h2).iter().any(|l| l.contains("AbortMacro is not supported"))), "{:?}", lines(&h2));
+    }
+
+    #[test]
+    fn output_debug_message_is_prefixed_and_modifier_query_works() {
+        let rec = Arc::new(Rec::default());
+        let input: Arc<dyn engine::Input> = rec.clone();
+        // lshift (0xA0) counts as held
+        let h = Handle::spawn_with(input, Arc::new(|vk| vk == 0xA0), None);
+        h.send(LuaMsg::Script(
+            r#"function OnEvent(e, a)
+                if e == "D" then OutputDebugMessage("dbg %d", 7)
+                elseif e == "M" then OutputLogMessage("shift:%s alt:%s", IsModifierPressed("lshift"), IsModifierPressed("lalt"))
+                end
+            end"#
+                .into(),
+        ));
+        h.send(LuaMsg::Event("D", 0));
+        h.send(LuaMsg::Event("M", 0));
+        assert!(wait_for(|| lines(&h).iter().any(|l| l == "DEBUG: dbg 7")), "{:?}", lines(&h));
+        assert!(wait_for(|| lines(&h).iter().any(|l| l == "shift:true alt:false")), "{:?}", lines(&h));
     }
 }

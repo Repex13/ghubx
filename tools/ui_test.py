@@ -356,6 +356,21 @@ def macro_custom_delay():
 
 
 @scenario
+def macro_jitter():
+    res = run_script("macro_jitter", MACRO_NEW_EDIT + EDIT_CL + [
+        "click 655 135",  # USE STANDARD DELAYS off
+        SETTLE,
+        "dclick 158 470", SETTLE,  # first delay item: DELAY + JITTER boxes
+        "click 158 494", SETTLE,  # the smaller JITTER box under the delay edit
+        "key End", "key Backspace", "key Backspace", "key Backspace", "text 40", "key Enter", SETTLE,
+        "shot {shots}/jit.png", M_SAVE, SETTLE])
+    ok_run(res)
+    m = edit_macro(res, "cl")[0]
+    must(m["steps"][1].get("jitter") == 40, m["steps"][1])
+    must(m["steps"][1]["delay_ms"] == 50, m["steps"][1])
+
+
+@scenario
 def macro_delete_and_reset():
     res = run_script("macro_delete_and_reset", MACRO_NEW_EDIT + EDIT_JUMP + [
         "click 119 476",  # first chip
@@ -677,6 +692,23 @@ def onboard_replace_confirm():
     must(bar != (0, 0, 0), f"no confirmation bar at (30,760): {bar}")
     must(gone == (0, 0, 0), f"bar still there after CANCEL: {gone}")
     must(res.cfg["apps"][0]["profiles"][0]["name"] == "Default", res.cfg["apps"][0]["profiles"][0])
+
+
+@scenario
+def slot_assign():
+    res = run_script("slot_assign", ["wait 1500", HOME_TILE, SETTLE,
+                                     "click 38 724",  # Device Settings gear
+                                     SETTLE, "click 690 563",  # ASSIGN PROFILES TO SLOTS
+                                     SETTLE, "click 750 406",  # SLOT 1 row: open the dropdown
+                                     SETTLE, "click 760 463",  # "Desktop: Default"
+                                     SETTLE, "shot {shots}/assign.png",
+                                     "click 705 619",  # SAVE 1 PROFILE
+                                     SETTLE, "shot {shots}/bar.png",
+                                     "click 949 740",  # CANCEL the pending bar
+                                     SETTLE])
+    ok_run(res)
+    bar = pixel(res, "bar.png", (30, 760))
+    must(bar != (0, 0, 0), f"no confirmation bar after SAVE 1 PROFILE: {bar}")
 
 
 @scenario
