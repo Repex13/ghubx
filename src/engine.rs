@@ -48,6 +48,7 @@ static OBSERVER: AtomicBool = AtomicBool::new(false);
 /// Observer mode (`--dev`, `--shot`): never take control or touch G HUB.
 pub fn set_observer(on: bool) {
     OBSERVER.store(on, Ordering::Relaxed);
+    win::set_passive(on);
 }
 
 fn observer() -> bool {
@@ -169,7 +170,7 @@ impl Engine {
     }
 
     pub fn run(mut self, rx: Receiver<EngineMsg>) {
-        win::start_scroll_hook();
+        let _ = win::start_scroll_hook();
         let ticker = tick(Duration::from_millis(250));
         let mut n: u32 = 0;
         self.st.ghub_running = win::ghub_running();
@@ -1002,6 +1003,15 @@ mod tests {
         r.e.test_macro(vec![MacroStep { vk: 0x41, down: true, delay_ms: 0 }, MacroStep { vk: 0x41, down: false, delay_ms: 30 }]);
         pause(150);
         assert_eq!(r.rec.events(), vec![Ev::Key(0x41, true), Ev::Key(0x41, false)]);
+    }
+
+    #[test]
+    fn observer_leaves_the_wheel_alone() {
+        let mut r = rig(|c| c.extras.scroll_accel = true);
+        set_observer(true);
+        r.e.reconcile();
+        assert!(!win::scroll_accel_enabled());
+        assert!(!win::start_scroll_hook());
     }
 
     #[test]

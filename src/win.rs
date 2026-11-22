@@ -699,8 +699,23 @@ static ACCEL_ON: AtomicBool = AtomicBool::new(false);
 static ACCEL_BOOST: AtomicU32 = AtomicU32::new(300);
 static WHEEL_TX: OnceLock<crossbeam_channel::Sender<(i32, u32)>> = OnceLock::new();
 
+static PASSIVE: AtomicBool = AtomicBool::new(false);
+
+/// Passive (observer) mode: no wheel hook and no scroll acceleration, so a
+/// dev/shot instance can never touch the user's real scrolling.
+pub fn set_passive(on: bool) {
+    PASSIVE.store(on, Ordering::Relaxed);
+    if on {
+        ACCEL_ON.store(false, Ordering::Relaxed);
+    }
+}
+
+pub fn scroll_accel_enabled() -> bool {
+    ACCEL_ON.load(Ordering::Relaxed)
+}
+
 pub fn set_scroll_accel(on: bool, boost: f32) {
-    ACCEL_ON.store(on, Ordering::Relaxed);
+    ACCEL_ON.store(on && !PASSIVE.load(Ordering::Relaxed), Ordering::Relaxed);
     ACCEL_BOOST.store((boost.clamp(0.0, 10.0) * 100.0) as u32, Ordering::Relaxed);
 }
 
@@ -719,13 +734,17 @@ unsafe extern "system" fn wheel_hook(code: i32, wp: WPARAM, lp: LPARAM) -> LRESU
 
 /// Install the low-level wheel hook (once). Fast flicks get extra notches:
 /// boost scales with how far the notch rate exceeds ~12 notches/s.
-pub fn start_scroll_hook() {
+/// Returns false when skipped because of passive mode.
+pub fn start_scroll_hook() -> bool {
+    if PASSIVE.load(Ordering::Relaxed) {
+        return false;
+    }
     if WHEEL_TX.get().is_some() {
-        return;
+        return true;
     }
     let (tx, rx) = crossbeam_channel::bounded::<(i32, u32)>(256);
     if WHEEL_TX.set(tx).is_err() {
-        return;
+        return true;
     }
     std::thread::Builder::new()
         .name("wheel-accel".into())
@@ -758,6 +777,7 @@ pub fn start_scroll_hook() {
             let _ = UnhookWindowsHookEx(hook);
         })
         .ok();
+    true
 }
 
 #[cfg(test)]

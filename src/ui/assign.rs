@@ -364,7 +364,7 @@ impl GhubApp {
                             text(ui, pos2(rect.right() - 30.0, rect.center().y), Align2::RIGHT_CENTER, &assigned, Ts::new(Fam::Reg, 12.0, pal().text).ls(0.3));
                         }
                         if let Assignment::Macro(id) = &c.assignment
-                            && r.hovered()
+                            && ui.rect_contains_pointer(rect)
                         {
                                 let er = Rect::from_center_size(pos2(rect.right() - 60.0, rect.center().y), vec2(36.0, 20.0));
                                 let xr = Rect::from_center_size(pos2(rect.right() - 16.0, rect.center().y), vec2(20.0, 20.0));
@@ -947,8 +947,8 @@ impl GhubApp {
                 para(ui, r.min, 270.0, "Press Start Recording, then type the keys for this macro.", Ts::new(Fam::Reg, 12.0, pal().muted).ls(0.6));
             }
             for (i, s) in steps.iter().enumerate() {
-                let (r, resp) = ui.allocate_exact_size(vec2(270.0, 26.0), Sense::hover());
-                let hover = resp.hovered() && !recording;
+                let (r, _) = ui.allocate_exact_size(vec2(270.0, 26.0), Sense::hover());
+                let hover = !recording && ui.rect_contains_pointer(r);
                 let dr = Rect::from_min_size(pos2(r.left(), r.top() + 3.0), vec2(62.0, 20.0));
                 let editing = matches!(&edit_delay, Some((ei, _)) if *ei == i);
                 if editing {

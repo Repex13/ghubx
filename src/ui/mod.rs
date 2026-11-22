@@ -154,6 +154,10 @@ pub struct GhubApp {
     pub(crate) ghub_autostart: Option<Option<bool>>,
     pub(crate) onboard: Vec<crate::profile::OnboardSlot>,
     pub(crate) onboard_asked: bool,
+    script: Option<crate::script::Runner>,
+    script_shot_pending: Arc<std::sync::atomic::AtomicBool>,
+    script_png: Option<(PathBuf, bool)>,
+    script_quit: bool,
 }
 
 impl GhubApp {
@@ -214,6 +218,10 @@ impl GhubApp {
             ghub_autostart: None,
             onboard: Vec::new(),
             onboard_asked: false,
+            script: None,
+            script_shot_pending: Default::default(),
+            script_png: None,
+            script_quit: false,
         };
         if let Some(s) = shot {
             app.prepare_shot(&s.page);
@@ -315,6 +323,10 @@ impl GhubApp {
     }
 
     /// Show a message once the window is up (e.g. after the first-run import).
+    pub fn set_script(&mut self, r: crate::script::Runner) {
+        self.script = Some(r);
+    }
+
     pub fn notify(&mut self, s: impl Into<String>) {
         let s = s.into();
         self.log.push_front(s.clone());
@@ -342,13 +354,14 @@ impl GhubApp {
                 }
                 UiEvent::Onboard(v) => self.onboard = v,
                 UiEvent::Buttons(m) => {
-                    if self.shot.is_none() {
+                    if self.shot.is_none() && self.script.is_none() {
                         self.mask = m;
                     }
                 }
                 UiEvent::Status(s) => {
                     if let Some(fg) = &s.foreground
                         && self.shot.is_none()
+                        && self.script.is_none()
                         && !self.seen_exes.contains(fg)
                         && !fg.eq_ignore_ascii_case("ghubx.exe")
                     {
@@ -818,6 +831,22 @@ fn style(ctx: &egui::Context) {
 impl eframe::App for GhubApp {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        if self.script.is_some() {
+            ctx.request_repaint();
+            if let Some((path, true)) = self.script_png.take() {
+                self.script_shot_pending.store(true, std::sync::atomic::Ordering::Relaxed);
+                let flag = self.script_shot_pending.clone();
+                ctx.request_screenshot(move |img| {
+                    let [w, h] = img.size;
+                    let bytes: Vec<u8> = img.pixels.iter().flat_map(|c| [c.r(), c.g(), c.b(), 255]).collect();
+                    let _ = image::save_buffer(&path, &bytes, w as u32, h as u32, image::ExtendedColorType::Rgba8);
+                    flag.store(false, std::sync::atomic::Ordering::Relaxed);
+                });
+            }
+            if self.script_quit && !self.script_shot_pending.load(std::sync::atomic::Ordering::Relaxed) {
+                ctx.send_viewport_cmd(ViewportCommand::Close);
+            }
+        }
         let want = self.wanted_palette(&ctx);
         if want != pal() {
             set_palette(want);
@@ -856,7 +885,17 @@ impl eframe::App for GhubApp {
         ctx.request_repaint_after(Duration::from_millis(200));
     }
 
-    fn raw_input_hook(&mut self, _ctx: &egui::Context, raw: &mut egui::RawInput) {
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
+        if let Some(r) = &mut self.script {
+            raw.events.clear();
+            ctx.request_repaint();
+            if !self.script_shot_pending.load(std::sync::atomic::Ordering::Relaxed) {
+                let f = r.next_frame();
+                raw.events.extend(f.events);
+                self.script_png = f.shot.map(|p| (p, true)).or(self.script_png.take());
+                self.script_quit |= f.quit;
+            }
+        }
         // Screenshots must not depend on where the real cursor is or on the clock.
         if self.shot.is_some() {
             raw.events.clear();

@@ -31,14 +31,31 @@ fn main() -> eframe::Result<()> {
     }
     ghubx::win::set_dev(dev);
     ghubx::games::preload();
-    if shot.is_none() {
+    let script = match flag("--script") {
+        None => None,
+        Some(_) if !dev => {
+            eprintln!("--script needs --dev (and GHUBX_CONFIG_DIR)");
+            std::process::exit(2);
+        }
+        Some(path) => {
+            let parsed = std::fs::read_to_string(&path).map_err(|e| format!("script {path}: {e}")).and_then(|t| ghubx::script::parse(&t));
+            match parsed {
+                Ok(cmds) => Some(ghubx::script::Runner::new(&cmds)),
+                Err(e) => {
+                    eprintln!("{e}");
+                    std::process::exit(3);
+                }
+            }
+        }
+    };
+    if shot.is_none() && script.is_none() {
         std::thread::spawn(|| {
             ghubx::ui::assets::sync_cache();
         });
     }
     ghubx::engine::set_observer(dev || shot.is_some());
     let minimized = args.iter().any(|a| a == "--minimized") && shot.is_none();
-    if shot.is_none() && !ghubx::win::single_instance() {
+    if shot.is_none() && script.is_none() && !ghubx::win::single_instance() {
         return Ok(());
     }
 
@@ -98,7 +115,7 @@ fn main() -> eframe::Result<()> {
         .with_decorations(false)
         .with_resizable(true)
         .with_icon(egui::IconData { rgba: ghubx::win::app_icon_rgba(64), width: 64, height: 64 });
-    if minimized {
+    if minimized || script.is_some() {
         viewport = viewport.with_position([-32000.0, -32000.0]);
     }
     let options = eframe::NativeOptions { viewport, ..Default::default() };
@@ -108,6 +125,7 @@ fn main() -> eframe::Result<()> {
         options,
         Box::new(move |cc| {
             if shot.is_none()
+                && script.is_none()
                 && let Ok(RawWindowHandle::Win32(h)) = cc.window_handle().map(|h| h.as_raw())
             {
                 let (ctx, exit) = (cc.egui_ctx.clone(), exit.clone());
@@ -122,6 +140,9 @@ fn main() -> eframe::Result<()> {
                 );
             }
             let mut app = GhubApp::new(cc, cfg, eng_tx, ui_rx, exit, shot);
+            if let Some(r) = script {
+                app.set_script(r);
+            }
             if let Some(w) = welcome {
                 app.notify(w);
             }

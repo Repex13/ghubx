@@ -7,5 +7,6 @@ pub mod hidpp;
 pub mod io;
 pub mod osd;
 pub mod profile;
+pub mod script;
 pub mod ui;
 pub mod win;
