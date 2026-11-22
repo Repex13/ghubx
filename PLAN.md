@@ -45,6 +45,13 @@ Now that the repo is public (`https://github.com/Repex13/ghubx`):
   key/button events only, never movement deltas; (c) per-game "blocked"
   marker in the P180 panel so you don't calibrate a game that can't see
   the input.
+- **FLICK 180 — the on-board hardware version** `[decided]` — assign the
+  mouse's *native* on-board DPI Shift function to a button + set the
+  stored shift DPI so a ~2–3 cm physical swipe = 180° at the calibrated
+  game sens. Written into a slot: zero software running, works in every
+  game incl. Vanguard-blocked ones, impossible to detect because it IS
+  the sensor. The G502 can't emit movement on its own, so the flick
+  stays physical — this is the legal ceiling for "one-button turns".
 
 ## 3. Remaining G HUB parity gaps
 

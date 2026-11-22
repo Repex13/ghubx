@@ -13,8 +13,9 @@ use std::collections::HashSet;
 use std::time::Instant;
 
 const TABS: [&str; 5] = ["COMMANDS", "KEYS", "ACTIONS", "MACROS", "SYSTEM"];
+/// Extra height the HARDWARE FLICK section adds to the Perfect 180 box.
+const FLICK_H: f32 = 132.0;
 
-#[derive(Default)]
 pub struct AsgState {
     pub tab: usize,
     pub search: String,
@@ -28,11 +29,24 @@ pub struct AsgState {
     pub launch_path: String,
     pub p180_sens_text: String,
     pub p180_counts_text: String,
+    /// HARDWARE FLICK: physical swipe length in cm (slider, 0.5 steps).
+    pub flick_cm: f32,
     pub game_sens: Option<(usize, Option<crate::games::GameSens>)>,
     pub obs_form: Option<ObsForm>,
     /// Shot pages only: keep the list scrolled to its end.
     pub scroll_to: Option<f32>,
     pub obs_refresh: Option<std::time::Instant>,
+}
+
+impl Default for AsgState {
+    fn default() -> Self {
+        Self {
+            tab: 0, search: String::new(), side: false, gshift: false, selected: None,
+            collapsed: HashSet::new(), mods: 0, editor: None, last_tab: None,
+            launch_path: String::new(), p180_sens_text: String::new(), p180_counts_text: String::new(),
+            flick_cm: 2.5, game_sens: None, obs_form: None, scroll_to: None, obs_refresh: None,
+        }
+    }
 }
 
 /// The CREATE NEW ACTION form of the OBS section.
@@ -574,7 +588,7 @@ impl GhubApp {
         let warn_text = format!("{} cm of mouse travel for one full turn. That is not a real setting: check the sensitivity.", thousands(travel.round() as i64));
         let warn_g = warn.then(|| galley(ui, &warn_text, Ts::new(Fam::Reg, 11.0, pal().amber).ls(0.4), 254.0));
         let warn_h = warn_g.as_ref().map_or(0.0, |g| g.size().y + 8.0);
-        let box_r = Rect::from_min_size(top, vec2(278.0, 366.0 + extra + warn_h));
+        let box_r = Rect::from_min_size(top, vec2(278.0, 366.0 + extra + warn_h + FLICK_H));
         ui.painter().rect_filled(box_r, CornerRadius::same(8), pal().surface_hi);
         let x = box_r.left() + 12.0;
         text(ui, pos2(x, box_r.top() + 12.0), Align2::LEFT_TOP, "PERFECT 180", Ts::new(Fam::Bold, 12.0, pal().text));
@@ -714,7 +728,37 @@ impl GhubApp {
             self.edit(|c| c.current_profile_mut().turn = if per_profile { None } else { Some(cur) });
         }
         para(ui, pos2(x, br.bottom() + 38.0), 254.0, "Some games ignore injected input or don't allow turn binds in competitive play.", Ts::new(Fam::Reg, 10.0, pal().muted).ls(0.3));
-        ui.add_space(378.0 + extra);
+
+        // HARDWARE FLICK: the on-board variant. A tuned DPI shift plus a
+        // physical swipe covers 180° — real sensor movement, so games that
+        // drop injected input (and their anti-cheat) still accept it.
+        let fy = br.bottom() + 72.0;
+        text(ui, pos2(x, fy), Align2::LEFT_CENTER, "HARDWARE FLICK", t_small_label());
+        para(ui, pos2(x, fy + 16.0), 254.0, "A real swipe = 180° — works in every game, even ones that ignore the button press.", Ts::new(Fam::Reg, 10.0, pal().muted).ls(0.3));
+        text(ui, pos2(x, fy + 46.0), Align2::LEFT_CENTER, "SWIPE", t_small_label().color(pal().label));
+        let fr = Rect::from_min_size(pos2(x + 60.0, fy + 40.0), vec2(140.0, 12.0));
+        if slider(ui, fr, &mut self.asg.flick_cm, 1.0..=6.0, "flick-cm") {
+            self.asg.flick_cm = (self.asg.flick_cm * 2.0).round() / 2.0;
+        }
+        text(ui, pos2(box_r.right() - 12.0, fy + 46.0), Align2::RIGHT_CENTER, &format!("{:.1} cm", self.asg.flick_cm), t_body_bold());
+        let ab = Rect::from_min_size(pos2(x, fy + 66.0), vec2(254.0, 26.0));
+        if let Some(d) = flick_dpi(counts, self.asg.flick_cm) {
+            if dark_button(ui, ab, &format!("SET SHIFT DPI TO {}", thousands(d as i64)), "flick-apply", true).clicked() {
+                let mut res = FlickLevel::Added;
+                self.edit(|c| res = set_flick_dpi(&mut c.current_profile_mut().dpi, d));
+                let d = thousands(d as i64);
+                self.say(match res {
+                    FlickLevel::Added => format!("Shift DPI {d} — added as a new stage"),
+                    FlickLevel::Existing => format!("Shift DPI {d}"),
+                    FlickLevel::Replaced => format!("Shift DPI {d} — replaced the last stage"),
+                });
+            }
+        } else {
+            let raw = (counts as f32 * 2.54 / self.asg.flick_cm).round() as i64;
+            para(ui, pos2(x, ab.top() + 4.0), 254.0, &format!("Needs {raw} DPI — outside 100–25,600. Give yourself a longer swipe or a higher sensitivity."), Ts::new(Fam::Reg, 10.0, pal().amber).ls(0.3));
+        }
+        para(ui, pos2(x, fy + 98.0), 254.0, "Then assign DPI SHIFT (SYSTEM) to a button and save to a slot — the flick works with no software running.", Ts::new(Fam::Reg, 10.0, pal().muted).ls(0.3));
+        ui.add_space(378.0 + extra + warn_h + FLICK_H);
     }
 
     pub(crate) fn assign(&mut self, slot: usize, a: Assignment) {

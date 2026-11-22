@@ -475,6 +475,17 @@ def p180_fortnite_migrates():
 
 
 @scenario
+def flick_apply():
+    res = run_script("flick_apply", device_assign() + [TAB_ACTIONS, SETTLE, "scroll 230 500 -520", SETTLE,
+                                                       "shot {shots}/flick.png",
+                                                       "click 230 662",  # SET SHIFT DPI TO 2400
+                                                       SETTLE], config=fortnite_config(0.138, 2348))
+    ok_run(res)
+    dpi = res.cfg["apps"][0]["profiles"][0]["dpi"]
+    must(dpi["shift"] == 2400 and 2400 in dpi["levels"], dpi)
+
+
+@scenario
 def sensitivity():
     res = run_script("sensitivity", ["wait 1500", HOME_TILE, SETTLE, RAIL_SENS, SETTLE,
                                      "click 156 266",  # 1000 speed in DPI SPEEDS

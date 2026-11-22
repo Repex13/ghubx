@@ -823,6 +823,42 @@ pub fn p180_counts_for(yaw: f32, sens: f32) -> Option<i32> {
     (yaw > 0.0 && sens > 0.0).then(|| (180.0 / (yaw * sens)).round().clamp(1.0, 1_000_000.0) as i32)
 }
 
+/// Shift DPI that makes a physical swipe of `swipe_cm` cover `counts` counts
+/// (one 180°): `counts / dpi × 2.54 = cm`, rounded to the sensor's 50-count
+/// steps. `None` when the needed DPI is outside 100..=25600 — the swipe is
+/// too short for that sensitivity.
+pub fn flick_dpi(counts: i32, swipe_cm: f32) -> Option<u16> {
+    if counts <= 0 || !swipe_cm.is_finite() || swipe_cm <= 0.0 {
+        return None;
+    }
+    let d = (counts as f32 * 2.54 / swipe_cm / 50.0).round() * 50.0;
+    (100.0..=25600.0).contains(&d).then_some(d as u16)
+}
+
+/// What [`set_flick_dpi`] did to the stage list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlickLevel {
+    Existing,
+    Added,
+    Replaced,
+}
+
+/// Point the DPI shift at `v`, making sure `v` is one of the stages: the
+/// on-board format stores the shift DPI as an index into the stage list.
+/// With all five stages used, the last one is replaced.
+pub fn set_flick_dpi(dpi: &mut DpiTable, v: u16) -> FlickLevel {
+    dpi.shift = v;
+    if dpi.levels.contains(&v) {
+        FlickLevel::Existing
+    } else if dpi.levels.len() < 5 {
+        dpi.levels.push(v);
+        FlickLevel::Added
+    } else {
+        *dpi.levels.last_mut().unwrap() = v;
+        FlickLevel::Replaced
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Extras {
@@ -2191,5 +2227,29 @@ mod tests {
         t.remove(1600);
         assert_eq!(t.default, 800);
         assert!(t.insert(3200) && !t.insert(3200));
+    }
+
+    #[test]
+    fn flick_dpi_matches_a_swipe_to_180() {
+        // CS2 sens 0.51 -> 16043 counts; a 2.5 cm swipe needs ~16,300 DPI.
+        assert_eq!(flick_dpi(16043, 2.5), Some(16300));
+        // Fortnite 0.138 -> 2348 counts; 2.5 cm at 2400 DPI covers 2362 counts (~181°).
+        assert_eq!(flick_dpi(2348, 2.5), Some(2400));
+        assert_eq!(flick_dpi(8182, 3.0), Some(6950));
+        // A 0.5 cm swipe at CS2 0.51 would need ~81,600 DPI: out of range.
+        assert_eq!(flick_dpi(16043, 0.5), None);
+        assert_eq!(flick_dpi(0, 2.5), None);
+    }
+
+    #[test]
+    fn set_flick_dpi_keeps_the_shift_index_valid() {
+        let mut t = DpiTable { levels: vec![600, 1000, 1600], active: 600, default: 1600, shift: 600 };
+        assert_eq!(set_flick_dpi(&mut t, 16300), FlickLevel::Added);
+        assert_eq!(t.levels.as_slice(), [600, 1000, 1600, 16300]);
+        assert_eq!(t.shift, 16300);
+        assert_eq!(set_flick_dpi(&mut t, 1000), FlickLevel::Existing);
+        t.levels = vec![400, 800, 1600, 3200, 6400];
+        assert_eq!(set_flick_dpi(&mut t, 7000), FlickLevel::Replaced);
+        assert_eq!(t.levels[4], 7000);
     }
 }
