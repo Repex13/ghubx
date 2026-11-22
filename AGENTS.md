@@ -5,7 +5,7 @@ G HUB-style control app for the Logitech G502 HERO (USB `046D:C08B`), Rust + egu
 ## Commands
 
 - Build: `cargo build` (debug) / `cargo build --release` (no console window, thin LTO)
-- Tests: `cargo test` (CRC vs a real onboard sector, spy decoding, firmware string, DPI axis, G HUB import)
+- Tests: `cargo test` (66 tests, about 3 s: protocol decoding, palette, OSD render, game scan parsers, export/import, and engine behaviour through a fake input sink and device channel; nothing touches the mouse or injects input)
 - Lint: `cargo clippy --all-targets` (keep it warning-free)
 - Device probe (read-only): `cargo run --bin probe`
 - Probe subcommands: `probe ghub-status` (is `lghub_agent.exe` running), `probe ghub-close` / `probe ghub-start` (same `win.rs` calls as the UI buttons), `probe takeover-test` (WRITES to the mouse: host mode, spy map, DPI, rate, LEDs, then releases to onboard; exit 2 if G HUB's agent or any `ghubx.exe` is running, 0 only if every step passes), `probe release` (WRITES: stop spy, identity map, onboard mode; exit 2 if G HUB's agent is running)
@@ -21,7 +21,8 @@ G HUB-style control app for the Logitech G502 HERO (USB `046D:C08B`), Rust + egu
 - Flags: `--minimized` (start hidden in the tray), `--shot <page> <out.png>` (no mutex, no tray)
 - Page screenshots without touching the mouse: `target/debug/ghubx.exe --shot <page> <out.png>`
   pages: home, dropdown, assign, assign2, gshift, select, keys, actions, macro, macroedit, sens, light, fixed, devset, profiles, appdetail, settings, sleep (settings with lighting sleep on), appearance, p180game (ACTIONS with the Perfect 180 game-sensitivity line), macrorec (macro editor recording), onboard (Device Settings with sample on-board slots), ghub (Settings > G HUB tab), addgame (Profiles with the add form open), gamecmds (Assignments > COMMANDS for an in-memory Counter-Strike 2 app), diag
-- Kill a running instance before rebuilding: `taskkill //IM ghubx.exe //F`
+- Rebuilding the release while the app runs (it usually controls the user's mouse): rename `target/release/ghubx.exe` to `ghubx.old.exe` (Windows allows renaming a running exe), `cargo build --release`, post `WM_APP+3` to the `GHUBX_TRAY` window (clean quit: the mouse goes back to on-board mode), start the new exe (add `--minimized` if the old window was hidden), check with `probe` that mode is 2 again, delete `ghubx.old.exe`. About 0.5 s without control.
+- Never `taskkill /F` a controlling instance: the mouse stays in host mode with its remapped buttons muted. If that happens, `probe release` puts it back in on-board mode.
 
 ## Layout
 
