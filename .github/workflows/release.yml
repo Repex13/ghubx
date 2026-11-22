@@ -1,0 +1,28 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build
+        run: cargo build --release
+      - name: Checksum
+        shell: pwsh
+        run: |
+          $h = (Get-FileHash target\release\ghubx.exe -Algorithm SHA256).Hash.ToLower()
+          Set-Content -Path ghubx.exe.sha256 -Value "$h  ghubx.exe" -NoNewline
+      - name: Publish
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            target/release/ghubx.exe
+            ghubx.exe.sha256
