@@ -70,7 +70,40 @@ pub fn label(a: &Assignment, slot: usize, macros: &[Macro]) -> (String, LabelSty
         Assignment::Launch { name, .. } => (name.clone(), LabelStyle::Plain),
         Assignment::Perfect180 { left } => (if *left { "Perfect 180 (Left)" } else { "Perfect 180" }.into(), LabelStyle::Plain),
         Assignment::ToggleScrollAccel => ("Scroll Acceleration".into(), LabelStyle::Plain),
+        Assignment::Obs(a) => (obs_name(a), LabelStyle::Plain),
     }
+}
+
+/// Display name of an OBS action.
+pub fn obs_name(a: &ObsAction) -> String {
+    use ObsAction::*;
+    let simple = match a {
+        StartStream => "Start Streaming",
+        StopStream => "Stop Streaming",
+        ToggleStream => "Toggle Streaming",
+        StartRecord => "Start Recording",
+        StopRecord => "Stop Recording",
+        ToggleRecord => "Toggle Recording",
+        StartBuffer => "Start Buffer",
+        StopBuffer => "Stop Buffer",
+        ToggleBuffer => "Toggle Buffer",
+        SaveBuffer => "Save Buffer",
+        MuteDesktop => "Mute Desktop",
+        UnmuteDesktop => "Unmute Desktop",
+        ToggleDesktopMute => "Toggle Desktop Mute",
+        MuteMic => "Mute Microphone",
+        UnmuteMic => "Unmute Microphone",
+        ToggleMicMute => "Toggle Microphone Mute",
+        Scene(x) => return format!("Activate Scene: {x}"),
+        Collection(x) => return format!("Activate Collection: {x}"),
+        SourceOn(x) => return format!("Activate Source: {x}"),
+        SourceOff(x) => return format!("Deactivate Source: {x}"),
+        SourceToggle(x) => return format!("Toggle Source: {x}"),
+        MixerMute(x) => return format!("Mute Mixer: {x}"),
+        MixerUnmute(x) => return format!("Unmute Mixer: {x}"),
+        MixerToggle(x) => return format!("Toggle Mixer Mute: {x}"),
+    };
+    simple.into()
 }
 
 /// Row text of a macro step in the editor.

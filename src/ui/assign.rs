@@ -29,6 +29,45 @@ pub struct AsgState {
     pub p180_sens_text: String,
     pub p180_counts_text: String,
     pub game_sens: Option<(usize, Option<crate::games::GameSens>)>,
+    pub obs_form: Option<ObsForm>,
+    /// Shot pages only: keep the list scrolled to its end.
+    pub scroll_to: Option<f32>,
+    pub obs_refresh: Option<std::time::Instant>,
+}
+
+/// The CREATE NEW ACTION form of the OBS section.
+#[derive(Default)]
+pub struct ObsForm {
+    pub kind: usize,
+    pub text: String,
+}
+
+const OBS_KINDS: [&str; 8] = ["SCENE", "COLLECTION", "SOURCE ON", "SOURCE OFF", "SOURCE TOGGLE", "MIXER MUTE", "MIXER UNMUTE", "MIXER TOGGLE"];
+
+pub(crate) fn obs_target_action(kind: usize, name: &str) -> ObsAction {
+    let n = name.to_string();
+    match kind {
+        0 => ObsAction::Scene(n),
+        1 => ObsAction::Collection(n),
+        2 => ObsAction::SourceOn(n),
+        3 => ObsAction::SourceOff(n),
+        4 => ObsAction::SourceToggle(n),
+        5 => ObsAction::MixerMute(n),
+        6 => ObsAction::MixerUnmute(n),
+        _ => ObsAction::MixerToggle(n),
+    }
+}
+
+fn obs_status_text(s: &crate::obs::ObsStatus) -> String {
+    use crate::obs::ObsStatus::*;
+    match s {
+        Connected { version } => format!("Connected to OBS {version}."),
+        NotRunning | Unknown => "OBS is not running. Actions work as soon as it is.".into(),
+        ServerOff => "In OBS open Tools > WebSocket Server Settings and turn on \"Enable WebSocket server\".".into(),
+        NeverStarted => "Start OBS once, then turn on Tools > WebSocket Server Settings > \"Enable WebSocket server\".".into(),
+        NotInstalled => "OBS Studio is not installed.".into(),
+        WrongPassword => "OBS refused the password from its own settings. Restart OBS and try again.".into(),
+    }
 }
 
 /// egui key -> Windows virtual-key code.
@@ -79,6 +118,8 @@ fn game_sections(cfg: &Config) -> Vec<Section> {
 enum ListItem {
     Header(String, Option<[u8; 3]>),
     Card(Card),
+    ObsStatus(String),
+    ObsNew,
 }
 
 impl GhubApp {
@@ -156,6 +197,23 @@ impl GhubApp {
             }
         };
         let mut out = Vec::new();
+        if self.asg.tab == 2 {
+            out.push(ListItem::Header("OBS".into(), None));
+            if !(self.asg.collapsed.contains("OBS") && q.is_empty()) {
+                if q.is_empty() {
+                    out.push(ListItem::ObsStatus(obs_status_text(&self.obs.status())));
+                }
+                for a in ObsAction::SIMPLE.iter().chain(cfg.obs_actions.iter()) {
+                    let c = Card { name: catalog::obs_name(a), detail: String::new(), assignment: Assignment::Obs(a.clone()) };
+                    if keep(&c) {
+                        out.push(ListItem::Card(c));
+                    }
+                }
+                if q.is_empty() {
+                    out.push(ListItem::ObsNew);
+                }
+            }
+        }
         for s in sections {
             let cards: Vec<Card> = s.cards.into_iter().filter(keep).collect();
             if !s.title.is_empty() {
@@ -188,6 +246,16 @@ impl GhubApp {
         let mut edit_macro: Option<String> = None;
         let mut delete_macro: Option<String> = None;
         let mut add_launch = false;
+        let mut delete_obs: Option<ObsAction> = None;
+        if self.asg.tab == 2 && !self.asg.collapsed.contains("OBS") && self.shot.is_none() {
+            if self.asg.obs_refresh.is_none_or(|t| t.elapsed().as_secs() >= 5) {
+                self.obs.refresh();
+                self.asg.obs_refresh = Some(std::time::Instant::now());
+            }
+        } else {
+            self.asg.obs_refresh = None;
+        }
+        let obs_ok = matches!(self.obs.status(), crate::obs::ObsStatus::Connected { .. });
         let mut child = ui.new_child(UiBuilder::new().max_rect(list));
         let tab = self.asg.tab;
         // tab-specific header blocks
@@ -200,7 +268,11 @@ impl GhubApp {
             child.add_space(44.0);
         }
         let mut launch_path = std::mem::take(&mut self.asg.launch_path);
-        egui::ScrollArea::vertical().id_salt(("asg-list", tab)).auto_shrink([false, false]).show(&mut child, |ui| {
+        let mut sa = egui::ScrollArea::vertical().id_salt(("asg-list", tab)).auto_shrink([false, false]);
+        if let Some(y) = self.asg.scroll_to {
+            sa = sa.vertical_scroll_offset(y);
+        }
+        sa.show(&mut child, |ui| {
             let w = 270.0;
             for (i, it) in items.iter().enumerate() {
                 match it {
@@ -209,7 +281,21 @@ impl GhubApp {
                         let open = !self.asg.collapsed.contains(title.as_str());
                         let tx = rect.left();
                         let _ = tag;
-                        text(ui, pos2(tx, rect.center().y), Align2::LEFT_CENTER, title, Ts::new(Fam::Bold, 14.0, pal().text).ls(0.3));
+                        let mut tx = tx;
+                        if title == "OBS" {
+                            let c = pos2(tx + 8.0, rect.center().y);
+                            ui.painter().circle_stroke(c, 6.5, Stroke::new(1.6, pal().text));
+                            ui.painter().circle_filled(c, 2.5, pal().text);
+                            tx += 26.0;
+                        }
+                        let tr = text(ui, pos2(tx, rect.center().y), Align2::LEFT_CENTER, title, Ts::new(Fam::Bold, 14.0, pal().text).ls(0.3));
+                        if title == "OBS" && !obs_ok {
+                            let c = pos2(tr.right() + 16.0, rect.center().y);
+                            let st = Stroke::new(1.5, pal().gshift);
+                            ui.painter().add(egui::Shape::closed_line(vec![c + vec2(0.0, -6.5), c + vec2(7.0, 6.0), c + vec2(-7.0, 6.0)], st));
+                            ui.painter().line_segment([c + vec2(0.0, -2.0), c + vec2(0.0, 1.5)], st);
+                            ui.painter().circle_filled(c + vec2(0.0, 3.8), 0.9, pal().gshift);
+                        }
                         chevron(ui.painter(), pos2(rect.right() - 12.0, rect.center().y), 4.5, open, Stroke::new(1.6, pal().text));
                         if r.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
                             toggle_section = Some(title.clone());
@@ -231,6 +317,90 @@ impl GhubApp {
                             }
                         }
                     }
+                    ListItem::ObsStatus(msg) => {
+                        let g = galley(ui, msg, Ts::new(Fam::Reg, 11.0, pal().muted).ls(0.4), w);
+                        let (rect, _) = ui.allocate_exact_size(vec2(w, g.size().y + 10.0), Sense::hover());
+                        ui.painter().galley(rect.min, g, pal().muted);
+                    }
+                    ListItem::ObsNew => match self.asg.obs_form.take() {
+                        None => {
+                            let (row, _) = ui.allocate_exact_size(vec2(w, 34.0), Sense::hover());
+                            let br = Rect::from_min_size(row.min + vec2(0.0, 4.0), vec2(w, 26.0));
+                            let r = click(ui, br, "obs-new");
+                            plus_text(ui, br, "CREATE NEW ACTION", r.hovered());
+                            if r.clicked() {
+                                self.asg.obs_form = Some(ObsForm::default());
+                            }
+                        }
+                        Some(mut f) => {
+                            let lists = self.obs.lists();
+                            let connected = matches!(self.obs.status(), crate::obs::ObsStatus::Connected { .. });
+                            let names: Vec<String> = match f.kind {
+                                0 => lists.scenes,
+                                1 => lists.collections,
+                                2..=4 => lists.sources,
+                                _ => lists.mixers,
+                            };
+                            let q = f.text.to_lowercase();
+                            let shown: Vec<String> = if connected { names.into_iter().filter(|n| q.is_empty() || n.to_lowercase().contains(&q)).take(6).collect() } else { Vec::new() };
+                            let h = 2.0 * 28.0 + 10.0 + 28.0 + shown.len() as f32 * 22.0 + 8.0 + 34.0 + 8.0;
+                            let (rect, _) = ui.allocate_exact_size(vec2(w, h), Sense::hover());
+                            let mut form_ui = ui.new_child(UiBuilder::new().max_rect(rect));
+                            let ui = &mut form_ui;
+                            let pw = (w - 18.0) / 4.0;
+                            for (i, label) in OBS_KINDS.iter().enumerate() {
+                                let pr = Rect::from_min_size(rect.min + vec2((i % 4) as f32 * (pw + 6.0), (i / 4) as f32 * 28.0 + 2.0), vec2(pw, 22.0));
+                                if pill_sized(ui, pr, label, f.kind == i, 8.5, ("obs-kind", i)).clicked() {
+                                    f.kind = i;
+                                    f.text.clear();
+                                }
+                            }
+                            let fy = rect.top() + 2.0 * 28.0 + 10.0;
+                            let fr = Rect::from_min_size(pos2(rect.left(), fy), vec2(w, 24.0));
+                            let hint = ["SELECT A SCENE", "SELECT A COLLECTION", "SELECT A SOURCE", "SELECT A SOURCE", "SELECT A SOURCE", "SELECT A MIXER", "SELECT A MIXER", "SELECT A MIXER"][f.kind];
+                            let te = egui::TextEdit::singleline(&mut f.text)
+                                .hint_text(egui::RichText::new(hint).color(pal().label).font(Ts::new(Fam::Reg, 12.0, pal().label).font()))
+                                .frame(egui::Frame::NONE)
+                                .font(Ts::new(Fam::Reg, 12.0, pal().text).font())
+                                .text_color(pal().text);
+                            ui.put(Rect::from_min_max(fr.min + vec2(2.0, 2.0), fr.max - vec2(2.0, 2.0)), te);
+                            ui.painter().line_segment([fr.left_bottom(), fr.right_bottom()], Stroke::new(1.0, pal().outline_hi));
+                            let mut ry = fr.bottom() + 4.0;
+                            let mut fill: Option<String> = None;
+                            for (i, n) in shown.iter().enumerate() {
+                                let rr = Rect::from_min_size(pos2(rect.left(), ry), vec2(w, 22.0));
+                                let r = click(ui, rr, ("obs-name", i));
+                                text(ui, pos2(rr.left() + 4.0, rr.center().y), Align2::LEFT_CENTER, n, Ts::new(Fam::Reg, 12.0, if r.hovered() { pal().primary } else { pal().text }).ls(0.4));
+                                if r.clicked() {
+                                    fill = Some(n.clone());
+                                }
+                                ry += 22.0;
+                            }
+                            if let Some(n) = fill {
+                                f.text = n;
+                            }
+                            let by = ry + 8.0;
+                            let ok = !f.text.trim().is_empty();
+                            let add = Rect::from_min_size(pos2(rect.left(), by), vec2(110.0, 26.0));
+                            let cancel = Rect::from_min_size(pos2(rect.left() + 120.0, by), vec2(110.0, 26.0));
+                            let add_click = if ok { blue_button(ui, add, "ADD", "obs-add").clicked() } else { {
+                                dark_button(ui, add, "ADD", "obs-add", false);
+                                false
+                            }
+                            };
+                            let cancel_click = dark_button(ui, cancel, "CANCEL", "obs-cancel", true).clicked();
+                            if add_click {
+                                let a = obs_target_action(f.kind, f.text.trim());
+                                self.edit(|c| {
+                                    if !c.obs_actions.contains(&a) {
+                                        c.obs_actions.push(a);
+                                    }
+                                });
+                            } else if !cancel_click {
+                                self.asg.obs_form = Some(f);
+                            }
+                        }
+                    },
                     ListItem::Card(c) => {
                         let left_w = if c.detail.is_empty() { 190.0 } else { 112.0 };
                         let lt = if tab == 4 || tab == 1 { Ts::new(Fam::Light, 12.0, pal().muted) } else { Ts::new(Fam::Reg, 12.0, pal().text).ls(0.6) };
@@ -257,6 +427,17 @@ impl GhubApp {
                         if !assigned.is_empty() && c.detail.is_empty() {
                             text(ui, pos2(rect.right() - 30.0, rect.center().y), Align2::RIGHT_CENTER, &assigned, Ts::new(Fam::Reg, 12.0, pal().text).ls(0.3));
                         }
+                        if let Assignment::Obs(a) = &c.assignment
+                            && cfg.obs_actions.contains(a)
+                            && ui.rect_contains_pointer(rect)
+                        {
+                            let xr = Rect::from_center_size(pos2(rect.right() - 16.0, rect.center().y), vec2(20.0, 20.0));
+                            let x = click(ui, xr, ("obs-del", i));
+                            caption_glyph(ui.painter(), xr.center(), 2, if x.hovered() { pal().error } else { pal().muted });
+                            if x.clicked() {
+                                delete_obs = Some(a.clone());
+                            }
+                        }
                         if let Assignment::Macro(id) = &c.assignment
                             && ui.rect_contains_pointer(rect)
                         {
@@ -273,7 +454,7 @@ impl GhubApp {
                                 }
                         }
                         ui.painter().line_segment([pos2(rect.left(), rect.bottom() - 0.5), pos2(rect.right(), rect.bottom() - 0.5)], Stroke::new(1.0, pal().row_line));
-                        if r.clicked() && edit_macro.is_none() && delete_macro.is_none() {
+                        if r.clicked() && edit_macro.is_none() && delete_macro.is_none() && delete_obs.is_none() {
                             picked = Some(c.assignment.clone());
                         }
                     }
@@ -297,6 +478,21 @@ impl GhubApp {
             launch_path.clear();
         }
         self.asg.launch_path = launch_path;
+        if let Some(a) = delete_obs {
+            let gone = Assignment::Obs(a.clone());
+            self.edit(|c| {
+                c.obs_actions.retain(|x| *x != a);
+                for app in &mut c.apps {
+                    for p in &mut app.profiles {
+                        for s in p.base.iter_mut().chain(p.gshift.iter_mut()) {
+                            if *s == gone {
+                                *s = Assignment::Default;
+                            }
+                        }
+                    }
+                }
+            });
+        }
         if let Some(t) = toggle_section
             && !self.asg.collapsed.remove(&t)
         {
@@ -371,7 +567,14 @@ impl GhubApp {
         let cal = turn_for(cfg.current().1, &e);
         let game_sens = self.game_sens_for(&cfg);
         let extra = if game_sens.is_some() { 16.0 } else { 0.0 };
-        let box_r = Rect::from_min_size(top, vec2(278.0, 366.0 + extra));
+        // implausible travel: warn between the COUNTS row and ANGLE
+        let dpi = cfg.current().1.dpi.active;
+        let travel = p180_travel_cm(cal.counts, dpi);
+        let warn = travel > 150.0;
+        let warn_text = format!("{} cm of mouse travel for one full turn. That is not a real setting: check the sensitivity.", thousands(travel.round() as i64));
+        let warn_g = warn.then(|| galley(ui, &warn_text, Ts::new(Fam::Reg, 11.0, pal().amber).ls(0.4), 254.0));
+        let warn_h = warn_g.as_ref().map_or(0.0, |g| g.size().y + 8.0);
+        let box_r = Rect::from_min_size(top, vec2(278.0, 366.0 + extra + warn_h));
         ui.painter().rect_filled(box_r, CornerRadius::same(8), pal().surface_hi);
         let x = box_r.left() + 12.0;
         text(ui, pos2(x, box_r.top() + 12.0), Align2::LEFT_TOP, "PERFECT 180", Ts::new(Fam::Bold, 12.0, pal().text));
@@ -379,7 +582,7 @@ impl GhubApp {
 
         // game presets (3 x 2); a count that doesn't match the preset maths shows as CUSTOM
         let mut game = cal.game.min(P180_GAMES.len() - 1);
-        if game != P180_CUSTOM && p180_counts_for(P180_GAMES[game].1, cal.sens) != Some(cal.counts) {
+        if game != P180_CUSTOM && p180_preset_counts(game, cal.sens) != Some(cal.counts) {
             game = P180_CUSTOM;
         }
         let shown_game = game;
@@ -406,7 +609,7 @@ impl GhubApp {
             }
         }
         let yaw = P180_GAMES[game].1;
-        let row = |i: usize| box_r.top() + 136.0 + extra + i as f32 * 28.0;
+        let row = |i: usize| box_r.top() + 136.0 + extra + i as f32 * 28.0 + if i >= 3 { warn_h } else { 0.0 };
 
         // in-game sensitivity
         text(ui, pos2(x, row(0)), Align2::LEFT_CENTER, "IN-GAME SENS", t_small_label().color(if yaw > 0.0 { pal().label } else { pal().disabled }));
@@ -421,6 +624,11 @@ impl GhubApp {
             }
         } else {
             ui.painter().rect_stroke(sens_r, CornerRadius::same(4), Stroke::new(1.0, pal().ink(20)), StrokeKind::Inside);
+        }
+        if game == P180_FORTNITE && sens_val < 1.0 {
+            let pct = format!("{:.1}", sens_val * 100.0);
+            let pct = pct.strip_suffix(".0").unwrap_or(&pct);
+            text(ui, pos2(x + 196.0, row(0)), Align2::LEFT_CENTER, &format!("= {pct} %"), Ts::new(Fam::Reg, 11.0, pal().muted).ls(0.2));
         }
 
         // counts: exact field + log slider (100 .. 100 000)
@@ -443,6 +651,11 @@ impl GhubApp {
             manual = true;
         }
 
+        if let Some(g) = warn_g {
+            let y0 = row(2) + 16.0;
+            ui.painter().galley(pos2(x, y0), g.clone(), pal().amber);
+        }
+
         // angle
         text(ui, pos2(x, row(3)), Align2::LEFT_CENTER, "ANGLE", t_small_label());
         let mut angle = cal.angle as f32;
@@ -458,11 +671,11 @@ impl GhubApp {
         let ms_changed = slider(ui, speed_r, &mut ms, 0.0..=200.0, "p180-ms");
         text(ui, pos2(box_r.right() - 12.0, row(4)), Align2::RIGHT_CENTER, &format!("{}ms", ms.round() as u16), t_body_bold());
 
-        if recalc && let Some(c) = p180_counts_for(yaw, sens_val) {
+        if recalc && let Some(c) = p180_preset_counts(game, sens_val) {
             counts = c;
         }
         // a hand-set count no longer matches the preset maths
-        if manual && p180_counts_for(yaw, sens_val) != Some(counts) {
+        if manual && p180_preset_counts(game, sens_val) != Some(counts) {
             game = P180_CUSTOM;
         }
         if recalc || manual || ms_changed || angle_changed || game != shown_game {
@@ -717,8 +930,23 @@ fn number_field(ui: &mut Ui, rect: Rect, buf: &mut String, current: &str, id: &s
     let mut child = ui.new_child(UiBuilder::new().max_rect(rect));
     let resp = child.put(rect.shrink2(vec2(8.0, 3.0)), te);
     let out = if resp.changed() { buf.trim().replace(',', ".").parse::<f64>().ok() } else { None };
-    if !resp.has_focus() {
+    // Widget-level focus only: has_focus() also needs the OS window focused, which
+    // flaps in scripted/off-screen windows and would wipe the text mid-edit.
+    if !ui.memory(|m| m.has_focus(resp.id)) {
         *buf = current.to_string();
     }
     out
+}
+
+/// 1234567 -> "1,234,567".
+fn thousands(n: i64) -> String {
+    let d = n.abs().to_string();
+    let mut out = String::new();
+    for (i, c) in d.chars().enumerate() {
+        if i > 0 && (d.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    if n < 0 { format!("-{out}") } else { out }
 }

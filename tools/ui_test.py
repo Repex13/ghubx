@@ -209,7 +209,7 @@ def add_detected_game():
 @scenario
 def use_game_sensitivity():
     res = run_script("use_game_sensitivity", device_assign() + [TAB_ACTIONS, "wait 800",
-                                                                 "click 200 631",  # USE MY COUNTER-STRIKE 2 SENSITIVITY (0.51)
+                                                                 "click 200 673",  # USE MY COUNTER-STRIKE 2 SENSITIVITY (0.51)
                                                                  SETTLE], config=cs2_app_config())
     ok_run(res)
     must(prof(res.cfg, 1)["turn"]["counts"] == 16043, prof(res.cfg, 1).get("turn"))
@@ -218,7 +218,7 @@ def use_game_sensitivity():
 @scenario
 def click_assign():
     res = run_script("click_assign", device_assign() + [click(G9), SETTLE, TAB_ACTIONS, SETTLE,
-                                                        "click 150 378",  # Perfect 180 card
+                                                        "click 150 420",  # Perfect 180 card (below the collapsed OBS header)
                                                         SETTLE])
     ok_run(res)
     must(prof(res.cfg)["base"][8] == {"Perfect180": {"left": False}}, prof(res.cfg)["base"][8])
@@ -227,7 +227,7 @@ def click_assign():
 @scenario
 def drag_assign():
     res = run_script("drag_assign", device_assign() + [TAB_ACTIONS, SETTLE,
-                                                       "drag 150 410 %d %d" % G3,  # Perfect 180 (Left) card -> Middle Click marker
+                                                       "drag 150 452 %d %d" % G3,  # Perfect 180 (Left) card -> Middle Click marker
                                                        SETTLE])
     ok_run(res)
     must(prof(res.cfg)["base"][2] == {"Perfect180": {"left": True}}, prof(res.cfg)["base"][2])
@@ -382,7 +382,7 @@ def macro_leave_confirm():
 def macro_system_step():
     res = run_script("macro_system_step", MACRO_NEW + MACRO_NAME_T1 + [
         TILE["norepeat"], SETTLE, "click 119 476", SETTLE,
-        "click 220 476",  # menu: SYSTEM
+        "click 220 520",  # menu: SYSTEM (fifth entry)
         SETTLE, "click 120 553",  # category list: Media
         SETTLE, "click 120 505",  # card: Play/Pause
         SETTLE, M_SAVE, SETTLE])
@@ -403,6 +403,75 @@ def macro_fold_toggle():
     must(before != (0, 0, 0) and after == (0, 0, 0), (before, after))
     m = edit_macro(res, "jump")[0]
     must(m.get("show_up_down") is False and simple(m["steps"]) == simple(seed_macro("jump")["steps"]), m)
+
+
+OBS_HEADER = "click 230 341"  # ACTIONS tab: OBS section header (starts collapsed)
+
+
+@scenario
+def obs_assign():
+    res = run_script("obs_assign", device_assign() + [click(G9), SETTLE, TAB_ACTIONS, SETTLE, OBS_HEADER, SETTLE,
+                                                      "click 150 561",  # Toggle Recording card
+                                                      SETTLE])
+    ok_run(res)
+    must(prof(res.cfg)["base"][8] == {"Obs": "ToggleRecord"}, prof(res.cfg)["base"][8])
+
+
+@scenario
+def obs_create_action():
+    res = run_script("obs_create_action", device_assign() + [click(G9), SETTLE, TAB_ACTIONS, SETTLE, OBS_HEADER, SETTLE,
+                                                             "scroll 230 500 -380", SETTLE,
+                                                             "click 180 534",  # + CREATE NEW ACTION
+                                                             SETTLE, "click 120 530",  # kind pill: SCENE
+                                                             SETTLE, "click 200 595", "text Live",  # name field
+                                                             SETTLE, "shot {shots}/form.png",
+                                                             "click 147 632",  # ADD
+                                                             SETTLE, "click 150 534",  # the new card: assign it to G9
+                                                             SETTLE])
+    ok_run(res)
+    must(res.cfg.get("obs_actions") == [{"Scene": "Live"}], res.cfg.get("obs_actions"))
+    must(prof(res.cfg)["base"][8] == {"Obs": {"Scene": "Live"}}, prof(res.cfg)["base"][8])
+
+
+@scenario
+def macro_obs_step():
+    res = run_script("macro_obs_step", MACRO_NEW + MACRO_NAME_T1 + [
+        TILE["norepeat"], SETTLE, "click 119 476", SETTLE,
+        "click 200 432",  # menu: ACTION
+        SETTLE, "click 120 508",  # integration list: OBS
+        SETTLE, "scroll 150 560 -300", SETTLE,
+        "click 127 513",  # action list: Save Buffer
+        SETTLE, M_SAVE, SETTLE])
+    ok_run(res)
+    m = edit_macro(res, "t1")
+    must(len(m) == 1 and len(m[0]["steps"]) == 1, m)
+    must(m[0]["steps"][0]["act"] == {"Do": {"Obs": "SaveBuffer"}}, m[0]["steps"])
+
+
+def fortnite_config(sens, counts):
+    cfg = seed_config()
+    for key, val in (("p180_counts", counts), ("p180_game", 5), ("p180_sens", sens)):
+        cfg = re.sub(rf"(?m)^{key}\s*=.*$", f"{key} = {val}", cfg)
+    return cfg
+
+
+@scenario
+def p180_fortnite_decimal():
+    res = run_script("p180_fortnite_decimal", device_assign() + [TAB_ACTIONS, SETTLE, "scroll 230 500 -200", SETTLE,
+                                                                 "click 252 486", "key End",  # IN-GAME SENS field
+                                                                 "key Backspace", "key Backspace", "key Backspace", "key Backspace", "key Backspace",
+                                                                 "text 0.138", "key Enter", SETTLE], config=fortnite_config(13.8, 2348))
+    ok_run(res)
+    ex = res.cfg["extras"]
+    must(ex["p180_game"] == 5 and abs(ex["p180_sens"] - 0.138) < 0.0005 and ex["p180_counts"] == 2348, ex)
+
+
+@scenario
+def p180_fortnite_migrates():
+    res = run_script("p180_fortnite_migrates", device_assign() + [TAB_ACTIONS, SETTLE, "scroll 230 500 -200", SETTLE,
+                                                                  "shot {shots}/migrated.png", SETTLE], config=fortnite_config(0.138, 234806))
+    ok_run(res)
+    must(res.cfg["extras"]["p180_counts"] == 2348, res.cfg["extras"])
 
 
 @scenario

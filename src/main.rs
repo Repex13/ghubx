@@ -90,6 +90,7 @@ fn main() -> eframe::Result<()> {
     let mailbox = ghubx::fx::Mailbox::default();
     let fx = shot.is_none().then(|| ghubx::fx::Handle::spawn(mailbox.clone(), ghubx::fx::win_source));
 
+    let obs = if dev || shot.is_some() { ghubx::obs::Handle::fixed(ghubx::obs::ObsStatus::NotRunning) } else { ghubx::obs::Handle::spawn() };
     let (dev_tx, dev_rx) = unbounded::<DevCmd>();
     let (eng_tx, eng_rx) = unbounded::<EngineMsg>();
     let (ui_tx, ui_rx) = unbounded::<UiEvent>();
@@ -109,7 +110,7 @@ fn main() -> eframe::Result<()> {
         if let Some(h) = fx.clone() {
             engine = engine.with_host_lighting(h);
         }
-        engine = engine.with_loopback(eng_tx.clone());
+        engine = engine.with_loopback(eng_tx.clone()).with_obs(obs.clone());
         std::thread::Builder::new().name("engine".into()).spawn(move || engine.run(eng_rx)).expect("spawn engine thread");
     }
 
@@ -145,7 +146,7 @@ fn main() -> eframe::Result<()> {
                     },
                 );
             }
-            let mut app = GhubApp::new(cc, cfg, eng_tx, ui_rx, exit, shot, fx);
+            let mut app = GhubApp::new(cc, cfg, eng_tx, ui_rx, exit, shot, fx, obs);
             if let Some(r) = script {
                 app.set_script(r);
             }

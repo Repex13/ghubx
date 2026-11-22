@@ -293,6 +293,11 @@ impl Palette {
         mix(anchors[i], anchors[i + 1], (level as f32 - lo) / (hi - lo))
     }
 
+    /// Orange of the OBS action steps: between amber and the G-Shift red.
+    pub fn orange(&self) -> Color32 {
+        mix(self.amber, self.gshift, 0.45)
+    }
+
     /// Opaque `c` at strength `a` over the background (a translucent fill without alpha).
     pub fn tint(&self, c: Color32, a: f32) -> Color32 {
         mix(self.bg, c, a)

@@ -27,6 +27,7 @@ pub enum ItemKind {
     Mouse { vk: u16, down: bool },
     Text(String),
     Sys(String),
+    Obs(String),
     Launch(String),
     Fold(String),
     Delay { ms: u32, pause: bool },
@@ -99,6 +100,7 @@ pub fn items_of(list: &[MacroStep], sec: usize, std: bool, show_up_down: bool) -
         let kind = match &s.act {
             Some(StepAct::Text(t)) => ItemKind::Text(t.clone()),
             Some(StepAct::Do(Assignment::Launch { name, .. })) => ItemKind::Launch(format!("Launch {name}")),
+            Some(StepAct::Do(Assignment::Obs(_))) => ItemKind::Obs(crate::catalog::step_name(s)),
             Some(StepAct::Do(_)) => ItemKind::Sys(crate::catalog::step_name(s)),
             None if is_mouse_vk(s.vk) => ItemKind::Mouse { vk: s.vk, down: s.down },
             None => ItemKind::Key { vk: s.vk, down: s.down },

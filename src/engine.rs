@@ -184,6 +184,7 @@ pub struct Engine {
     toggles: HashMap<String, Arc<AtomicBool>>,
     asleep: bool,
     pub(crate) osd: Box<dyn Fn(OsdKind) + Send>,
+    pub(crate) obs: Box<dyn Fn(ObsAction) + Send>,
     dpi_led_nv: Option<bool>,
     pub(crate) wdl: Box<dyn FnMut() -> Option<bool> + Send>,
     wdl_on: bool,
@@ -211,6 +212,7 @@ impl Engine {
             toggles: HashMap::new(),
             asleep: false,
             osd: Box::new(osd::show),
+            obs: Box::new(|_| {}),
             dpi_led_nv: None,
             wdl: Box::new(win::wdl_state),
             wdl_on: false,
@@ -222,6 +224,12 @@ impl Engine {
             input: Arc::new(RealInput),
             loopback: None,
         }
+    }
+
+    /// Send OBS actions through this handle.
+    pub fn with_obs(mut self, h: crate::obs::Handle) -> Self {
+        self.obs = Box::new(move |a| h.run(a));
+        self
     }
 
     /// Channel back into this engine, for macro steps that run a SYSTEM command.
@@ -765,6 +773,10 @@ impl Engine {
                 let (ms, steps) = (extras.p180_ms, extras.p180_steps);
                 let input = self.input.clone();
                 std::thread::spawn(move || perfect_180(&*input, c, ms, steps));
+                None
+            }
+            Assignment::Obs(a) => {
+                (self.obs)(a.clone());
                 None
             }
             Assignment::ToggleScrollAccel => {
@@ -1676,6 +1688,39 @@ mod tests {
         r.e.test_macro(m);
         pause(80);
         assert_eq!(r.rec.events().len(), want.len());
+    }
+
+    fn obs_calls(r: &mut Rig) -> Arc<Mutex<Vec<ObsAction>>> {
+        let log: Arc<Mutex<Vec<ObsAction>>> = Arc::default();
+        let sink = log.clone();
+        r.e.obs = Box::new(move |a| sink.lock().unwrap().push(a));
+        log
+    }
+
+    #[test]
+    fn obs_button_fires_once_on_press() {
+        let mut r = rig(|c| base(c, 3, Assignment::Obs(ObsAction::ToggleRecord)));
+        let log = obs_calls(&mut r);
+        r.take_control();
+        r.e.on_mask(1 << 3);
+        assert_eq!(*log.lock().unwrap(), vec![ObsAction::ToggleRecord]);
+        r.e.on_mask(0);
+        assert_eq!(log.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn obs_macro_step_arrives_through_the_tap() {
+        let mut r = rig(|c| {
+            base(c, 3, Assignment::Macro("m".into()));
+            c.apps[0].macros.push(Macro { id: "m".into(), name: "m".into(), steps: vec![MacroStep::run(Assignment::Obs(ObsAction::SaveBuffer), 0)], ..Default::default() });
+        });
+        let log = obs_calls(&mut r);
+        r.take_control();
+        r.press(3);
+        pause(80);
+        assert!(log.lock().unwrap().is_empty());
+        r.feed_taps();
+        assert_eq!(*log.lock().unwrap(), vec![ObsAction::SaveBuffer]);
     }
 
     #[test]

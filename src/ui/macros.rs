@@ -34,7 +34,7 @@ const SECTION_NAMES: [&str; 3] = ["ON PRESS", "WHILE HOLDING", "ON RELEASE"];
 
 pub enum Mode {
     Text { sec: usize, idx: usize, buf: String, focus: bool },
-    Choose { sec: usize, idx: usize, launch: bool, cat: Option<usize> },
+    Choose { sec: usize, idx: usize, launch: bool, obs: bool, cat: Option<usize> },
 }
 
 impl Mode {
@@ -280,7 +280,7 @@ fn chip_w(ui: &Ui, item: &Item, editing: bool) -> f32 {
         }
         ItemKind::Mouse { .. } => 30.0,
         ItemKind::Text(t) => (text_w(ui, &format!("\u{201c}{}\u{201d}", t.replace('\n', " ")), Ts::new(Fam::Reg, 16.0, pal().text).ls(0.0)) + 24.0).clamp(55.0, 280.0),
-        ItemKind::Sys(l) | ItemKind::Launch(l) => text_w(ui, l, Ts::new(Fam::Reg, 14.0, pal().text).ls(0.0)) + 24.0,
+        ItemKind::Sys(l) | ItemKind::Launch(l) | ItemKind::Obs(l) => text_w(ui, l, Ts::new(Fam::Reg, 14.0, pal().text).ls(0.0)) + 24.0,
         ItemKind::Delay { ms, .. } => (text_w(ui, &fmt_delay(*ms).0, Ts::new(Fam::Reg, 21.0, pal().text).ls(0.0)) + 6.0).max(40.0),
     }
 }
@@ -766,7 +766,7 @@ impl GhubApp {
 
     fn macro_menu(&mut self, ui: &mut Ui, ed: &mut MacroEditor, win: Rect, live: bool) {
         let Some(sec) = ed.menu else { return };
-        const ENTRIES: [(&str, u8); 5] = [("RECORD KEYSTROKES", 0), ("TEXT & EMOJIS", 1), ("LAUNCH APPLICATION", 2), ("SYSTEM", 3), ("DELAY", 4)];
+        const ENTRIES: [(&str, u8); 6] = [("RECORD KEYSTROKES", 0), ("TEXT & EMOJIS", 1), ("ACTION", 5), ("LAUNCH APPLICATION", 2), ("SYSTEM", 3), ("DELAY", 4)];
         let tile = ed.menu_tile;
         let n = ENTRIES.len() as f32;
         let total = n * 36.0 + (n - 1.0) * 8.0;
@@ -782,6 +782,7 @@ impl GhubApp {
             let fill = match kind {
                 0 => pal().tint(pal().gshift, 0.4),
                 1 => pal().tint(pal().amber, 0.4),
+                5 => pal().tint(pal().orange(), 0.4),
                 2 => pal().n(0x65),
                 3 => pal().n(0x33),
                 _ => pal().n(0x48),
@@ -800,6 +801,10 @@ impl GhubApp {
                 1 => {
                     p.circle_filled(ic, 8.0, pal().amber);
                     text(ui, ic, Align2::CENTER_CENTER, "T", Ts::new(Fam::Bold, 11.0, pal().bg).ls(0.0));
+                }
+                5 => {
+                    p.circle_filled(ic, 8.0, pal().orange());
+                    p.add(Shape::convex_polygon(vec![ic + vec2(1.5, -5.0), ic + vec2(-3.0, 0.8), ic + vec2(-0.2, 0.8), ic + vec2(-1.5, 5.0), ic + vec2(3.0, -1.0), ic + vec2(0.2, -1.0)], pal().bg, Stroke::NONE));
                 }
                 2 => {
                     p.circle_filled(ic, 8.0, pal().n(0xaf));
@@ -838,10 +843,10 @@ impl GhubApp {
                 ed.m.lists[sec].push(MacroStep::text("", 0));
                 ed.mode = Some(Mode::Text { sec, idx, buf: String::new(), focus: true });
             }
-            2 | 3 => {
+            2 | 3 | 5 => {
                 let idx = ed.m.lists[sec].len();
                 ed.m.lists[sec].push(MacroStep::run(Assignment::Default, 0));
-                ed.mode = Some(Mode::Choose { sec, idx, launch: kind == 2, cat: None });
+                ed.mode = Some(Mode::Choose { sec, idx, launch: kind == 2, obs: kind == 5, cat: None });
                 ed.list_scroll = 0.0;
             }
             _ => {
@@ -946,9 +951,9 @@ impl GhubApp {
                                         finish_mode = Some(true);
                                     }
                                 }
-                                Some(Mode::Choose { launch, cat, .. }) => {
-                                    let (launch, cat) = (*launch, *cat);
-                                    choose = self.chooser(&mut sub, ed, bx, launch, cat, sec);
+                                Some(Mode::Choose { launch, obs, cat, .. }) => {
+                                    let (launch, obs, cat) = (*launch, *obs, *cat);
+                                    choose = self.chooser(&mut sub, ed, bx, launch, obs, cat, sec);
                                 }
                                 None => {}
                             }
@@ -1151,9 +1156,11 @@ impl GhubApp {
 
     /// The SYSTEM / LAUNCH APPLICATION chooser. Returns `Some(Some(step))` when a card was picked.
     #[allow(clippy::too_many_arguments)]
-    fn chooser(&mut self, ui: &mut Ui, ed: &mut MacroEditor, bx: Rect, launch: bool, cat: Option<usize>, _sec: usize) -> Option<Option<MacroStep>> {
-        let sections: Vec<catalog::Section> = if launch { Vec::new() } else { catalog::system().into_iter().chain(catalog::commands()).collect() };
-        let placeholder = if launch {
+    fn chooser(&mut self, ui: &mut Ui, ed: &mut MacroEditor, bx: Rect, launch: bool, obs: bool, cat: Option<usize>, _sec: usize) -> Option<Option<MacroStep>> {
+        let sections: Vec<catalog::Section> = if launch || obs { Vec::new() } else { catalog::system().into_iter().chain(catalog::commands()).collect() };
+        let placeholder = if obs {
+            if cat.is_some() { "Select action".to_string() } else { "Select integration".to_string() }
+        } else if launch {
             "Launch Application".to_string()
         } else {
             match cat {
@@ -1166,7 +1173,16 @@ impl GhubApp {
         text(ui, pos2(bx.left() + 12.0, bx.center().y), Align2::LEFT_CENTER, &placeholder, Ts::new(Fam::Reg, 12.0, pal().text).ls(0.0));
         chevron(ui.painter(), pos2(bx.right() - 16.0, bx.center().y), 4.0, false, Stroke::new(1.5, pal().text));
         let mut rows: Vec<(String, Option<MacroStep>, Option<usize>, bool)> = Vec::new();
-        if launch {
+        if obs {
+            if cat.is_none() {
+                rows.push(("OBS".into(), None, Some(0), false));
+            } else {
+                let cfg = self.cfg();
+                for a in ObsAction::SIMPLE.iter().chain(cfg.obs_actions.iter()) {
+                    rows.push((catalog::obs_name(a), Some(MacroStep::run(Assignment::Obs(a.clone()), 0)), None, false));
+                }
+            }
+        } else if launch {
             let cfg = self.cfg();
             for c in super::assign::launch_cards(&cfg) {
                 rows.push((format!("Launch {}", c.name), Some(MacroStep::run(c.assignment.clone(), 0)), None, false));
@@ -1292,10 +1308,14 @@ impl GhubApp {
                 text(ui, rect.center(), Align2::CENTER_CENTER, &s, Ts::new(Fam::Reg, 16.0, pal().text).ls(0.0));
                 rect
             }
-            ItemKind::Sys(l) | ItemKind::Launch(l) => {
+            ItemKind::Sys(l) | ItemKind::Launch(l) | ItemKind::Obs(l) => {
                 let w = chip_w(ui, item, false);
                 let rect = Rect::from_min_size(pos2(x, cy - 19.5), vec2(w, 39.0));
-                let base = if matches!(item.kind, ItemKind::Launch(_)) { pal().ink(102) } else { pal().ink(51) };
+                let base = match item.kind {
+                    ItemKind::Launch(_) => pal().ink(102),
+                    ItemKind::Obs(_) => pal().tint(pal().orange(), 0.4),
+                    _ => pal().ink(51),
+                };
                 self.pill(ui, rect, if selected { sel_fill } else { base }, selected);
                 text(ui, rect.center(), Align2::CENTER_CENTER, l, Ts::new(Fam::Reg, 14.0, pal().text).ls(0.0));
                 rect

@@ -159,6 +159,7 @@ pub struct GhubApp {
     pub(crate) onboard: Vec<crate::profile::OnboardSlot>,
     pub(crate) onboard_asked: bool,
     pub(crate) fx: Option<crate::fx::Handle>,
+    pub(crate) obs: crate::obs::Handle,
     pub(crate) slot_saved_msg: Option<String>,
     pub(crate) wdl_cache: Option<(Instant, Option<bool>)>,
     pub(crate) slot_menu: Option<onboard::SlotMenu>,
@@ -174,6 +175,7 @@ pub struct GhubApp {
 }
 
 impl GhubApp {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         cc: &eframe::CreationContext<'_>,
         cfg: Arc<Mutex<Config>>,
@@ -182,6 +184,7 @@ impl GhubApp {
         exit: Arc<Exit>,
         shot: Option<Shot>,
         fx: Option<crate::fx::Handle>,
+        obs: crate::obs::Handle,
     ) -> Self {
         let stash = Stash::default();
         if shot.is_none() {
@@ -215,7 +218,11 @@ impl GhubApp {
             meta,
             tex,
             art_rx: Some(art_rx),
-            asg: Default::default(),
+            asg: {
+                let mut a = assign::AsgState::default();
+                a.collapsed.insert("OBS".into());
+                a
+            },
             sens: Default::default(),
             light: Default::default(),
             prof: Default::default(),
@@ -233,6 +240,7 @@ impl GhubApp {
             onboard: Vec::new(),
             onboard_asked: false,
             fx,
+            obs,
             slot_saved_msg: None,
             wdl_cache: None,
             slot_menu: None,
@@ -256,7 +264,7 @@ impl GhubApp {
     fn prepare_shot(&mut self, page: &str) {
         self.route = match page {
             "home" | "dropdown" => Route::Home,
-            "assign" | "assign2" | "gshift" | "macro" | "macroname" | "macrotype" | "macroseq" | "macroedit" | "macrorec" | "macromenu" | "macrocustom" | "macrofold" | "macroconfirm" | "select" | "keys" | "actions" | "gamecmds" | "p180game" => Route::Device(DevTab::Assignments),
+            "assign" | "assign2" | "gshift" | "macro" | "macroname" | "macrotype" | "macroseq" | "macroedit" | "macrorec" | "macromenu" | "macrocustom" | "macrofold" | "macroconfirm" | "macroaction" | "select" | "keys" | "actions" | "obsactions" | "obsnew" | "p180warn" | "gamecmds" | "p180game" => Route::Device(DevTab::Assignments),
             "sens" => Route::Device(DevTab::Sensitivity),
             "light" | "fixed" | "wdl" | "effectmenu" | "screenfx" | "audiofx" | "audiofxadv" => Route::Device(DevTab::Lighting),
             "devset" | "onboard" | "slotmenu" | "slotconfirm" | "slotdetails" => Route::DeviceSettings,
@@ -270,9 +278,9 @@ impl GhubApp {
         self.asg.side = page == "assign2";
         self.asg.gshift = page == "gshift";
         self.asg.tab = match page {
-            "macro" | "macroname" | "macrotype" | "macroseq" | "macroedit" | "macrorec" | "macromenu" | "macrocustom" | "macrofold" | "macroconfirm" => 3,
+            "macro" | "macroname" | "macrotype" | "macroseq" | "macroedit" | "macrorec" | "macromenu" | "macrocustom" | "macrofold" | "macroconfirm" | "macroaction" => 3,
             "keys" => 1,
-            "actions" | "p180game" => 2,
+            "actions" | "p180game" | "p180warn" | "obsactions" | "obsnew" => 2,
             _ => 0,
         };
         if page == "select" {
@@ -280,6 +288,22 @@ impl GhubApp {
         }
         if page.starts_with("macro") && page != "macro" {
             self.asg.editor = Some(self.macro_shot(page));
+        }
+        if page == "p180warn" {
+            let mut c = self.cfg.lock().unwrap();
+            c.extras.p180_game = 0;
+            c.extras.p180_sens = 0.01;
+            c.extras.p180_counts = 818_182;
+            drop(c);
+            self.asg.scroll_to = Some(200.0);
+        }
+        if page == "obsactions" || page == "obsnew" {
+            self.asg.collapsed.remove("OBS");
+            self.cfg.lock().unwrap().obs_actions = vec![crate::profile::ObsAction::Scene("Live".into()), crate::profile::ObsAction::MixerToggle("Mic/Aux".into())];
+            if page == "obsnew" {
+                self.asg.obs_form = Some(assign::ObsForm::default());
+                self.asg.scroll_to = Some(380.0);
+            }
         }
         if page == "fixed" {
             let mut c = self.cfg.lock().unwrap();
@@ -439,6 +463,12 @@ impl GhubApp {
                 if page == "macrocustom" {
                     e.m.sel = vec![macros::ItemId { sec: 0, idx: 2, delay: false }];
                 }
+                e
+            }
+            "macroaction" => {
+                let mut e = macros::MacroEditor::new_of("action", MacroKind::NoRepeat);
+                e.m.lists[0] = vec![MacroStep::run(Assignment::Obs(crate::profile::ObsAction::ToggleRecord), 0), MacroStep::run(Assignment::Default, 50)];
+                e.mode = Some(macros::Mode::Choose { sec: 0, idx: 1, launch: false, obs: true, cat: Some(0) });
                 e
             }
             "macroconfirm" => {
@@ -1029,6 +1059,9 @@ impl eframe::App for GhubApp {
             self.hide_to_tray();
         }
         self.pump(&ctx);
+        if let Some(e) = self.obs.take_error() {
+            self.say(e);
+        }
         let win = ui.max_rect();
         ui.painter().rect_filled(win, CornerRadius::ZERO, pal().bg);
         match self.route {
@@ -1061,6 +1094,8 @@ impl eframe::App for GhubApp {
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
         if let Some(r) = &mut self.script {
             raw.events.clear();
+            // The off-screen script window has no reliable OS focus; widget focus must not flap with it.
+            raw.focused = true;
             ctx.request_repaint();
             if !self.script_shot_pending.load(std::sync::atomic::Ordering::Relaxed) {
                 let f = r.next_frame();

@@ -63,6 +63,64 @@ pub enum Assignment {
     /// Basilisk V4 "Perfect 180" (calibrated in [`Extras`]).
     Perfect180 { left: bool },
     ToggleScrollAccel,
+    /// OBS Studio action (sent over its WebSocket server).
+    Obs(ObsAction),
+}
+
+/// OBS Studio actions, named as in G HUB's OBS integration.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum ObsAction {
+    StartStream,
+    StopStream,
+    ToggleStream,
+    StartRecord,
+    StopRecord,
+    ToggleRecord,
+    StartBuffer,
+    StopBuffer,
+    ToggleBuffer,
+    SaveBuffer,
+    MuteDesktop,
+    UnmuteDesktop,
+    ToggleDesktopMute,
+    MuteMic,
+    UnmuteMic,
+    ToggleMicMute,
+    /// Activate Scene.
+    Scene(String),
+    /// Activate Collection.
+    Collection(String),
+    /// Activate Source, in the current scene.
+    SourceOn(String),
+    /// Deactivate A Source.
+    SourceOff(String),
+    SourceToggle(String),
+    /// Mute Mixer (an audio input by name).
+    MixerMute(String),
+    MixerUnmute(String),
+    MixerToggle(String),
+}
+
+impl ObsAction {
+    /// The 16 actions without a target, in G HUB's order.
+    pub const SIMPLE: [ObsAction; 16] = [
+        ObsAction::StartStream,
+        ObsAction::StopStream,
+        ObsAction::ToggleStream,
+        ObsAction::StartRecord,
+        ObsAction::StopRecord,
+        ObsAction::ToggleRecord,
+        ObsAction::StartBuffer,
+        ObsAction::StopBuffer,
+        ObsAction::ToggleBuffer,
+        ObsAction::SaveBuffer,
+        ObsAction::MuteDesktop,
+        ObsAction::UnmuteDesktop,
+        ObsAction::ToggleDesktopMute,
+        ObsAction::MuteMic,
+        ObsAction::UnmuteMic,
+        ObsAction::ToggleMicMute,
+    ];
 }
 
 /// The G502 HERO's factory function for each slot (G1..G11).
@@ -676,6 +734,37 @@ pub fn turn_for(profile: &Profile, extras: &Extras) -> TurnCal {
     profile.turn.clone().unwrap_or(TurnCal { counts: extras.p180_counts, game: extras.p180_game, sens: extras.p180_sens, angle: extras.p180_angle })
 }
 
+/// Index of the FORTNITE preset in `P180_GAMES`.
+pub const P180_FORTNITE: usize = 5;
+
+/// The sensitivity in the preset's own unit. Fortnite shows a percentage (13.8 %), but players
+/// also know it as the decimal (0.138): a Fortnite value below 1.0 is taken as the decimal.
+pub fn p180_sens_for(game: usize, typed: f32) -> f32 {
+    if game == P180_FORTNITE && typed < 1.0 { typed * 100.0 } else { typed }
+}
+
+/// Counts for a 180 degree turn from a preset and the sensitivity as typed (`None` for CUSTOM or bad input).
+pub fn p180_preset_counts(game: usize, typed: f32) -> Option<i32> {
+    p180_counts_for(P180_GAMES.get(game)?.1, p180_sens_for(game, typed))
+}
+
+/// Fortnite settings saved before decimal input existed hold counts computed from the decimal as if it
+/// were a percentage; recompute them. Idempotent.
+fn fix_fortnite_counts(game: usize, sens: f32, counts: &mut i32) {
+    if game == P180_FORTNITE
+        && sens < 1.0
+        && p180_counts_for(P180_GAMES[P180_FORTNITE].1, sens) == Some(*counts)
+        && let Some(c) = p180_preset_counts(game, sens)
+    {
+        *counts = c;
+    }
+}
+
+/// Centimetres of mouse travel for a full 360 turn at `dpi` (0 when `dpi` is 0).
+pub fn p180_travel_cm(counts: i32, dpi: u16) -> f32 {
+    if dpi == 0 { 0.0 } else { 2.0 * counts as f32 / dpi as f32 * 2.54 }
+}
+
 /// Mouse counts for a 180° turn: 180 / (yaw × in-game sensitivity).
 pub fn p180_counts_for(yaw: f32, sens: f32) -> Option<i32> {
     (yaw > 0.0 && sens > 0.0).then(|| (180.0 / (yaw * sens)).round().clamp(1.0, 1_000_000.0) as i32)
@@ -876,6 +965,9 @@ pub struct Config {
     pub extras: Extras,
     #[serde(default)]
     pub appearance: Appearance,
+    /// The user's own OBS actions with a target (scene, source, mixer...).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub obs_actions: Vec<ObsAction>,
 }
 
 impl Default for Config {
@@ -888,6 +980,7 @@ impl Default for Config {
             general: General::default(),
             extras: Extras::default(),
             appearance: Appearance::default(),
+            obs_actions: Vec::new(),
         }
     }
 }
@@ -940,6 +1033,12 @@ impl Config {
             Self::sanitize_app(a);
         }
         self.current_app = self.current_app.min(self.apps.len() - 1);
+        fix_fortnite_counts(self.extras.p180_game, self.extras.p180_sens, &mut self.extras.p180_counts);
+        for p in self.apps.iter_mut().flat_map(|a| a.profiles.iter_mut()) {
+            if let Some(t) = &mut p.turn {
+                fix_fortnite_counts(t.game, t.sens, &mut t.counts);
+            }
+        }
         if let Some((a, p)) = self.persistent
             && (a >= self.apps.len() || p >= self.apps[a].profiles.len())
         {
@@ -1137,6 +1236,7 @@ fn assignment_label(a: &Assignment, macros: &[Macro]) -> String {
         Assignment::Launch { name, .. } => format!("{name} (launch)"),
         Assignment::Perfect180 { .. } => "Perfect 180".into(),
         Assignment::ToggleScrollAccel => "scroll acceleration".into(),
+        Assignment::Obs(a) => crate::catalog::obs_name(a),
         Assignment::System(SystemFn::ReportRateCycle) => "report rate cycle".into(),
         Assignment::Mouse(MouseFn::DoubleClick) => "double click".into(),
         Assignment::Key(k) | Assignment::Shortcut { combo: k, .. } => format!("key {:#04X}", k.vk),
@@ -1631,6 +1731,76 @@ mod tests {
         let mut m = base(MacroKind::RepeatWhileHolding);
         m.apply_standard_delay(30);
         assert_eq!(delays(&m.steps), [(false, 0), (false, 30), (true, 30)]);
+    }
+
+    fn every_obs_action() -> Vec<ObsAction> {
+        let mut v = ObsAction::SIMPLE.to_vec();
+        v.extend(["a", "b c"].iter().flat_map(|n| {
+            let n = n.to_string();
+            [ObsAction::Scene(n.clone()), ObsAction::Collection(n.clone()), ObsAction::SourceOn(n.clone()), ObsAction::SourceOff(n.clone()), ObsAction::SourceToggle(n.clone()), ObsAction::MixerMute(n.clone()), ObsAction::MixerUnmute(n.clone()), ObsAction::MixerToggle(n)]
+        }));
+        v
+    }
+
+    #[test]
+    fn obs_actions_round_trip_and_are_not_stored_on_the_mouse() {
+        let mut c = Config { obs_actions: every_obs_action().into_iter().filter(|a| !ObsAction::SIMPLE.contains(a)).collect(), ..Config::default() };
+        for (i, a) in every_obs_action().into_iter().enumerate() {
+            c.apps[0].profiles[0].base[i % SLOTS] = Assignment::Obs(a.clone());
+            let back: Config = toml::from_str(&toml::to_string_pretty(&{
+                let mut one = Config::default();
+                one.apps[0].profiles[0].base[0] = Assignment::Obs(a.clone());
+                one
+            }).unwrap()).unwrap();
+            assert_eq!(back.apps[0].profiles[0].base[0], Assignment::Obs(a));
+        }
+        let back: Config = toml::from_str(&toml::to_string_pretty(&c).unwrap()).unwrap();
+        assert_eq!(back.obs_actions, c.obs_actions);
+        let plain = toml::to_string_pretty(&Config::default()).unwrap();
+        assert!(!plain.contains("obs_actions"));
+        let old: Config = toml::from_str(&plain).unwrap();
+        assert!(old.obs_actions.is_empty());
+        let mut p = Profile::new("x");
+        p.base[2] = Assignment::Obs(ObsAction::ToggleRecord);
+        let enc = encode_onboard(&p, "x", &[]);
+        assert!(enc.not_stored.iter().any(|(s, g, _)| *s == 2 && !*g));
+        assert!(step_allowed(&Assignment::Obs(ObsAction::StartStream)));
+    }
+
+    #[test]
+    fn p180_travel_and_percent_presets() {
+        let cm = |game: usize, sens: f32| p180_travel_cm(p180_counts_for(P180_GAMES[game].1, sens).unwrap(), 600);
+        assert!((cm(5, 0.138) - 1988.0).abs() < 2.0, "{}", cm(5, 0.138));
+        assert!((cm(5, 13.8) - 19.9).abs() < 0.2);
+        assert!(cm(0, 0.51) < 150.0);
+        assert_eq!(p180_travel_cm(1000, 0), 0.0);
+        assert!((p180_sens_for(5, 0.138) - 13.8).abs() < 1e-4);
+        assert_eq!((p180_sens_for(5, 13.8), p180_sens_for(5, 1.0), p180_sens_for(0, 0.51)), (13.8, 1.0, 0.51));
+        assert_eq!(p180_preset_counts(5, 0.138), Some(2348));
+        assert_eq!(p180_preset_counts(5, 13.8), Some(2348));
+        assert_eq!(p180_preset_counts(3, 1.0), None);
+    }
+
+    #[test]
+    fn old_fortnite_counts_are_migrated_once() {
+        let turn = |g, s, c| TurnCal { counts: c, game: g, sens: s, angle: 180 };
+        let mut cfg = Config::default();
+        cfg.extras.p180_game = 5;
+        cfg.extras.p180_sens = 0.138;
+        cfg.extras.p180_counts = 234_806;
+        cfg.apps[0].profiles[0].turn = Some(turn(5, 0.138, 234_806));
+        cfg.sanitize();
+        assert_eq!(cfg.extras.p180_counts, 2348);
+        assert_eq!(cfg.apps[0].profiles[0].turn.as_ref().unwrap().counts, 2348);
+        let again = cfg.clone();
+        cfg.sanitize();
+        assert_eq!(cfg, again);
+        cfg.apps[0].profiles[0].turn = Some(turn(5, 0.138, 5000));
+        cfg.sanitize();
+        assert_eq!(cfg.apps[0].profiles[0].turn.as_ref().unwrap().counts, 5000);
+        cfg.apps[0].profiles[0].turn = Some(turn(0, 0.51, 16043));
+        cfg.sanitize();
+        assert_eq!(cfg.apps[0].profiles[0].turn.as_ref().unwrap().counts, 16043);
     }
 
     #[test]

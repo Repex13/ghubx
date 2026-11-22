@@ -40,6 +40,8 @@ fn main() {
         Some("onboard-activate") => std::process::exit(onboard_activate_cmd(&std::env::args().skip(2).collect::<Vec<_>>())),
         Some("dpi-led") => std::process::exit(toggle_cmd("dpi-led", &std::env::args().skip(2).collect::<Vec<_>>())),
         Some("startup-effect") => std::process::exit(toggle_cmd("startup-effect", &std::env::args().skip(2).collect::<Vec<_>>())),
+        Some("obs-status") => std::process::exit(obs_status_cmd()),
+        Some("obs") => std::process::exit(obs_cmd(&std::env::args().skip(2).collect::<Vec<_>>())),
         Some("fx-screen-check") => std::process::exit(fx_screen_check()),
         Some("fx-audio") => std::process::exit(fx_audio(std::env::args().nth(2).and_then(|a| a.parse().ok()).unwrap_or(5.0))),
         Some("export-theme") => std::process::exit(export_theme_cmd(&std::env::args().skip(2).collect::<Vec<_>>())),
@@ -376,6 +378,91 @@ fn toggle_cmd(which: &str, args: &[String]) -> i32 {
         }
         Err(e) => {
             eprintln!("{e}");
+            1
+        }
+    }
+}
+
+fn obs_wait(mut done: impl FnMut() -> bool) {
+    let end = std::time::Instant::now() + std::time::Duration::from_secs(8);
+    while std::time::Instant::now() < end && !done() {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
+fn obs_status_cmd() -> i32 {
+    use ghubx::obs::ObsStatus;
+    let h = ghubx::obs::Handle::spawn();
+    h.refresh();
+    obs_wait(|| h.status() != ObsStatus::Unknown);
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    let st = h.status();
+    println!("status: {st:?}");
+    if let ObsStatus::Connected { version } = &st {
+        println!("OBS version: {version}");
+        let l = h.lists();
+        println!("scenes: {:?}
+collections: {:?}
+sources: {:?}
+mixers: {:?}", l.scenes, l.collections, l.sources, l.mixers);
+    }
+    i32::from(!matches!(st, ObsStatus::Connected { .. }))
+}
+
+fn obs_cmd(args: &[String]) -> i32 {
+    use ghubx::profile::ObsAction::*;
+    let Some(name) = args.first() else {
+        eprintln!("usage: probe obs <action> [target]");
+        return 64;
+    };
+    let target = args.get(1).cloned();
+    let need = |f: fn(String) -> ghubx::profile::ObsAction| target.clone().map(f);
+    let action = match name.as_str() {
+        "start-stream" => Some(StartStream),
+        "stop-stream" => Some(StopStream),
+        "toggle-stream" => Some(ToggleStream),
+        "start-record" => Some(StartRecord),
+        "stop-record" => Some(StopRecord),
+        "toggle-record" => Some(ToggleRecord),
+        "start-buffer" => Some(StartBuffer),
+        "stop-buffer" => Some(StopBuffer),
+        "toggle-buffer" => Some(ToggleBuffer),
+        "save-buffer" => Some(SaveBuffer),
+        "mute-desktop" => Some(MuteDesktop),
+        "unmute-desktop" => Some(UnmuteDesktop),
+        "toggle-desktop" => Some(ToggleDesktopMute),
+        "mute-mic" => Some(MuteMic),
+        "unmute-mic" => Some(UnmuteMic),
+        "toggle-mic" => Some(ToggleMicMute),
+        "scene" => need(Scene),
+        "collection" => need(Collection),
+        "source-on" => need(SourceOn),
+        "source-off" => need(SourceOff),
+        "source-toggle" => need(SourceToggle),
+        "mixer-mute" => need(MixerMute),
+        "mixer-unmute" => need(MixerUnmute),
+        "mixer-toggle" => need(MixerToggle),
+        _ => None,
+    };
+    let Some(a) = action else {
+        eprintln!("unknown action or missing target: {name}");
+        return 64;
+    };
+    let h = ghubx::obs::Handle::spawn();
+    h.run(a);
+    obs_wait(|| h.last_error().is_some() || matches!(h.status(), ghubx::obs::ObsStatus::Connected { .. }));
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    match h.last_error() {
+        Some(e) => {
+            eprintln!("{e}");
+            1
+        }
+        None if matches!(h.status(), ghubx::obs::ObsStatus::Connected { .. }) => {
+            println!("done");
+            0
+        }
+        None => {
+            eprintln!("OBS is not reachable: {:?}", h.status());
             1
         }
     }
