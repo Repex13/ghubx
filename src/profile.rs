@@ -414,6 +414,34 @@ impl AppEntry {
     }
 }
 
+/// A game or app with its profiles and macros as a shareable `.ghubx` file (TOML).
+pub fn export_app(app: &AppEntry) -> String {
+    #[derive(Serialize)]
+    struct File<'a> {
+        format: u32,
+        app: &'a AppEntry,
+    }
+    toml::to_string_pretty(&File { format: 1, app }).unwrap_or_default()
+}
+
+pub fn import_app(text: &str) -> Result<AppEntry, String> {
+    #[derive(Deserialize)]
+    struct File {
+        format: Option<u32>,
+        app: Option<AppEntry>,
+    }
+    let f: File = toml::from_str(text).map_err(|e| format!("Not a GHUB-X profile file: {e}"))?;
+    if f.format != Some(1) {
+        return Err("Unsupported profile file format".into());
+    }
+    let mut app = f.app.ok_or("The file has no app")?;
+    if app.profiles.is_empty() {
+        return Err("The file has no profiles".into());
+    }
+    Config::sanitize_app(&mut app);
+    Ok(app)
+}
+
 // ---------------------------------------------------------------- settings
 
 /// Perfect 180 calculator presets: (label, degrees per count at sensitivity 1.0).
@@ -561,23 +589,51 @@ impl Default for Config {
 }
 
 impl Config {
+    /// Make a freshly loaded or imported app consistent (same repair a loaded config gets).
+    pub fn sanitize_app(a: &mut AppEntry) {
+        if a.profiles.is_empty() {
+            a.profiles.push(Profile::new("Default"));
+        }
+        a.active_profile = a.active_profile.min(a.profiles.len() - 1);
+        for p in &mut a.profiles {
+            p.base.resize(SLOTS, Assignment::Default);
+            p.gshift.resize(SLOTS, Assignment::Default);
+            if p.dpi.levels.is_empty() {
+                p.dpi = DpiTable::default();
+            }
+        }
+    }
+
+    /// Add an imported app with a unique name. The second value is false when the
+    /// app's executable or folder clashed with an existing entry and was cleared
+    /// (so it will not activate by itself).
+    pub fn add_imported(&mut self, mut app: AppEntry) -> (usize, bool) {
+        let base = app.name.clone();
+        let mut n = 2;
+        while self.apps.iter().any(|a| a.name.eq_ignore_ascii_case(&app.name)) {
+            app.name = format!("{base} ({n})");
+            n += 1;
+        }
+        let clash = self.apps.iter().any(|a| {
+            let same_exe = matches!((&a.exe, &app.exe), (Some(x), Some(y)) if x.eq_ignore_ascii_case(y));
+            let same_dir = matches!((&a.dir, &app.dir), (Some(x), Some(y)) if path_key(x).trim_end_matches('\\') == path_key(y).trim_end_matches('\\'));
+            same_exe || same_dir
+        });
+        if clash {
+            app.exe = None;
+            app.dir = None;
+        }
+        self.apps.push(app);
+        (self.apps.len() - 1, !clash)
+    }
+
     /// Repair indices after edits/deserialization.
     pub fn sanitize(&mut self) {
         if self.apps.is_empty() {
             self.apps.push(AppEntry::desktop());
         }
         for a in &mut self.apps {
-            if a.profiles.is_empty() {
-                a.profiles.push(Profile::new("Default"));
-            }
-            a.active_profile = a.active_profile.min(a.profiles.len() - 1);
-            for p in &mut a.profiles {
-                p.base.resize(SLOTS, Assignment::Default);
-                p.gshift.resize(SLOTS, Assignment::Default);
-                if p.dpi.levels.is_empty() {
-                    p.dpi = DpiTable::default();
-                }
-            }
+            Self::sanitize_app(a);
         }
         self.current_app = self.current_app.min(self.apps.len() - 1);
         if let Some((a, p)) = self.persistent
@@ -772,6 +828,48 @@ mod tests {
 
     fn dir_app(name: &str, exe: Option<&str>, dir: Option<&str>) -> AppEntry {
         AppEntry { name: name.into(), exe: exe.map(Into::into), dir: dir.map(Into::into), ..AppEntry::desktop() }
+    }
+
+    fn sample_app() -> AppEntry {
+        let mut a = dir_app("Game", None, Some(r"C:\Games\G"));
+        a.ghub_id = Some("id-1".into());
+        a.profiles.push(Profile::new("Second"));
+        a.profiles[1].dpi.active = 800;
+        a.active_profile = 1;
+        a.macros.push(Macro { id: "m1".into(), name: "jump".into(), kind: MacroKind::Toggle, steps: vec![MacroStep { vk: 0x20, down: true, delay_ms: 5 }] });
+        a.profiles[0].base[3] = Assignment::Macro("m1".into());
+        a
+    }
+
+    #[test]
+    fn export_import_round_trip() {
+        let a = sample_app();
+        assert_eq!(import_app(&export_app(&a)).unwrap(), a);
+    }
+
+    #[test]
+    fn import_rejects_garbage() {
+        assert!(import_app("hello").is_err());
+        assert!(import_app("format = 2\n").is_err());
+        let mut a = sample_app();
+        a.profiles.clear();
+        assert!(import_app(&export_app(&a)).is_err());
+    }
+
+    #[test]
+    fn add_imported_makes_names_unique_and_unlinks_clashes() {
+        let mut c = Config::default();
+        let (i, linked) = c.add_imported(dir_app("Desktop", None, None));
+        assert_eq!((c.apps[i].name.as_str(), linked), ("Desktop (2)", true));
+        let (i, _) = c.add_imported(dir_app("Desktop", None, None));
+        assert_eq!(c.apps[i].name, "Desktop (3)");
+        c.apps.push(dir_app("CS", Some("cs2.exe"), Some(r"C:\Games\CS")));
+        let (i, linked) = c.add_imported(dir_app("Other", None, Some("c:/games/cs/")));
+        assert!(!linked);
+        assert_eq!((c.apps[i].exe.clone(), c.apps[i].dir.clone()), (None, None));
+        let (i, linked) = c.add_imported(dir_app("Other", Some("CS2.EXE"), None));
+        assert!(!linked);
+        assert_eq!(c.apps[i].name, "Other (2)");
     }
 
     #[test]

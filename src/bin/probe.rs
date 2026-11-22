@@ -33,6 +33,21 @@ fn main() {
         Some("takeover-test") => std::process::exit(takeover_test()),
         Some("release") => std::process::exit(release()),
         Some("games") => std::process::exit(games()),
+        Some("save-dialog") => println!("{:?}", win::save_file(0, "Export a game or app", "test.ghubx", "GHUB-X profile", "*.ghubx")),
+        Some("ghub-autostart") => println!("startup_approved(LGHUB) = {:?}", win::startup_approved("LGHUB")),
+        Some("export-app") => std::process::exit(export_app_cmd(&std::env::args().skip(2).collect::<Vec<_>>())),
+        Some("import-app") => std::process::exit(import_app_cmd(&std::env::args().skip(2).collect::<Vec<_>>())),
+        Some("cache-sync") => {
+            let n = ghubx::ui::assets::sync_cache();
+            let dir = ghubx::ui::assets::cache_dir();
+            println!("saved copy folder: {} ({n} file(s) written)", dir.display());
+            for name in ghubx::ui::assets::CACHE_NAMES {
+                match std::fs::metadata(dir.join(name)) {
+                    Ok(m) => println!("  {name}: {} bytes", m.len()),
+                    Err(_) => println!("  {name}: missing"),
+                }
+            }
+        }
         Some("pick-exe") => {
             println!("{:?}", win::pick_exe(0));
         }
@@ -44,6 +59,54 @@ fn main() {
             std::process::exit(64);
         }
     }
+}
+
+fn export_app_cmd(args: &[String]) -> i32 {
+    let (Some(idx), Some(file)) = (args.first().and_then(|a| a.parse::<usize>().ok()), args.get(1)) else {
+        eprintln!("usage: probe export-app <app index> <file>");
+        return 64;
+    };
+    let Some(cfg) = ghubx::profile::Config::load_existing() else {
+        eprintln!("no config at {}", ghubx::profile::Config::path().display());
+        return 1;
+    };
+    let Some(app) = cfg.apps.get(idx) else {
+        eprintln!("no app {idx} (config has {})", cfg.apps.len());
+        return 1;
+    };
+    let text = ghubx::profile::export_app(app);
+    match std::fs::write(file, &text) {
+        Ok(()) => {
+            println!("exported {:?} ({} profile(s), {} macro(s)) to {file} ({} bytes)", app.name, app.profiles.len(), app.macros.len(), text.len());
+            0
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            1
+        }
+    }
+}
+
+fn import_app_cmd(args: &[String]) -> i32 {
+    let Some(file) = args.first() else {
+        eprintln!("usage: probe import-app <file>");
+        return 64;
+    };
+    let app = match std::fs::read_to_string(file).map_err(|e| e.to_string()).and_then(|t| ghubx::profile::import_app(&t)) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("{e}");
+            return 1;
+        }
+    };
+    let mut cfg = ghubx::profile::Config::load_existing().unwrap_or_default();
+    let (profiles, macros, exe, dir, ghub_id) = (app.profiles.len(), app.macros.len(), app.exe.clone(), app.dir.clone(), app.ghub_id.clone());
+    let (idx, linked) = cfg.add_imported(app);
+    println!(
+        "would add as {:?} (index {idx}): {profiles} profile(s), {macros} macro(s), exe {exe:?}, dir {dir:?}, G HUB id {ghub_id:?}; linked to its game: {linked} (nothing was written)",
+        cfg.apps[idx].name
+    );
+    0
 }
 
 fn games() -> i32 {

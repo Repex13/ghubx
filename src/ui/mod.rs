@@ -137,7 +137,6 @@ pub struct GhubApp {
     pub(crate) meta: DeviceMeta,
     pub(crate) tex: Textures,
     art_rx: Option<Receiver<assets::Art>>,
-    pub(crate) fonts_from_ghub: bool,
     pub(crate) asg: assign::AsgState,
     pub(crate) sens: sens::SensState,
     pub(crate) light: light::LightState,
@@ -152,6 +151,7 @@ pub struct GhubApp {
     pub(crate) list_view: bool,
     pub(crate) import_armed: Option<Instant>,
     pub(crate) appear_hex: String,
+    pub(crate) ghub_autostart: Option<Option<bool>>,
 }
 
 impl GhubApp {
@@ -195,7 +195,6 @@ impl GhubApp {
             meta,
             tex,
             art_rx: Some(art_rx),
-            fonts_from_ghub: fonts.from_ghub,
             asg: Default::default(),
             sens: Default::default(),
             light: Default::default(),
@@ -210,6 +209,7 @@ impl GhubApp {
             list_view: false,
             import_armed: None,
             appear_hex: String::new(),
+            ghub_autostart: None,
         };
         if let Some(s) = shot {
             app.prepare_shot(&s.page);
@@ -228,7 +228,8 @@ impl GhubApp {
             "profiles" | "appdetail" | "addgame" => Route::Profiles,
             "settings" | "sleep" => Route::Settings(0),
             "appearance" => Route::Settings(1),
-            "diag" => Route::Settings(2),
+            "ghub" => Route::Settings(2),
+            "diag" => Route::Settings(3),
             _ => Route::Home,
         };
         self.asg.side = page == "assign2";

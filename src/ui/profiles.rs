@@ -16,8 +16,15 @@ enum GameScan {
     Done(Vec<Installed>),
 }
 
+/// Result of a file dialog running on a helper thread.
+enum ProfIo {
+    Message(String),
+    ImportText(String),
+}
+
 #[derive(Default)]
 pub struct ProfState {
+    io: Option<Receiver<ProfIo>>,
     scan: GameScan,
     pick: Option<Receiver<Option<String>>>,
     filter: usize,
@@ -39,6 +46,7 @@ impl ProfState {
 
 impl GhubApp {
     pub(crate) fn profiles_page(&mut self, ui: &mut Ui, win: Rect) {
+        self.poll_io(ui);
         let cfg = self.cfg();
         let top = win.top() + 88.0;
         let col = win.left() + 338.0;
@@ -123,6 +131,22 @@ impl GhubApp {
             self.prof.adding = Some(self.prof.adding.take().map(|_| None).unwrap_or(Some(String::new()))).flatten();
         }
 
+        let ib = Rect::from_min_size(pos2(ab.right() + 12.0, ab.top()), vec2(80.0, 48.0));
+        if dark_button(ui, ib, "IMPORT", "app-import", self.prof.io.is_none()).clicked() && self.prof.io.is_none() {
+            let owner = crate::win::main_window_handle();
+            let (tx, rx) = crossbeam_channel::bounded(1);
+            std::thread::spawn(move || {
+                let msg = match crate::win::pick_file(owner, "Import a game or app", "GHUB-X profile", "*.ghubx") {
+                    Some(path) => match std::fs::read_to_string(&path) {
+                        Ok(t) => ProfIo::ImportText(t),
+                        Err(e) => ProfIo::Message(format!("Couldn't read the file: {e}")),
+                    },
+                    None => ProfIo::Message(String::new()),
+                };
+                let _ = tx.send(msg);
+            });
+            self.prof.io = Some(rx);
+        }
         let mut y = sb.bottom() + 24.0;
         if self.prof.adding.is_none() {
             self.prof.scan = GameScan::Idle;
@@ -201,6 +225,33 @@ impl GhubApp {
         } else {
             let letter: String = a.name.chars().next().map(|c| c.to_uppercase().collect()).unwrap_or_default();
             text(ui, img.center(), Align2::CENTER_CENTER, &letter, Ts::new(Fam::Bold, 72.0, Color32::from_white_alpha(200)).ls(0.0));
+        }
+    }
+
+    fn poll_io(&mut self, ui: &Ui) {
+        let Some(rx) = &self.prof.io else { return };
+        match rx.try_recv() {
+            Ok(res) => {
+                self.prof.io = None;
+                match res {
+                    ProfIo::Message(m) if m.is_empty() => {}
+                    ProfIo::Message(m) => self.say(m),
+                    ProfIo::ImportText(t) => match import_app(&t) {
+                        Ok(app) => {
+                            let name = app.name.clone();
+                            let mut linked = true;
+                            self.edit(|c| linked = c.add_imported(app).1);
+                            if linked {
+                                self.say(format!("Imported {name}"));
+                            } else {
+                                self.say(format!("Imported {name} \u{2014} not linked to a game because another entry already uses that folder"));
+                            }
+                        }
+                        Err(e) => self.say(e),
+                    },
+                }
+            }
+            Err(_) => ui.ctx().request_repaint_after(std::time::Duration::from_millis(100)),
         }
     }
 
@@ -363,7 +414,25 @@ impl GhubApp {
         if app.ghub_id.is_some() {
             text(ui, pos2(sub_r.right() + 16.0, main.top() + 102.0), Align2::LEFT_CENTER, "G HUB game profile", Ts::new(Fam::Reg, 12.0, pal().muted).ls(0.4));
         }
-        if app.exe.is_some() {
+        let export = dark_button(ui, Rect::from_min_size(pos2(main.right() - 96.0, main.top() + 14.0), vec2(96.0, 28.0)), "EXPORT", "app-export", self.prof.io.is_none());
+        if export.clicked() && self.prof.io.is_none() {
+            let owner = crate::win::main_window_handle();
+            let (tx, rx) = crossbeam_channel::bounded(1);
+            let (name, text) = (app.name.clone(), export_app(&app));
+            std::thread::spawn(move || {
+                let file = format!("{}.ghubx", name.replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_"));
+                let msg = match crate::win::save_file(owner, "Export a game or app", &file, "GHUB-X profile", "*.ghubx") {
+                    Some(path) => match std::fs::write(&path, text) {
+                        Ok(()) => format!("Exported {name}"),
+                        Err(e) => format!("Couldn't write the file: {e}"),
+                    },
+                    None => String::new(),
+                };
+                let _ = tx.send(ProfIo::Message(msg));
+            });
+            self.prof.io = Some(rx);
+        }
+        if app.exe.is_some() || app.dir.is_some() {
             text(ui, pos2(main.right() - 50.0, main.top() + 76.0), Align2::RIGHT_CENTER, "ENABLED", Ts::new(Fam::Bold, 12.0, pal().text));
             if switch(ui, pos2(main.right() - 18.0, main.top() + 76.0), app.enabled, pal().primary, "app-enabled").clicked() {
                 self.edit(|c| c.apps[ai].enabled = !c.apps[ai].enabled);

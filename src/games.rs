@@ -113,11 +113,7 @@ impl GameDb {
 
     /// G HUB's `applications.json`, from the install or any depot.
     pub fn load() -> Option<Self> {
-        let mut paths = vec![PathBuf::from(r"C:\Program Files\LGHUB\data\applications.json")];
-        if let Ok(depots) = std::fs::read_dir(r"C:\ProgramData\LGHUB\depots") {
-            paths.extend(depots.flatten().map(|d| d.path().join(r"core\LGHUB\data\applications.json")));
-        }
-        paths.iter().find_map(|p| Self::parse(&std::fs::read_to_string(p).ok()?))
+        crate::ui::assets::applications_candidates().iter().find_map(|(p, _)| Self::parse(&std::fs::read_to_string(p).ok()?))
     }
 
     pub fn by_id(&self, id: &str) -> Option<&Game> {

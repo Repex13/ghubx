@@ -80,6 +80,159 @@ pub struct FontSet {
     pub defs: FontDefinitions,
 }
 
+/// Where an asset came from: G HUB's install, GHUB-X's saved copy, or built-in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Source {
+    Install,
+    Saved,
+    Fallback,
+}
+
+impl Source {
+    pub fn label(self) -> &'static str {
+        match self {
+            Source::Install => "G HUB install",
+            Source::Saved => "Saved copy",
+            Source::Fallback => "Built-in fallback",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum SourceKind {
+    Fonts,
+    Images,
+    Games,
+}
+
+/// File names in the saved copy.
+pub const CACHE_NAMES: [&str; 9] = [
+    "font-reg.otf",
+    "font-bold.otf",
+    "font-light.otf",
+    "font-pan.otf",
+    "font-panb.otf",
+    "front.png",
+    "side.png",
+    "metadata.json",
+    "applications.json",
+];
+
+/// `GHUBX_NO_GHUB=1` makes every loader behave as if G HUB were not installed.
+pub fn no_ghub() -> bool {
+    std::env::var("GHUBX_NO_GHUB").is_ok_and(|v| v == "1")
+}
+
+/// Saved copy of G HUB's assets (`GHUBX_CACHE_DIR` overrides the default).
+pub fn cache_dir() -> PathBuf {
+    match std::env::var_os("GHUBX_CACHE_DIR") {
+        Some(d) => PathBuf::from(d),
+        None => PathBuf::from(std::env::var("LOCALAPPDATA").unwrap_or_else(|_| ".".into())).join("ghubx").join("cache"),
+    }
+}
+
+fn cached(name: &str) -> Option<Vec<u8>> {
+    std::fs::read(cache_dir().join(name)).ok().filter(|b| !b.is_empty())
+}
+
+/// `applications.json` candidates, install first, then the saved copy.
+pub fn applications_candidates() -> Vec<(PathBuf, Source)> {
+    let mut v = Vec::new();
+    if !no_ghub() {
+        v.push((PathBuf::from(r"C:\Program Files\LGHUB\data\applications.json"), Source::Install));
+        if let Ok(depots) = std::fs::read_dir(DEPOTS) {
+            v.extend(depots.flatten().map(|d| (d.path().join(r"core\LGHUB\data\applications.json"), Source::Install)));
+        }
+    }
+    v.push((cache_dir().join("applications.json"), Source::Saved));
+    v
+}
+
+/// Where fonts, device images and the game list currently come from.
+pub fn source(kind: SourceKind) -> Source {
+    static SOURCES: std::sync::OnceLock<[Source; 3]> = std::sync::OnceLock::new();
+    let all = SOURCES.get_or_init(|| {
+        let (mut asar, faces) = open_faces();
+        let fonts = if faces.get(&("BrownPro-Regular".to_string(), 400)).and_then(|p| asar.as_mut()?.read(p)).is_some() {
+            Source::Install
+        } else if cached("font-reg.otf").is_some() {
+            Source::Saved
+        } else {
+            Source::Fallback
+        };
+        let images = if find_depot().is_some_and(|d| d.join("images").join("device").join("front_hero.png").exists()) {
+            Source::Install
+        } else if cached("front.png").is_some() {
+            Source::Saved
+        } else {
+            Source::Fallback
+        };
+        let games = applications_candidates().into_iter().find(|(p, _)| p.exists()).map_or(Source::Fallback, |(_, s)| s);
+        [fonts, images, games]
+    });
+    all[kind as usize]
+}
+
+fn write_if_changed(name: &str, bytes: &[u8]) -> bool {
+    let dir = cache_dir();
+    let target = dir.join(name);
+    if std::fs::metadata(&target).is_ok_and(|m| m.len() == bytes.len() as u64) || std::fs::create_dir_all(&dir).is_err() {
+        return false;
+    }
+    let tmp = dir.join(format!("{name}.tmp"));
+    std::fs::write(&tmp, bytes).is_ok() && std::fs::rename(&tmp, &target).is_ok()
+}
+
+static SYNCING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CacheStatus {
+    UpToDate,
+    Updating,
+    Unavailable,
+}
+
+pub fn cache_status() -> CacheStatus {
+    if SYNCING.load(std::sync::atomic::Ordering::Relaxed) {
+        return CacheStatus::Updating;
+    }
+    let have_cache = cached("font-reg.otf").is_some() || cached("front.png").is_some() || cached("applications.json").is_some();
+    if have_cache || (!no_ghub() && Path::new(ASAR).exists()) { CacheStatus::UpToDate } else { CacheStatus::Unavailable }
+}
+
+/// Copy what the loaders read from G HUB's install into the saved copy
+/// (missing or different size). Returns the number of files written.
+pub fn sync_cache() -> usize {
+    if no_ghub() {
+        return 0;
+    }
+    SYNCING.store(true, std::sync::atomic::Ordering::Relaxed);
+    let n = sync_cache_inner();
+    SYNCING.store(false, std::sync::atomic::Ordering::Relaxed);
+    n
+}
+
+fn sync_cache_inner() -> usize {
+    let mut n = 0;
+    let (mut asar, faces) = open_faces();
+    for (key, fam, weight, _) in FONT_ROLES {
+        if let Some(b) = faces.get(&(fam.to_string(), weight)).and_then(|p| asar.as_mut()?.read(p)) {
+            n += write_if_changed(&format!("font-{key}.otf"), &b) as usize;
+        }
+    }
+    if let Some(depot) = find_depot() {
+        for (src, name) in [(depot.join("metadata.json"), "metadata.json"), (depot.join("images").join("device").join("front_hero.png"), "front.png"), (depot.join("images").join("device").join("side_hero.png"), "side.png")] {
+            if let Ok(b) = std::fs::read(src) {
+                n += write_if_changed(name, &b) as usize;
+            }
+        }
+    }
+    if let Some(b) = applications_candidates().into_iter().filter(|(_, s)| *s == Source::Install).find_map(|(p, _)| std::fs::read(p).ok()) {
+        n += write_if_changed("applications.json", &b) as usize;
+    }
+    n
+}
+
 const FONT_ROLES: [(&str, &str, u32, &str); 5] = [
     ("reg", "BrownPro-Regular", 400, "segoeui.ttf"),
     ("bold", "BrownPro-Bold", 700, "segoeuib.ttf"),
@@ -93,6 +246,9 @@ fn windows_fonts_dir() -> PathBuf {
 }
 
 fn open_faces() -> (Option<Asar>, HashMap<(String, u32), String>) {
+    if no_ghub() {
+        return (None, HashMap::new());
+    }
     let mut asar = Asar::open(ASAR);
     let faces = asar
         .as_mut()
@@ -102,14 +258,17 @@ fn open_faces() -> (Option<Asar>, HashMap<(String, u32), String>) {
     (asar, faces)
 }
 
-/// Font bytes for a role: G HUB's Brown Pro from the asar, else the Windows fallback.
-/// The bool says whether they came from G HUB.
+/// Font bytes for a role: G HUB's Brown Pro from the asar, else the saved copy,
+/// else the Windows fallback. The bool says whether they are Brown Pro.
 fn role_bytes(asar: &mut Option<Asar>, faces: &HashMap<(String, u32), String>, win_fonts: &Path, role: (&str, &str, u32, &str)) -> (Option<Vec<u8>>, bool) {
-    let (_, fam, weight, fallback) = role;
-    match faces.get(&(fam.to_string(), weight)).and_then(|p| asar.as_mut()?.read(p)) {
-        Some(b) => (Some(b), true),
-        None => (std::fs::read(win_fonts.join(fallback)).or_else(|_| std::fs::read(win_fonts.join("segoeui.ttf"))).ok(), false),
+    let (key, fam, weight, fallback) = role;
+    if let Some(b) = faces.get(&(fam.to_string(), weight)).and_then(|p| asar.as_mut()?.read(p)) {
+        return (Some(b), true);
     }
+    if let Some(b) = cached(&format!("font-{key}.otf")) {
+        return (Some(b), true);
+    }
+    (std::fs::read(win_fonts.join(fallback)).or_else(|_| std::fs::read(win_fonts.join("segoeui.ttf"))).ok(), false)
 }
 
 /// The bytes `load_fonts` uses for a role key (`reg`, `bold`, ...).
@@ -294,12 +453,16 @@ fn view_from(m: &ImageMeta) -> View {
 }
 
 pub fn find_depot() -> Option<PathBuf> {
+    if no_ghub() {
+        return None;
+    }
     std::fs::read_dir(DEPOTS).ok()?.flatten().map(|e| e.path().join("g502_hero")).find(|p| p.join("metadata.json").exists())
 }
 
 pub fn load_meta(depot: Option<&Path>) -> DeviceMeta {
     let parsed = depot
         .and_then(|d| std::fs::read(d.join("metadata.json")).ok())
+        .or_else(|| cached("metadata.json"))
         .and_then(|b| serde_json::from_slice::<MetaFile>(&b).ok());
     let mut meta = DeviceMeta::default();
     if let Some(m) = parsed {
@@ -321,15 +484,19 @@ pub struct Art {
 }
 
 pub fn decode_art(depot: Option<PathBuf>) -> Art {
-    let load = |name: &str| -> Option<ColorImage> {
-        let path = depot.as_ref()?.join("images").join("device").join(name);
-        let img = image::open(path).ok()?.to_rgba8();
+    let load = |name: &str, saved: &str| -> Option<ColorImage> {
+        let installed = depot.as_ref().and_then(|d| image::open(d.join("images").join("device").join(name)).ok());
+        let img = match installed {
+            Some(i) => i,
+            None => image::load_from_memory(&cached(saved)?).ok()?,
+        }
+        .to_rgba8();
         let h = 1100u32.min(img.height());
         let w = (img.width() as f32 * h as f32 / img.height() as f32).round() as u32;
         let small = image::imageops::resize(&img, w, h, image::imageops::FilterType::Triangle);
         Some(ColorImage::from_rgba_unmultiplied([w as usize, h as usize], small.as_raw()))
     };
-    Art { front: load("front_hero.png"), side: load("side_hero.png") }
+    Art { front: load("front_hero.png", "front.png"), side: load("side_hero.png", "side.png") }
 }
 
 pub const TEX_OPTS: TextureOptions = TextureOptions {
@@ -359,4 +526,17 @@ pub struct Textures {
     pub front: Option<TextureHandle>,
     pub side: Option<TextureHandle>,
     pub glow: TextureHandle,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cache_names_are_stable() {
+        assert_eq!(
+            CACHE_NAMES,
+            ["font-reg.otf", "font-bold.otf", "font-light.otf", "font-pan.otf", "font-panb.otf", "front.png", "side.png", "metadata.json", "applications.json"]
+        );
+    }
 }

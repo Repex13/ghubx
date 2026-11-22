@@ -13,6 +13,36 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+/// Where the engine sends synthesized input (the real thing, or a test sink).
+pub trait Input: Send + Sync {
+    /// Keyboard keys and mouse-button VKs (0x01, 0x02, 0x04, 0x05, 0x06).
+    fn key(&self, vk: u16, down: bool);
+    fn mouse(&self, btn: u8, down: bool);
+    fn mouse_move(&self, dx: i32, dy: i32);
+    fn wheel(&self, delta: i32);
+    fn hwheel(&self, delta: i32);
+}
+
+pub struct RealInput;
+
+impl Input for RealInput {
+    fn key(&self, vk: u16, down: bool) {
+        win::key(vk, down);
+    }
+    fn mouse(&self, btn: u8, down: bool) {
+        win::mouse(btn, down);
+    }
+    fn mouse_move(&self, dx: i32, dy: i32) {
+        win::mouse_move(dx, dy);
+    }
+    fn wheel(&self, delta: i32) {
+        win::wheel(delta);
+    }
+    fn hwheel(&self, delta: i32) {
+        win::hwheel(delta);
+    }
+}
+
 static OBSERVER: AtomicBool = AtomicBool::new(false);
 
 /// Observer mode (`--dev`, `--shot`): never take control or touch G HUB.
@@ -107,6 +137,7 @@ pub struct Engine {
     pub(crate) osd: Box<dyn Fn(OsdKind) + Send>,
     pub(crate) persist: bool,
     pub(crate) flash_until: Option<Instant>,
+    pub(crate) input: Arc<dyn Input>,
 }
 
 impl Engine {
@@ -126,6 +157,7 @@ impl Engine {
             osd: Box::new(osd::show),
             persist: true,
             flash_until: None,
+            input: Arc::new(RealInput),
         }
     }
 
@@ -151,14 +183,7 @@ impl Engine {
                             self.send_status();
                         }
                     }
-                    Ok(EngineMsg::ControlLost) => {
-                        if self.applied.is_some() {
-                            self.st.ghub_running = win::ghub_running();
-                            self.drop_control_state();
-                            self.retry_at = Some(Instant::now() + Duration::from_secs(1));
-                            self.send_status();
-                        }
-                    }
+                    Ok(EngineMsg::ControlLost) => self.on_control_lost(),
                     Ok(EngineMsg::ConfigChanged) => self.reconcile(),
                     Ok(EngineMsg::CloseGhub | EngineMsg::StartGhub) if observer() => self.log("G HUB control ignored in dev mode".into()),
                     Ok(EngineMsg::CloseGhub) => {
@@ -188,7 +213,8 @@ impl Engine {
                     }
                     Ok(EngineMsg::TestPerfect180 { counts }) => {
                         let e = self.cfg.lock().unwrap().extras.clone();
-                        std::thread::spawn(move || perfect_180(counts, e.p180_ms, e.p180_steps));
+                        let input = self.input.clone();
+                        std::thread::spawn(move || perfect_180(&*input, counts, e.p180_ms, e.p180_steps));
                     }
                     Ok(EngineMsg::Quit) | Err(_) => {
                         self.release_device();
@@ -221,6 +247,15 @@ impl Engine {
                     }
                 }
             }
+        }
+    }
+
+    fn on_control_lost(&mut self) {
+        if self.applied.is_some() {
+            self.st.ghub_running = win::ghub_running();
+            self.drop_control_state();
+            self.retry_at = Some(Instant::now() + Duration::from_secs(1));
+            self.send_status();
         }
     }
 
@@ -371,13 +406,13 @@ impl Engine {
         match h.a {
             Assignment::Mouse(m) if !h.passthrough => {
                 if let Some(b) = click_button(m) {
-                    win::mouse(b, false);
+                    self.input.mouse(b, false);
                 }
             }
             Assignment::Key(k) | Assignment::Shortcut { combo: k, .. } => {
-                win::key(k.vk, false);
+                self.input.key(k.vk, false);
                 for vk in mod_vks(k.mods).into_iter().rev() {
-                    win::key(vk, false);
+                    self.input.key(vk, false);
                 }
             }
             Assignment::System(SystemFn::DpiShift) => {
@@ -410,10 +445,11 @@ impl Engine {
             Assignment::Mouse(m) => match m {
                 _ if passthrough => None,
                 MouseFn::DoubleClick => {
-                    std::thread::spawn(|| {
+                    let input = self.input.clone();
+                    std::thread::spawn(move || {
                         for _ in 0..2 {
-                            win::mouse(0, true);
-                            win::mouse(0, false);
+                            input.mouse(0, true);
+                            input.mouse(0, false);
                             std::thread::sleep(Duration::from_millis(30));
                         }
                     });
@@ -423,12 +459,13 @@ impl Engine {
                     let m = *m;
                     let stop = Arc::new(AtomicBool::new(false));
                     let s = stop.clone();
+                    let input = self.input.clone();
                     std::thread::spawn(move || {
                         let notch = || match m {
-                            MouseFn::WheelUp => win::wheel(120),
-                            MouseFn::WheelDown => win::wheel(-120),
-                            MouseFn::WheelLeft => win::hwheel(-120),
-                            _ => win::hwheel(120),
+                            MouseFn::WheelUp => input.wheel(120),
+                            MouseFn::WheelDown => input.wheel(-120),
+                            MouseFn::WheelLeft => input.hwheel(-120),
+                            _ => input.hwheel(120),
                         };
                         notch();
                         std::thread::sleep(Duration::from_millis(350));
@@ -441,16 +478,16 @@ impl Engine {
                 }
                 _ => {
                     if let Some(b) = click_button(*m) {
-                        win::mouse(b, true);
+                        self.input.mouse(b, true);
                     }
                     None
                 }
             },
             Assignment::Key(k) | Assignment::Shortcut { combo: k, .. } => {
                 for vk in mod_vks(k.mods) {
-                    win::key(vk, true);
+                    self.input.key(vk, true);
                 }
-                win::key(k.vk, true);
+                self.input.key(k.vk, true);
                 None
             }
             Assignment::System(s) => {
@@ -461,13 +498,15 @@ impl Engine {
                 let m = macros.iter().find(|m| &m.id == id)?.clone();
                 match m.kind {
                     MacroKind::NoRepeat => {
-                        std::thread::spawn(move || play(&m.steps, None));
+                        let input = self.input.clone();
+                        std::thread::spawn(move || play(&*input, &m.steps, None));
                         None
                     }
                     MacroKind::RepeatWhileHolding => {
                         let stop = Arc::new(AtomicBool::new(false));
                         let s = stop.clone();
-                        std::thread::spawn(move || play(&m.steps, Some(&s)));
+                        let input = self.input.clone();
+                        std::thread::spawn(move || play(&*input, &m.steps, Some(&s)));
                         Some(stop)
                     }
                     MacroKind::Toggle => {
@@ -476,7 +515,8 @@ impl Engine {
                         } else {
                             let stop = Arc::new(AtomicBool::new(false));
                             self.toggles.insert(m.id.clone(), stop.clone());
-                            std::thread::spawn(move || play(&m.steps, Some(&stop)));
+                            let input = self.input.clone();
+                            std::thread::spawn(move || play(&*input, &m.steps, Some(&stop)));
                         }
                         None
                     }
@@ -490,7 +530,8 @@ impl Engine {
                 let counts = turn_counts(turn.counts, turn.angle);
                 let c = if *left { -counts } else { counts };
                 let (ms, steps) = (extras.p180_ms, extras.p180_steps);
-                std::thread::spawn(move || perfect_180(c, ms, steps));
+                let input = self.input.clone();
+                std::thread::spawn(move || perfect_180(&*input, c, ms, steps));
                 None
             }
             Assignment::ToggleScrollAccel => {
@@ -620,7 +661,7 @@ fn click_button(m: MouseFn) -> Option<u8> {
 
 /// Play macro steps once, or loop until `stop` is set. Keys still held when
 /// stopped are released.
-fn play(steps: &[MacroStep], stop: Option<&AtomicBool>) {
+fn play(input: &dyn Input, steps: &[MacroStep], stop: Option<&AtomicBool>) {
     let mut down: Vec<u16> = Vec::new();
     loop {
         let mut slept = 0;
@@ -632,7 +673,7 @@ fn play(steps: &[MacroStep], stop: Option<&AtomicBool>) {
             if s.vk == 0 {
                 continue; // delay-only step
             }
-            win::key(s.vk, s.down);
+            input.key(s.vk, s.down);
             if s.down {
                 down.push(s.vk);
             } else {
@@ -649,20 +690,20 @@ fn play(steps: &[MacroStep], stop: Option<&AtomicBool>) {
         }
     }
     for vk in down {
-        win::key(vk, false);
+        input.key(vk, false);
     }
 }
 
 /// Basilisk V4 "Perfect 180": inject `counts` of horizontal motion spread
 /// evenly over `steps` reports across `ms` milliseconds.
-pub fn perfect_180(counts: i32, ms: u16, steps: u8) {
+pub fn perfect_180(input: &dyn Input, counts: i32, ms: u16, steps: u8) {
     // keep each report under ~1000 counts so games that clamp per-report motion keep up
     let steps = (steps.max(1) as i64).max((counts.unsigned_abs() as u64).div_ceil(1000) as i64).min(200);
     let mut sent = 0i64;
     let gap = ms as f64 / steps as f64;
     for i in 1..=steps {
         let target = counts as i64 * i / steps;
-        win::mouse_move((target - sent) as i32, 0);
+        input.mouse_move((target - sent) as i32, 0);
         sent = target;
         if gap >= 1.0 && i < steps {
             std::thread::sleep(Duration::from_secs_f64(gap / 1000.0));
@@ -679,7 +720,49 @@ mod tests {
     /// The observer flag is process-wide, so engine tests run one at a time.
     static SERIAL: Mutex<()> = Mutex::new(());
 
+    #[derive(Clone, Debug, PartialEq)]
+    enum Ev {
+        Key(u16, bool),
+        Mouse(u8, bool),
+        Move(i32, i32),
+        Wheel(i32),
+        HWheel(i32),
+    }
+
+    #[derive(Default)]
+    struct Rec {
+        ev: Mutex<Vec<(Instant, Ev)>>,
+    }
+
+    impl Rec {
+        fn push(&self, e: Ev) {
+            self.ev.lock().unwrap().push((Instant::now(), e));
+        }
+        fn events(&self) -> Vec<Ev> {
+            self.ev.lock().unwrap().iter().map(|(_, e)| e.clone()).collect()
+        }
+    }
+
+    impl Input for Rec {
+        fn key(&self, vk: u16, down: bool) {
+            self.push(Ev::Key(vk, down));
+        }
+        fn mouse(&self, btn: u8, down: bool) {
+            self.push(Ev::Mouse(btn, down));
+        }
+        fn mouse_move(&self, dx: i32, dy: i32) {
+            self.push(Ev::Move(dx, dy));
+        }
+        fn wheel(&self, delta: i32) {
+            self.push(Ev::Wheel(delta));
+        }
+        fn hwheel(&self, delta: i32) {
+            self.push(Ev::HWheel(delta));
+        }
+    }
+
     struct Rig {
+        rec: Arc<Rec>,
         e: Engine,
         dev_rx: Receiver<DevCmd>,
         osd: Arc<Mutex<Vec<OsdKind>>>,
@@ -708,9 +791,11 @@ mod tests {
         let sink = osd.clone();
         e.osd = Box::new(move |k| sink.lock().unwrap().push(k));
         e.persist = false;
+        let rec = Arc::new(Rec::default());
+        e.input = rec.clone();
         e.st.connected = true;
         e.st.ghub_running = false;
-        Rig { e, dev_rx, osd, cfg, _ui_rx: ui_rx, _guard: guard }
+        Rig { rec, e, dev_rx, osd, cfg, _ui_rx: ui_rx, _guard: guard }
     }
 
     impl Rig {
@@ -727,6 +812,177 @@ mod tests {
             self.e.on_mask(1 << slot);
             self.e.on_mask(0);
         }
+    }
+
+    fn pause(ms: u64) {
+        std::thread::sleep(Duration::from_millis(ms));
+    }
+
+    fn base(c: &mut Config, slot: usize, a: Assignment) {
+        c.apps[0].profiles[0].base[slot] = a;
+    }
+
+    fn macro_of(id: &str, kind: MacroKind, steps: &[(u16, bool, u32)]) -> Macro {
+        Macro { id: id.into(), name: id.into(), kind, steps: steps.iter().map(|&(vk, down, delay_ms)| MacroStep { vk, down, delay_ms }).collect() }
+    }
+
+    fn moves(r: &Rig) -> Vec<(i32, i32)> {
+        r.rec.events().into_iter().filter_map(|e| if let Ev::Move(x, y) = e { Some((x, y)) } else { None }).collect()
+    }
+
+    #[test]
+    fn key_assignment_presses_and_releases() {
+        let mut r = rig(|c| base(c, 5, Assignment::Key(KeyCombo { vk: 0x53, mods: 0 })));
+        r.take_control();
+        r.e.on_mask(1 << 5);
+        assert_eq!(r.rec.events(), vec![Ev::Key(0x53, true)]);
+        r.e.on_mask(0);
+        assert_eq!(r.rec.events(), vec![Ev::Key(0x53, true), Ev::Key(0x53, false)]);
+    }
+
+    #[test]
+    fn shortcut_orders_modifiers() {
+        let combo = KeyCombo { vk: 0x1B, mods: MOD_CTRL | MOD_SHIFT };
+        let mut r = rig(|c| base(c, 5, Assignment::Shortcut { name: "x".into(), combo }));
+        r.take_control();
+        r.e.on_mask(1 << 5);
+        assert_eq!(r.rec.events(), vec![Ev::Key(0xA2, true), Ev::Key(0xA0, true), Ev::Key(0x1B, true)]);
+        r.e.on_mask(0);
+        assert_eq!(r.rec.events()[3..], [Ev::Key(0x1B, false), Ev::Key(0xA0, false), Ev::Key(0xA2, false)]);
+    }
+
+    #[test]
+    fn native_clicks_pass_through() {
+        let mut r = rig(|_| {});
+        r.take_control();
+        r.press(0);
+        assert!(r.rec.events().is_empty());
+        assert!(r.cmds().is_empty());
+    }
+
+    fn alternates_down_up(ev: &[Ev], vk: u16) -> usize {
+        for (i, e) in ev.iter().enumerate() {
+            assert_eq!(*e, Ev::Key(vk, i % 2 == 0), "event {i} in {ev:?}");
+        }
+        ev.len() / 2
+    }
+
+    #[test]
+    fn repeat_macro_runs_while_held_and_releases_keys() {
+        let m = macro_of("jump", MacroKind::RepeatWhileHolding, &[(0x20, true, 0), (0x20, false, 50), (0, false, 50)]);
+        let mut r = rig(|c| {
+            c.apps[0].macros.push(m);
+            base(c, 3, Assignment::Macro("jump".into()));
+        });
+        r.take_control();
+        r.e.on_mask(1 << 3);
+        pause(280);
+        r.e.on_mask(0);
+        pause(250);
+        let ev = r.rec.events();
+        assert!(alternates_down_up(&ev, 0x20) >= 2, "{ev:?}");
+        assert_eq!(ev.last(), Some(&Ev::Key(0x20, false)));
+        pause(200);
+        assert_eq!(r.rec.events().len(), ev.len());
+    }
+
+    #[test]
+    fn toggle_macro_starts_and_stops() {
+        let m = macro_of("ping", MacroKind::Toggle, &[(0x04, true, 0), (0x04, false, 50), (0, false, 50)]);
+        let mut r = rig(|c| {
+            c.apps[0].macros.push(m);
+            base(c, 3, Assignment::Macro("ping".into()));
+        });
+        r.take_control();
+        r.press(3);
+        pause(160);
+        r.press(3);
+        pause(250);
+        let ev = r.rec.events();
+        assert!(alternates_down_up(&ev, 0x04) >= 1, "{ev:?}");
+        assert_eq!(ev.last(), Some(&Ev::Key(0x04, false)));
+        pause(200);
+        assert_eq!(r.rec.events().len(), ev.len());
+    }
+
+    #[test]
+    fn tilt_scroll_repeats_while_held() {
+        let mut r = rig(|_| {});
+        r.take_control();
+        r.e.on_mask(1 << 9);
+        pause(20);
+        assert_eq!(r.rec.events(), vec![Ev::HWheel(120)]);
+        pause(500);
+        assert!(r.rec.events().len() >= 3, "{:?}", r.rec.events());
+        r.e.on_mask(0);
+        pause(150);
+        let n = r.rec.events().len();
+        pause(200);
+        assert_eq!(r.rec.events().len(), n);
+    }
+
+    #[test]
+    fn gshift_layer_switches_assignment() {
+        let mut r = rig(|c| {
+            base(c, 5, Assignment::System(SystemFn::GShift));
+            base(c, 3, Assignment::Key(KeyCombo { vk: 0x42, mods: 0 }));
+            c.apps[0].profiles[0].gshift[3] = Assignment::Key(KeyCombo { vk: 0x41, mods: 0 });
+        });
+        r.take_control();
+        r.e.on_mask(1 << 5);
+        r.e.on_mask((1 << 5) | (1 << 3));
+        assert_eq!(r.rec.events(), vec![Ev::Key(0x41, true)]);
+        r.e.on_mask(1 << 5);
+        assert_eq!(r.rec.events().last(), Some(&Ev::Key(0x41, false)));
+        r.e.on_mask(0);
+        r.e.on_mask(1 << 3);
+        assert_eq!(r.rec.events().last(), Some(&Ev::Key(0x42, true)));
+    }
+
+    #[test]
+    fn perfect_180_injects_exact_counts() {
+        for (left, angle, want) in [(false, 180u16, 8182), (true, 180, -8182), (false, 90, 4091)] {
+            let mut r = rig(|c| {
+                base(c, 5, Assignment::Perfect180 { left });
+                c.extras.p180_counts = 8182;
+                c.extras.p180_angle = angle;
+                c.extras.p180_ms = 20;
+                c.extras.p180_steps = 12;
+            });
+            r.take_control();
+            r.press(5);
+            pause(200);
+            let m = moves(&r);
+            assert_eq!(m.iter().map(|m| m.0).sum::<i32>(), want, "{m:?}");
+            assert!(m.iter().all(|m| m.0.abs() <= 1000 && m.1 == 0), "{m:?}");
+        }
+    }
+
+    #[test]
+    fn dpi_shift_applies_while_held() {
+        let mut r = rig(|_| {});
+        r.take_control();
+        r.e.on_mask(1 << 5);
+        assert!(r.cmds().iter().any(|c| matches!(c, DevCmd::SetDpi(400))));
+        r.e.on_mask(0);
+        assert!(r.cmds().iter().any(|c| matches!(c, DevCmd::SetDpi(600))));
+    }
+
+    #[test]
+    fn held_keys_are_released_when_control_is_lost() {
+        let mut r = rig(|c| base(c, 5, Assignment::Key(KeyCombo { vk: 0x53, mods: 0 })));
+        r.take_control();
+        r.e.on_mask(1 << 5);
+        r.e.on_control_lost();
+        assert_eq!(r.rec.events().last(), Some(&Ev::Key(0x53, false)));
+    }
+
+    #[test]
+    fn disabled_button_does_nothing() {
+        let mut r = rig(|c| base(c, 3, Assignment::Disabled));
+        r.take_control();
+        r.press(3);
+        assert!(r.rec.events().is_empty());
     }
 
     fn fixed_led(color: [u8; 3]) -> [u8; 11] {

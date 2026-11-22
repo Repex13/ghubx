@@ -6,7 +6,7 @@ use super::{GhubApp, Overlay, Route};
 use crate::engine::EngineMsg;
 use egui::{Align2, Color32, CornerRadius, Rect, Stroke, StrokeKind, Ui, pos2, vec2};
 
-const NAV: [&str; 4] = ["General", "Appearance", "Diagnostics", "About"];
+const NAV: [&str; 5] = ["General", "Appearance", "G HUB", "Diagnostics", "About"];
 const ACCENTS: [[u8; 3]; 8] = [
     [0x11, 0x96, 0xff],
     [0x44, 0xd6, 0x2c],
@@ -20,6 +20,9 @@ const ACCENTS: [[u8; 3]; 8] = [
 
 impl GhubApp {
     pub(crate) fn settings_page(&mut self, ui: &mut Ui, win: Rect, tab: usize) {
+        if tab != 2 {
+            self.ghub_autostart = None;
+        }
         let top = win.top() + 88.0;
         let col = win.left() + 300.0;
         ui.painter().line_segment([pos2(col, top + 1.0), pos2(col, win.bottom())], Stroke::new(1.0, pal().divider));
@@ -42,7 +45,11 @@ impl GhubApp {
                         ui.painter().circle_filled(ic + d, 1.7, c);
                     }
                 }
-                2 => chip(ui.painter(), ic, c),
+                2 => {
+                    ui.painter().rect_stroke(Rect::from_center_size(ic, vec2(18.0, 13.0)), CornerRadius::same(2), Stroke::new(1.5, c), StrokeKind::Inside);
+                    ui.painter().line_segment([ic + vec2(-5.0, 10.0), ic + vec2(5.0, 10.0)], Stroke::new(1.5, c));
+                }
+                3 => chip(ui.painter(), ic, c),
                 _ => info(ui.painter(), ic, c),
             }
             text(ui, pos2(r.left() + 53.0, r.center().y), Align2::LEFT_CENTER, name, Ts::new(if on { Fam::Reg } else { Fam::Bold }, 16.0, c).ls(0.2));
@@ -54,7 +61,8 @@ impl GhubApp {
         match tab {
             0 => self.general(ui, main),
             1 => self.appearance(ui, main),
-            2 => self.diagnostics(ui, main),
+            2 => self.ghub_tab(ui, main),
+            3 => self.diagnostics(ui, main),
             _ => self.about(ui, main),
         }
     }
@@ -104,11 +112,58 @@ impl GhubApp {
                 x = r.right() + 8.0;
             }
         }
-        y += 52.0;
+        y += 44.0;
+        ui.painter().line_segment([pos2(main.left(), y), pos2(main.right(), y)], Stroke::new(1.0, pal().divider));
+        y += 26.0;
+        text(ui, pos2(main.left(), y), Align2::LEFT_CENTER, "Persistent Profile", Ts::new(Fam::Bold, 20.0, pal().text).ls(0.0));
+        let dd = Rect::from_min_size(pos2(main.left(), y + 36.0), vec2(312.0, 48.0));
+        let label = match cfg.persistent {
+            Some((a, p)) => (cfg.apps[a].name.clone(), cfg.apps[a].profiles[p].name.clone()),
+            None => ("None".to_string(), String::new()),
+        };
+        if dropdown(ui, dd, &label.0, &label.1, "s-persist").clicked() {
+            self.open_overlay(ui.ctx(), Overlay::Persistent(dd));
+        }
+        para(ui, pos2(main.left(), dd.bottom() + 14.0), main.width(), "This Persistent Profile overrides all other profiles in all games and apps until you set it back to None.", Ts::new(Fam::Reg, 13.0, pal().label).ls(0.3));
+    }
+
+    fn ghub_tab(&mut self, ui: &Ui, main: Rect) {
+        let g = self.cfg().general;
+        text(ui, pos2(main.left(), main.top() + 36.0), Align2::LEFT_CENTER, "G HUB", Ts::new(Fam::Bold, 22.0, pal().text).ls(0.0));
+        let mut y = main.top() + 95.0;
+        let (status, color) = if self.status.ghub_running {
+            ("G HUB is running and controls the mouse.", pal().amber)
+        } else {
+            ("G HUB is closed.", pal().muted)
+        };
+        text(ui, pos2(main.left(), y), Align2::LEFT_CENTER, status, Ts::new(Fam::Reg, 13.0, color).ls(0.3));
+        let br = Rect::from_min_size(pos2(main.right() - 150.0, y - 16.0), vec2(150.0, 32.0));
+        if self.status.ghub_running {
+            if blue_button(ui, br, "CLOSE G HUB", "s-close-ghub").clicked() {
+                let _ = self.eng.send(EngineMsg::CloseGhub);
+            }
+        } else if dark_button(ui, br, "START G HUB", "s-start-ghub", true).clicked() {
+            let _ = self.eng.send(EngineMsg::StartGhub);
+            self.say("Starting G HUB \u{2014} GHUB-X hands the mouse over");
+        }
+        y += 56.0;
         if row(ui, main, y, "Take control when G HUB is closed", "GHUB-X drives the mouse whenever G HUB isn't running", g.take_control, "s-take") {
             self.edit(|c| c.general.take_control = !c.general.take_control);
         }
         y += 52.0;
+        let startup = *self.ghub_autostart.get_or_insert_with(|| crate::win::startup_approved("LGHUB"));
+        if let Some(on) = startup {
+            if row(ui, main, y, "Start G HUB with Windows", "Turn this off so GHUB-X keeps the mouse after a restart", on, "s-ghub-startup") {
+                if crate::win::is_dev() {
+                    self.say("Not available in dev mode");
+                } else if crate::win::set_startup_approved("LGHUB", !on) {
+                    self.ghub_autostart = None;
+                } else {
+                    self.say("Couldn't change G HUB's startup entry");
+                }
+            }
+            y += 52.0;
+        }
         text(ui, pos2(main.left(), y), Align2::LEFT_CENTER, "Import from G HUB", Ts::new(Fam::Bold, 15.0, pal().text).ls(0.2));
         text(ui, pos2(main.left(), y + 22.0), Align2::LEFT_CENTER, "Copy profiles, macros, DPI and lighting from G HUB", Ts::new(Fam::Reg, 13.0, pal().label).ls(0.3));
         let armed = self.import_armed.is_some_and(|t| t.elapsed().as_secs_f32() < 4.0);
@@ -135,36 +190,14 @@ impl GhubApp {
         y += 48.0;
         ui.painter().line_segment([pos2(main.left(), y), pos2(main.right(), y)], Stroke::new(1.0, pal().divider));
         y += 26.0;
-        text(ui, pos2(main.left(), y), Align2::LEFT_CENTER, "G HUB", Ts::new(Fam::Bold, 20.0, pal().text).ls(0.0));
-        y += 34.0;
-        let (status, color) = if self.status.ghub_running {
-            ("G HUB is running and controls the mouse.", pal().amber)
-        } else {
-            ("G HUB is closed.", pal().muted)
+        text(ui, pos2(main.left(), y), Align2::LEFT_CENTER, "SAVED COPY", t_section());
+        let pr = para(ui, pos2(main.left(), y + 20.0), main.width().min(520.0), "GHUB-X keeps a copy of G HUB's fonts, device images and game list, so it keeps working if G HUB is uninstalled.", Ts::new(Fam::Reg, 13.0, pal().label).ls(0.3));
+        let status = match super::assets::cache_status() {
+            super::assets::CacheStatus::UpToDate => "Saved copy: up to date",
+            super::assets::CacheStatus::Updating => "Saved copy: updating\u{2026}",
+            super::assets::CacheStatus::Unavailable => "Saved copy: not available (G HUB not found)",
         };
-        text(ui, pos2(main.left(), y), Align2::LEFT_CENTER, status, Ts::new(Fam::Reg, 13.0, color).ls(0.3));
-        let br = Rect::from_min_size(pos2(main.right() - 150.0, y - 16.0), vec2(150.0, 32.0));
-        if self.status.ghub_running {
-            if blue_button(ui, br, "CLOSE G HUB", "s-close-ghub").clicked() {
-                let _ = self.eng.send(EngineMsg::CloseGhub);
-            }
-        } else if dark_button(ui, br, "START G HUB", "s-start-ghub", true).clicked() {
-            let _ = self.eng.send(EngineMsg::StartGhub);
-            self.say("Starting G HUB — GHUB-X hands the mouse over");
-        }
-        y += 38.0;
-        ui.painter().line_segment([pos2(main.left(), y), pos2(main.right(), y)], Stroke::new(1.0, pal().divider));
-        y += 26.0;
-        text(ui, pos2(main.left(), y), Align2::LEFT_CENTER, "Persistent Profile", Ts::new(Fam::Bold, 20.0, pal().text).ls(0.0));
-        let dd = Rect::from_min_size(pos2(main.left(), y + 36.0), vec2(312.0, 48.0));
-        let label = match cfg.persistent {
-            Some((a, p)) => (cfg.apps[a].name.clone(), cfg.apps[a].profiles[p].name.clone()),
-            None => ("None".to_string(), String::new()),
-        };
-        if dropdown(ui, dd, &label.0, &label.1, "s-persist").clicked() {
-            self.open_overlay(ui.ctx(), Overlay::Persistent(dd));
-        }
-        para(ui, pos2(main.left(), dd.bottom() + 14.0), main.width(), "This Persistent Profile overrides all other profiles in all games and apps until you set it back to None.", Ts::new(Fam::Reg, 13.0, pal().label).ls(0.3));
+        text(ui, pos2(main.left(), pr.bottom() + 20.0), Align2::LEFT_CENTER, status, Ts::new(Fam::Reg, 13.0, pal().muted).ls(0.3));
     }
 
     pub(crate) fn set_theme(&mut self, id: &str) {
@@ -312,8 +345,9 @@ impl GhubApp {
             ("Button map (0x8110)", map.join(" ")),
             ("Held buttons", format!("{:011b}", self.mask).chars().rev().collect::<String>()),
             ("Control", self.control_text().0),
-            ("Fonts", if self.fonts_from_ghub { "Brown Pro (from G HUB)".into() } else { "Segoe UI (G HUB not found)".into() }),
-            ("Renders", if self.tex.front.is_some() { "G HUB depot".into() } else { "Not found".into() }),
+            ("Fonts", super::assets::source(super::assets::SourceKind::Fonts).label().into()),
+            ("Device images", super::assets::source(super::assets::SourceKind::Images).label().into()),
+            ("Game list", super::assets::source(super::assets::SourceKind::Games).label().into()),
             ("Settings file", crate::profile::Config::path().display().to_string()),
         ];
         let mut y = main.top() + 84.0;

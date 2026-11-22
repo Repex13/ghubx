@@ -372,13 +372,20 @@ pub fn main_window_handle() -> isize {
     MAIN_HWND.load(Ordering::Relaxed)
 }
 
-/// Native "open file" dialog for `*.exe`; blocks until closed. Returns the full path.
-pub fn pick_exe(owner: isize) -> Option<String> {
-    use windows::Win32::UI::Controls::Dialogs::{GetOpenFileNameW, OFN_FILEMUSTEXIST, OFN_NOCHANGEDIR, OFN_PATHMUSTEXIST, OPENFILENAMEW};
+fn file_dialog(owner: isize, title: &str, default_name: Option<&str>, filter_name: &str, pattern: &str, save: bool) -> Option<String> {
+    use windows::Win32::UI::Controls::Dialogs::{GetOpenFileNameW, GetSaveFileNameW, OFN_FILEMUSTEXIST, OFN_NOCHANGEDIR, OFN_OVERWRITEPROMPT, OFN_PATHMUSTEXIST, OPENFILENAMEW};
+    let (title, filter_name, pattern, default_name) = (title.to_string(), filter_name.to_string(), pattern.to_string(), default_name.map(str::to_string));
     std::thread::spawn(move || unsafe {
         let mut file = [0u16; 1024];
-        let filter: Vec<u16> = "Programs (*.exe)\0*.exe\0All files (*.*)\0*.*\0\0".encode_utf16().collect();
-        let title: Vec<u16> = "Choose a game or app\0".encode_utf16().collect();
+        if let Some(d) = &default_name {
+            for (slot, c) in file.iter_mut().zip(d.encode_utf16().take(1023)) {
+                *slot = c;
+            }
+        }
+        let mut filter: Vec<u16> = format!("{filter_name} ({pattern})\0{pattern}\0All files (*.*)\0*.*\0\0").encode_utf16().collect();
+        filter.push(0);
+        let title: Vec<u16> = format!("{title}\0").encode_utf16().collect();
+        let ext: Vec<u16> = format!("{}\0", pattern.rsplit('.').next().unwrap_or("")).encode_utf16().collect();
         let mut ofn = OPENFILENAMEW {
             lStructSize: std::mem::size_of::<OPENFILENAMEW>() as u32,
             hwndOwner: HWND(owner as *mut _),
@@ -386,10 +393,12 @@ pub fn pick_exe(owner: isize) -> Option<String> {
             lpstrFile: windows::core::PWSTR(file.as_mut_ptr()),
             nMaxFile: file.len() as u32,
             lpstrTitle: PCWSTR(title.as_ptr()),
-            Flags: OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR,
+            lpstrDefExt: if save { PCWSTR(ext.as_ptr()) } else { PCWSTR::null() },
+            Flags: if save { OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR } else { OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR },
             ..Default::default()
         };
-        GetOpenFileNameW(&mut ofn).as_bool().then(|| {
+        let ok = if save { GetSaveFileNameW(&mut ofn) } else { GetOpenFileNameW(&mut ofn) };
+        ok.as_bool().then(|| {
             let end = file.iter().position(|&c| c == 0).unwrap_or(file.len());
             String::from_utf16_lossy(&file[..end])
         })
@@ -397,6 +406,21 @@ pub fn pick_exe(owner: isize) -> Option<String> {
     .join()
     .ok()
     .flatten()
+}
+
+/// Native "open file" dialog; blocks until closed. Returns the full path.
+pub fn pick_file(owner: isize, title: &str, filter_name: &str, pattern: &str) -> Option<String> {
+    file_dialog(owner, title, None, filter_name, pattern, false)
+}
+
+/// Native "save file" dialog; blocks until closed. Returns the full path.
+pub fn save_file(owner: isize, title: &str, default_name: &str, filter_name: &str, pattern: &str) -> Option<String> {
+    file_dialog(owner, title, Some(default_name), filter_name, pattern, true)
+}
+
+/// Open dialog for `*.exe`.
+pub fn pick_exe(owner: isize) -> Option<String> {
+    pick_file(owner, "Choose a game or app", "Programs", "*.exe")
 }
 
 pub fn main_hidden() -> bool {
@@ -599,6 +623,64 @@ pub fn single_instance() -> bool {
     }
 }
 
+// ------------------------------------------------------------ Windows startup entries
+
+const RUN_APPROVED: &str = r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run";
+
+/// `StartupApproved` value: enabled = `02 00 00 00` + zeros; disabled = `03 00 00 00` + FILETIME.
+pub fn startup_blob(on: bool, filetime: u64) -> [u8; 12] {
+    let mut b = [0u8; 12];
+    if on {
+        b[0] = 2;
+    } else {
+        b[0] = 3;
+        b[4..].copy_from_slice(&filetime.to_le_bytes());
+    }
+    b
+}
+
+/// Explorer treats an even first byte (or no data) as enabled.
+pub fn startup_enabled(bytes: &[u8]) -> bool {
+    bytes.first().is_none_or(|b| b % 2 == 0)
+}
+
+fn reg_binary(subkey: &str, name: &str) -> Option<Option<Vec<u8>>> {
+    use windows::Win32::Foundation::ERROR_SUCCESS;
+    use windows::Win32::System::Registry::*;
+    use windows::core::HSTRING;
+    let (sub, val) = (HSTRING::from(subkey), HSTRING::from(name));
+    let mut len = 0u32;
+    unsafe {
+        if RegGetValueW(HKEY_CURRENT_USER, &sub, &val, RRF_RT_ANY, None, None, Some(&mut len)) != ERROR_SUCCESS {
+            return None;
+        }
+        let mut buf = vec![0u8; len as usize];
+        let mut len2 = len;
+        let ok = RegGetValueW(HKEY_CURRENT_USER, &sub, &val, RRF_RT_REG_BINARY, None, Some(buf.as_mut_ptr().cast()), Some(&mut len2)) == ERROR_SUCCESS;
+        Some(ok.then(|| {
+            buf.truncate(len2 as usize);
+            buf
+        }))
+    }
+}
+
+/// `None` when the Run entry `name` does not exist; else whether Explorer lets it start.
+pub fn startup_approved(name: &str) -> Option<bool> {
+    reg_binary(RUN_KEY, name)?;
+    Some(reg_binary(RUN_APPROVED, name).flatten().is_none_or(|b| startup_enabled(&b)))
+}
+
+/// Enable or disable a Run entry the way Task Manager's Startup tab does.
+pub fn set_startup_approved(name: &str, on: bool) -> bool {
+    use windows::Win32::System::Registry::*;
+    use windows::core::HSTRING;
+    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    let blob = startup_blob(on, (secs + 11_644_473_600) * 10_000_000);
+    unsafe {
+        RegSetKeyValueW(HKEY_CURRENT_USER, &HSTRING::from(RUN_APPROVED), &HSTRING::from(name), REG_BINARY.0, Some(blob.as_ptr().cast()), blob.len() as u32).is_ok()
+    }
+}
+
 // ------------------------------------------------------------ scroll acceleration
 
 static ACCEL_ON: AtomicBool = AtomicBool::new(false);
@@ -665,4 +747,41 @@ pub fn start_scroll_hook() {
             let _ = UnhookWindowsHookEx(hook);
         })
         .ok();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn startup_blob_and_flag() {
+        let on = startup_blob(true, 0x0102030405060708);
+        assert_eq!(on, [2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        assert!(startup_enabled(&on));
+        let off = startup_blob(false, 0x0102030405060708);
+        assert_eq!(off, [3, 0, 0, 0, 8, 7, 6, 5, 4, 3, 2, 1]);
+        assert!(!startup_enabled(&off));
+        assert!(startup_enabled(&[]));
+    }
+
+    #[test]
+    fn startup_approved_round_trip() {
+        use windows::Win32::System::Registry::*;
+        use windows::core::HSTRING;
+        let name = "GHUBX-selftest";
+        let x: Vec<u16> = "x".encode_utf16().chain([0]).collect();
+        unsafe {
+            let _ = RegSetKeyValueW(HKEY_CURRENT_USER, &HSTRING::from(RUN_KEY), &HSTRING::from(name), REG_SZ.0, Some(x.as_ptr().cast()), (x.len() * 2) as u32);
+        }
+        assert_eq!(startup_approved(name), Some(true));
+        assert!(set_startup_approved(name, false));
+        assert_eq!(startup_approved(name), Some(false));
+        assert!(set_startup_approved(name, true));
+        assert_eq!(startup_approved(name), Some(true));
+        unsafe {
+            let _ = RegDeleteKeyValueW(HKEY_CURRENT_USER, &HSTRING::from(RUN_KEY), &HSTRING::from(name));
+            let _ = RegDeleteKeyValueW(HKEY_CURRENT_USER, &HSTRING::from(RUN_APPROVED), &HSTRING::from(name));
+        }
+        assert_eq!(startup_approved("GHUBX-missing-entry"), None);
+    }
 }
