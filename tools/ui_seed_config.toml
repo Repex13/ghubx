@@ -1,0 +1,151 @@
+current_app = 0
+profile_switching = false
+
+[[apps]]
+name = "Desktop"
+enabled = true
+active_profile = 0
+
+[[apps.profiles]]
+name = "Default"
+rate_ms = 1
+base = [
+    "Default",
+    "Default",
+    "Default",
+    { Macro = "ab87a865-6112-4cad-bdbe-daa3e512d990" },
+    { Macro = "b532eedf-d745-4b02-84a3-3ec050f1ff37" },
+    { Key = { vk = 83, mods = 0 } },
+    "Default",
+    "Default",
+    "Default",
+    "Default",
+    "Default",
+]
+gshift = [
+    "Default",
+    "Default",
+    "Default",
+    "Default",
+    "Default",
+    "Default",
+    "Default",
+    "Default",
+    "Default",
+    "Default",
+    "Default",
+]
+
+[apps.profiles.dpi]
+levels = [
+    600,
+    1000,
+    1600,
+]
+active = 600
+default = 1600
+shift = 600
+
+[[apps.profiles.lighting]]
+effect = "Cycle"
+color = [
+    0,
+    184,
+    252,
+]
+period_ms = 8000
+brightness = 100
+
+[[apps.profiles.lighting]]
+effect = "Cycle"
+color = [
+    0,
+    184,
+    252,
+]
+period_ms = 8000
+brightness = 100
+
+[[apps.macros]]
+id = "b532eedf-d745-4b02-84a3-3ec050f1ff37"
+name = "cl"
+kind = "RepeatWhileHolding"
+
+[[apps.macros.steps]]
+vk = 1
+down = true
+delay_ms = 0
+
+[[apps.macros.steps]]
+vk = 1
+down = false
+delay_ms = 50
+
+[[apps.macros.steps]]
+vk = 0
+down = false
+delay_ms = 50
+
+[[apps.macros]]
+id = "ab87a865-6112-4cad-bdbe-daa3e512d990"
+name = "jump"
+kind = "RepeatWhileHolding"
+
+[[apps.macros.steps]]
+vk = 32
+down = true
+delay_ms = 0
+
+[[apps.macros.steps]]
+vk = 32
+down = false
+delay_ms = 50
+
+[[apps.macros.steps]]
+vk = 0
+down = false
+delay_ms = 50
+
+[[apps.macros]]
+id = "79e17431-f3c7-4ab4-9772-173b0e35fb6e"
+name = "ping"
+kind = "Toggle"
+
+[[apps.macros.steps]]
+vk = 4
+down = true
+delay_ms = 0
+
+[[apps.macros.steps]]
+vk = 4
+down = false
+delay_ms = 50
+
+[[apps.macros.steps]]
+vk = 0
+down = false
+delay_ms = 50
+
+[general]
+launch_on_login = false
+take_control = true
+lighting_sleep_min = 0
+close_to_tray = true
+start_minimized = false
+osd_dpi = true
+osd_profile = true
+dpi_flash = false
+
+[extras]
+p180_counts = 1800
+p180_ms = 60
+p180_steps = 12
+p180_game = 0
+p180_sens = 1.0
+p180_angle = 180
+scroll_accel = false
+scroll_boost = 3.0
+
+[appearance]
+theme = "ghub-dark"
+follow_lighting = false

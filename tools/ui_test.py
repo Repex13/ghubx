@@ -4,7 +4,8 @@
     python tools/ui_test.py [name ...]      # all scenarios, or the named ones
 
 Nothing here touches the real mouse: the dev instance is observer-only, runs
-off-screen, and uses throw-away config folders under %TEMP%\\ghubx_b7\\run.
+off-screen, and uses throw-away config folders under %TEMP%\\ghubx_ui_test.
+Every run starts from tools/ui_seed_config.toml; the coordinates below assume it.
 """
 import ctypes
 import os
@@ -21,9 +22,8 @@ from PIL import Image
 
 TEMP = Path(os.environ["TEMP"])
 EXE = Path(__file__).resolve().parent.parent / "target" / "debug" / "ghubx.exe"
-RUN = TEMP / "ghubx_b7" / "run"
-SEED = TEMP / "ghubx_theme" / "cfg" / "ghubx" / "config.toml"
-CACHE = TEMP / "ghubx_b4" / "cache"
+RUN = TEMP / "ghubx_ui_test"
+SEED = Path(__file__).resolve().parent / "ui_seed_config.toml"
 
 CS2_ID = "ca572e6a-c76d-4e34-bd64-3665c0d0b0c1"
 CS2_DIR = r"C:\\Program Files (x86)\\Steam\\steamapps\\common\\Counter-Strike Global Offensive"
@@ -86,7 +86,7 @@ def run_script(name: str, lines: list[str], config: str | None = None, timeout=6
     shots.mkdir()
     body = [ln.replace("{shots}", str(shots).replace("\\", "/")) for ln in lines]
     (d / "script.txt").write_text("\n".join(body + ["quit"]) + "\n", encoding="utf-8")
-    env = dict(os.environ, GHUBX_CONFIG_DIR=str(d / "cfg"), GHUBX_CACHE_DIR=str(CACHE))
+    env = dict(os.environ, GHUBX_CONFIG_DIR=str(d / "cfg"))
     p = subprocess.Popen([str(EXE), "--dev", "--script", str(d / "script.txt")], env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     hook = during(p) if during else None
     try:
