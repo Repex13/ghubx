@@ -5,10 +5,18 @@ use super::device::{Placed, draw_render};
 use super::theme::*;
 use super::{GhubApp, Overlay};
 use crate::profile::*;
+use crate::fx::{hsv_to_rgb, rgb_to_hsv};
 use egui::ecolor::Hsva;
 use egui::{Align2, Color32, CornerRadius, Mesh, Pos2, Rect, Sense, Shape, Stroke, StrokeKind, Ui, pos2, vec2};
 
-pub const EFFECTS: [(&str, Effect); 4] = [("FIXED", Effect::Fixed), ("BREATHING", Effect::Breathing), ("CYCLE", Effect::Cycle), ("OFF", Effect::Off)];
+pub const EFFECTS: [(&str, Effect); 6] = [
+    ("FIXED", Effect::Fixed),
+    ("BREATHING", Effect::Breathing),
+    ("CYCLE", Effect::Cycle),
+    ("SCREEN SAMPLER", Effect::Screen),
+    ("AUDIO VISUALIZER", Effect::Audio),
+    ("OFF", Effect::Off),
+];
 
 const SWATCHES: [[u8; 3]; 9] = [
     [0x00, 0xB8, 0xFC],
@@ -25,7 +33,15 @@ const SWATCHES: [[u8; 3]; 9] = [
 #[derive(Default)]
 pub struct LightState {
     pub zone: usize,
+    audio_target: usize,
+    advanced: bool,
     picker: PickerState,
+}
+
+impl LightState {
+    pub fn set_advanced(&mut self, on: bool) {
+        self.advanced = on;
+    }
 }
 
 /// State of one colour picker (SV square, hue bar and hex field).
@@ -41,7 +57,8 @@ pub(super) fn effect_name(e: Effect) -> &'static str {
 }
 
 /// Colour the zone shows at time `t` (seconds) — for the preview glow.
-pub fn preview_color(l: &Lighting, t: f64) -> Option<Color32> {
+/// `live` is the colour the fx thread currently computes for a host-driven effect.
+pub fn preview_color(l: &Lighting, t: f64, live: Option<[u8; 3]>) -> Option<Color32> {
     let k = l.brightness as f32 / 100.0;
     let period = (l.period_ms.max(500) as f64) / 1000.0;
     let c = match l.effect {
@@ -55,7 +72,12 @@ pub fn preview_color(l: &Lighting, t: f64) -> Option<Color32> {
             let [r, g, b] = Hsva::new(((t / period) % 1.0) as f32, 1.0, 1.0, 1.0).to_srgb();
             Color32::from_rgb(r, g, b)
         }
+        Effect::Screen => live.map(|c| Color32::from_rgb(c[0], c[1], c[2])).unwrap_or(Color32::from_rgb(0x3A, 0x7B, 0xD5)),
+        Effect::Audio => live.map(|c| Color32::from_rgb(c[0], c[1], c[2])).unwrap_or(Color32::from_rgb(l.color[0], l.color[1], l.color[2]).gamma_multiply(0.6)),
     };
+    if l.effect.is_host() && live.is_some() {
+        return Some(c);
+    }
     Some(c.gamma_multiply(k))
 }
 
@@ -94,6 +116,11 @@ impl GhubApp {
             }
             y += 196.0;
         }
+        match l.effect {
+            Effect::Screen => y = self.screen_panel(ui, x0, y, panel, zone, l, &mut new_l),
+            Effect::Audio => y = self.audio_panel(ui, x0, y, panel, zone, l, &mut new_l),
+            _ => {}
+        }
         if matches!(l.effect, Effect::Breathing | Effect::Cycle) {
             text(ui, pos2(x0, y), Align2::LEFT_TOP, "EFFECT RATE", Ts::new(Fam::Reg, 12.0, pal().label));
             let mut v = l.period_ms as f32;
@@ -103,7 +130,15 @@ impl GhubApp {
             value_label(ui, pos2(panel.right() - 16.0, y + 32.0), &format!("{}", new_l.period_ms), "ms");
             y += 65.0;
         }
-        if l.effect != Effect::Off {
+        if l.effect.is_host() {
+            if l.effect == Effect::Screen || self.light.advanced {
+                let mut v = l.brightness as f32;
+                if host_slider(ui, panel, x0, y, "EFFECT BRIGHTNESS", &mut v, 1.0..=100.0, ("bright", zone), true) {
+                    new_l.brightness = v.round() as u8;
+                }
+                y += 46.0;
+            }
+        } else if l.effect != Effect::Off {
             text(ui, pos2(x0, y), Align2::LEFT_TOP, "EFFECT BRIGHTNESS", Ts::new(Fam::Reg, 12.0, pal().label));
             let mut v = l.brightness as f32;
             if slider(ui, Rect::from_min_size(pos2(x0, y + 26.0), vec2(180.0, 12.0)), &mut v, 1.0..=100.0, ("bright", zone)) {
@@ -133,7 +168,14 @@ impl GhubApp {
         let mut clicked_zone = None;
         for (zi, zr) in self.meta.front.zones.clone() {
             let r = Rect::from_min_max(placed.at(zr.min.x, zr.min.y), placed.at(zr.max.x, zr.max.y));
-            if let Some(c) = preview_color(&prof.lighting[zi], t) {
+            let lz = prof.lighting[zi];
+            if lz.effect.is_host()
+                && let Some(h) = &self.fx
+            {
+                h.preview_zone(zi, lz);
+            }
+            let live = if lz.effect.is_host() { self.fx.as_ref().and_then(|h| h.preview(zi)) } else { None };
+            if let Some(c) = preview_color(&lz, t, live) {
                 let g = Rect::from_center_size(r.center(), r.size() * 1.9);
                 ui.painter().image(self.tex.glow.id(), g, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), c.gamma_multiply(0.55));
                 ui.painter().image(self.tex.glow.id(), Rect::from_center_size(r.center(), r.size() * 1.2), Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), c);
@@ -155,33 +197,146 @@ impl GhubApp {
         if prof.lighting.iter().any(|l| matches!(l.effect, Effect::Breathing | Effect::Cycle)) {
             ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
         }
+        if prof.lighting.iter().any(|l| l.effect.is_host()) {
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(50));
+        }
+    }
+
+    /// SCREEN SAMPLER controls; returns the y where the next block starts.
+    #[allow(clippy::too_many_arguments)]
+    fn screen_panel(&mut self, ui: &mut Ui, x0: f32, y: f32, panel: Rect, zone: usize, l: Lighting, new_l: &mut Lighting) -> f32 {
+        let th = pal();
+        para(ui, pos2(x0, y), 278.0, "Choose an area of your screen below, your device lighting will update to match the area.", Ts::new(Fam::Reg, 11.0, th.label));
+        text(ui, pos2(x0, y + 46.0), Align2::LEFT_TOP, "SAMPLE", Ts::new(Fam::Reg, 12.0, th.label));
+        let scr = Rect::from_min_size(pos2(x0, y + 64.0), vec2(96.0, 54.0));
+        let full = l.host.area == ScreenArea::Full;
+        let inner = scr.shrink(1.0);
+        let (cw, ch) = (inner.width() / 3.0, inner.height() / 3.0);
+        for (i, a) in ScreenArea::GRID.iter().enumerate() {
+            let cell = Rect::from_min_size(pos2(inner.left() + (i % 3) as f32 * cw, inner.top() + (i / 3) as f32 * ch), vec2(cw, ch));
+            let r = click(ui, cell, ("area", i));
+            let fill = if full {
+                Some(th.primary_tint)
+            } else if l.host.area == *a {
+                Some(th.primary)
+            } else if r.hovered() {
+                Some(th.primary_tint)
+            } else {
+                None
+            };
+            if let Some(f) = fill {
+                ui.painter().rect_filled(cell.shrink(0.5), CornerRadius::same(2), f);
+            }
+            if r.clicked() {
+                new_l.host.area = *a;
+            }
+        }
+        for k in 1..3 {
+            let (gx, gy) = (inner.left() + k as f32 * cw, inner.top() + k as f32 * ch);
+            ui.painter().line_segment([pos2(gx, inner.top()), pos2(gx, inner.bottom())], Stroke::new(1.0, th.outline_hi));
+            ui.painter().line_segment([pos2(inner.left(), gy), pos2(inner.right(), gy)], Stroke::new(1.0, th.outline_hi));
+        }
+        ui.painter().rect_stroke(scr, CornerRadius::same(4), Stroke::new(1.0, if full { th.primary } else { th.outline_hi }), StrokeKind::Inside);
+        if pill(ui, Rect::from_min_size(pos2(x0 + 112.0, y + 64.0), vec2(100.0, 22.0)), "FULL SCREEN", full, "area-full").clicked() {
+            new_l.host.area = ScreenArea::Full;
+        }
+        text(ui, pos2(x0 + 112.0, y + 98.0), Align2::LEFT_TOP, l.host.area.label(), Ts::new(Fam::Reg, 12.0, th.text));
+        let mut v = l.host.boost as f32;
+        if host_slider(ui, panel, x0, y + 128.0, "COLOR BOOST", &mut v, 0.0..=100.0, ("boost", zone), true) {
+            new_l.host.boost = v.round() as u8;
+        }
+        let mut v = l.host.smoothing as f32;
+        if host_slider(ui, panel, x0, y + 174.0, "SMOOTHING", &mut v, 0.0..=100.0, ("smooth", zone), true) {
+            new_l.host.smoothing = v.round() as u8;
+        }
+        y + 220.0
+    }
+
+    /// AUDIO VISUALIZER controls; returns the y where the next block starts.
+    #[allow(clippy::too_many_arguments)]
+    fn audio_panel(&mut self, ui: &mut Ui, x0: f32, y: f32, panel: Rect, zone: usize, l: Lighting, new_l: &mut Lighting) -> f32 {
+        let th = pal();
+        let adv_row = |ui: &mut Ui, y: f32, open: bool| {
+            let tr = text(ui, pos2(x0, y + 12.0), Align2::LEFT_CENTER, "ADVANCED SETTINGS", Ts::new(Fam::Reg, 12.0, th.label));
+            chevron(ui.painter(), pos2(panel.right() - 24.0, y + 12.0), 4.0, open, Stroke::new(1.5, th.label));
+            click(ui, Rect::from_min_max(pos2(x0, y), pos2(panel.right() - 8.0, y + 24.0)).union(tr), "audio-adv").clicked()
+        };
+        if !self.light.advanced {
+            if let Some(t) = tabs(ui, pos2(x0, y), &["COLOR", "BACKGROUND COLOR"], self.light.audio_target, 16.0, "audio-tabs") {
+                self.light.audio_target = t;
+            }
+            let bg = self.light.audio_target == 1;
+            let color = if bg { l.host.color2 } else { l.color };
+            if let Some(c) = Self::color_picker(ui, pos2(x0, y + 22.0), color, &mut self.light.picker, if bg { "audio-bg" } else { "audio" }, &SWATCHES) {
+                if bg {
+                    new_l.host.color2 = c;
+                } else {
+                    new_l.color = c;
+                }
+            }
+            para(ui, pos2(x0, y + 204.0), 278.0, "Reacts to audio playing on your computer (music, games, videos), not your microphone.", Ts::new(Fam::Reg, 11.0, th.label));
+            if adv_row(ui, y + 246.0, false) {
+                self.light.advanced = true;
+            }
+            return y + 274.0;
+        }
+        if adv_row(ui, y, true) {
+            self.light.advanced = false;
+        }
+        let mut v = l.host.intensity as f32;
+        if host_slider(ui, panel, x0, y + 30.0, "INTENSITY", &mut v, 0.0..=100.0, ("intensity", zone), true) {
+            new_l.host.intensity = v.round() as u8;
+        }
+        if checkbox(ui, pos2(x0, y + 82.0), "AUTO-ADJUST SENSITIVITY", l.host.auto_sens, true, ("auto-sens", zone)).clicked() {
+            new_l.host.auto_sens = !l.host.auto_sens;
+        }
+        let mut v = l.host.sensitivity as f32;
+        if host_slider(ui, panel, x0, y + 110.0, "MANUAL SENSITIVITY", &mut v, 1.0..=100.0, ("sens", zone), !l.host.auto_sens) && !l.host.auto_sens {
+            new_l.host.sensitivity = v.round() as u8;
+        }
+        if checkbox(ui, pos2(x0, y + 162.0), "PULSE ON BASS ONLY", l.host.bass_only, true, ("bass-only", zone)).clicked() {
+            new_l.host.bass_only = !l.host.bass_only;
+        }
+        y + 188.0
     }
 
     /// Saturation/value square + hue bar + swatches + hex. Returns a new colour.
     pub(super) fn color_picker(ui: &mut Ui, origin: Pos2, color: [u8; 3], st: &mut PickerState, salt: &str, swatches: &[[u8; 3]]) -> Option<[u8; 3]> {
         if st.hsv_for != Some(color) {
-            let h = Hsva::from_srgb(color);
-            let keep_h = st.hsv.map(|x| x.0).unwrap_or(h.h);
-            st.hsv = Some((if h.s > 0.001 && h.v > 0.001 { h.h } else { keep_h }, h.s, h.v));
+            let (h, s, v) = rgb_to_hsv(color);
+            let keep_h = st.hsv.map(|x| x.0).unwrap_or(h);
+            st.hsv = Some((if s > 0.001 && v > 0.001 { h } else { keep_h }, s, v));
             st.hsv_for = Some(color);
             st.hex = format!("{:02X}{:02X}{:02X}", color[0], color[1], color[2]);
         }
         let (mut h, mut s, mut v) = st.hsv.unwrap_or((0.55, 1.0, 1.0));
         let sv = Rect::from_min_size(origin, vec2(278.0, 118.0));
         let hue = Rect::from_min_size(pos2(origin.x, sv.bottom() + 12.0), vec2(278.0, 12.0));
-        let pure = Hsva::new(h, 1.0, 1.0, 1.0).to_srgb();
-        let pure = Color32::from_rgb(pure[0], pure[1], pure[2]);
+        // grid mesh: the pixel under the cursor is the colour that gets selected
+        const COLS: usize = 32;
+        const ROWS: usize = 16;
         let mut m = Mesh::default();
-        for (p, c) in [(sv.left_top(), Color32::WHITE), (sv.right_top(), pure), (sv.right_bottom(), Color32::BLACK), (sv.left_bottom(), Color32::BLACK)] {
-            m.colored_vertex(p, c);
+        for j in 0..=ROWS {
+            for i in 0..=COLS {
+                let (fx, fy) = (i as f32 / COLS as f32, j as f32 / ROWS as f32);
+                let [r, g, b] = hsv_to_rgb(h, fx, 1.0 - fy);
+                m.colored_vertex(pos2(sv.left() + fx * sv.width(), sv.top() + fy * sv.height()), Color32::from_rgb(r, g, b));
+            }
         }
-        m.add_triangle(0, 1, 2);
-        m.add_triangle(0, 2, 3);
+        for j in 0..ROWS {
+            for i in 0..COLS {
+                let a = (j * (COLS + 1) + i) as u32;
+                let b = a + 1;
+                let c = a + (COLS + 1) as u32;
+                m.add_triangle(a, b, c);
+                m.add_triangle(b, c, c + 1);
+            }
+        }
         ui.painter().add(Shape::mesh(m));
         let mut hm = Mesh::default();
-        for i in 0..=12 {
-            let t = i as f32 / 12.0;
-            let c = Hsva::new(t, 1.0, 1.0, 1.0).to_srgb();
+        for i in 0..=36 {
+            let t = i as f32 / 36.0;
+            let c = hsv_to_rgb(t.min(0.9999), 1.0, 1.0);
             let c = Color32::from_rgb(c[0], c[1], c[2]);
             let x = hue.left() + t * hue.width();
             hm.colored_vertex(pos2(x, hue.top()), c);
@@ -250,7 +405,7 @@ impl GhubApp {
         }
         if changed {
             st.hsv = Some((h, s, v));
-            let c = Hsva::new(h, s, v, 1.0).to_srgb();
+            let c = hsv_to_rgb(h, s, v);
             st.hsv_for = Some(c);
             st.hex = format!("{:02X}{:02X}{:02X}", c[0], c[1], c[2]);
             out = Some(c);
@@ -262,4 +417,39 @@ impl GhubApp {
 fn value_label(ui: &Ui, right_mid: Pos2, value: &str, unit: &str) {
     let ur = text(ui, right_mid, Align2::RIGHT_CENTER, unit, Ts::new(Fam::Reg, 14.0, pal().text).ls(0.0));
     text(ui, pos2(ur.left(), right_mid.y), Align2::RIGHT_CENTER, value, Ts::new(Fam::Bold, 14.0, pal().text).ls(0.0));
+}
+
+/// Label + slider + value in the style of EFFECT BRIGHTNESS; `enabled = false` dims it and ignores input.
+#[allow(clippy::too_many_arguments)]
+fn host_slider(ui: &Ui, panel: Rect, x0: f32, y: f32, label: &str, v: &mut f32, range: std::ops::RangeInclusive<f32>, id: impl std::hash::Hash + std::fmt::Debug, enabled: bool) -> bool {
+    text(ui, pos2(x0, y), Align2::LEFT_TOP, label, Ts::new(Fam::Reg, 12.0, if enabled { pal().label } else { pal().disabled }));
+    let mut local = *v;
+    let changed = slider(ui, Rect::from_min_size(pos2(x0, y + 22.0), vec2(180.0, 12.0)), &mut local, range, id);
+    if enabled {
+        *v = local;
+    }
+    value_label(ui, pos2(panel.right() - 16.0, y + 28.0), &format!("{}", local.round() as i32), "%");
+    changed && enabled
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hsv_round_trips() {
+        for hex in [0xFF7A59u32, 0x1A1023, 0x00B8FC, 0x808080, 0xFFFFFF, 0x000000, 0x123456] {
+            let c = [(hex >> 16) as u8, (hex >> 8) as u8, hex as u8];
+            let (h, s, v) = rgb_to_hsv(c);
+            let back = hsv_to_rgb(h, s, v);
+            assert!(c.iter().zip(back).all(|(&a, b)| (a as i32 - b as i32).abs() <= 1), "{c:?} {back:?}");
+        }
+    }
+
+    #[test]
+    fn hsv_corners() {
+        assert_eq!(hsv_to_rgb(0.0, 1.0, 1.0), [255, 0, 0]);
+        assert_eq!(hsv_to_rgb(0.37, 0.0, 1.0), [255, 255, 255]);
+        assert_eq!(hsv_to_rgb(0.37, 0.8, 0.0), [0, 0, 0]);
+    }
 }

@@ -207,6 +207,99 @@ pub enum Effect {
     Fixed,
     Breathing,
     Cycle,
+    /// Host-driven: the PC samples the screen and writes the colour.
+    Screen,
+    /// Host-driven: the PC follows the audio it plays and writes the colour.
+    Audio,
+}
+
+impl Effect {
+    pub fn is_host(self) -> bool {
+        matches!(self, Effect::Screen | Effect::Audio)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum ScreenArea {
+    #[default]
+    Full,
+    TopLeft,
+    Top,
+    TopRight,
+    Left,
+    Center,
+    Right,
+    BottomLeft,
+    Bottom,
+    BottomRight,
+}
+
+impl ScreenArea {
+    pub const GRID: [ScreenArea; 9] = [
+        ScreenArea::TopLeft,
+        ScreenArea::Top,
+        ScreenArea::TopRight,
+        ScreenArea::Left,
+        ScreenArea::Center,
+        ScreenArea::Right,
+        ScreenArea::BottomLeft,
+        ScreenArea::Bottom,
+        ScreenArea::BottomRight,
+    ];
+
+    /// (x0, y0, x1, y1) as fractions of the primary screen.
+    pub fn rect(self) -> (f32, f32, f32, f32) {
+        let Some(i) = Self::GRID.iter().position(|a| *a == self) else {
+            return (0.0, 0.0, 1.0, 1.0);
+        };
+        let (c, r) = ((i % 3) as f32, (i / 3) as f32);
+        (c / 3.0, r / 3.0, (c + 1.0) / 3.0, (r + 1.0) / 3.0)
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ScreenArea::Full => "FULL SCREEN",
+            ScreenArea::TopLeft => "TOP LEFT",
+            ScreenArea::Top => "TOP CENTER",
+            ScreenArea::TopRight => "TOP RIGHT",
+            ScreenArea::Left => "MID LEFT",
+            ScreenArea::Center => "CENTER",
+            ScreenArea::Right => "MID RIGHT",
+            ScreenArea::BottomLeft => "BOTTOM LEFT",
+            ScreenArea::Bottom => "BOTTOM CENTER",
+            ScreenArea::BottomRight => "BOTTOM RIGHT",
+        }
+    }
+}
+
+/// Settings of the two host-driven effects (SCREEN SAMPLER, AUDIO VISUALIZER).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HostFx {
+    pub area: ScreenArea,
+    /// Colour boost 0..=100.
+    pub boost: u8,
+    /// 0..=100.
+    pub smoothing: u8,
+    /// Audio visualizer background colour (shown at silence).
+    pub color2: [u8; 3],
+    pub intensity: u8,
+    pub auto_sens: bool,
+    /// Manual sensitivity 1..=100.
+    pub sensitivity: u8,
+    pub bass_only: bool,
+}
+
+impl Default for HostFx {
+    fn default() -> Self {
+        Self { area: ScreenArea::Full, boost: 50, smoothing: 40, color2: [0, 0, 0], intensity: 50, auto_sens: true, sensitivity: 50, bass_only: false }
+    }
+}
+
+impl HostFx {
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -216,11 +309,13 @@ pub struct Lighting {
     pub period_ms: u16,
     /// 1..=100 %
     pub brightness: u8,
+    #[serde(default, skip_serializing_if = "HostFx::is_default")]
+    pub host: HostFx,
 }
 
 impl Default for Lighting {
     fn default() -> Self {
-        Self { effect: Effect::Cycle, color: [0x00, 0xB8, 0xFC], period_ms: 8000, brightness: 100 }
+        Self { effect: Effect::Cycle, color: [0x00, 0xB8, 0xFC], period_ms: 8000, brightness: 100, host: HostFx::default() }
     }
 }
 
@@ -231,6 +326,7 @@ impl Lighting {
         let intensity = if self.brightness >= 100 { 0 } else { self.brightness.max(1) };
         match self.effect {
             Effect::Off => l[0] = LED_OFF,
+            Effect::Screen | Effect::Audio => l[0] = LED_FIXED,
             Effect::Fixed => {
                 l[0] = LED_FIXED;
                 let s = self.brightness.clamp(1, 100) as u16;
@@ -263,6 +359,7 @@ impl Lighting {
                 color: [l[1], l[2], l[3]],
                 period_ms: u16::from_be_bytes([l[4], l[5]]),
                 brightness: pct(l[7]),
+                ..Default::default()
             },
             LED_CYCLE => Self {
                 effect: Effect::Cycle,
@@ -576,9 +673,7 @@ impl Appearance {
         if self.custom.len() >= Self::MAX_CUSTOM {
             return None;
         }
-        let name: String = t.name.trim().chars().take(24).collect();
-        t.name = if name.is_empty() { "My Theme".to_string() } else { name };
-        t.name = self.unique_name(&t.name, None);
+        t.name = self.normalize_name(&t.name, None);
         if t.id.is_empty() || self.custom.iter().any(|c| c.id == t.id) {
             let mut id = format!("custom-{}", new_id());
             let mut n = 2;
@@ -590,6 +685,12 @@ impl Appearance {
         }
         self.custom.push(t);
         Some(self.custom.len() - 1)
+    }
+
+    /// Trimmed to 24 characters, "My Theme" when empty, then made unique against the other themes.
+    pub fn normalize_name(&self, name: &str, skip: Option<usize>) -> String {
+        let name: String = name.trim().chars().take(24).collect();
+        self.unique_name(if name.is_empty() { "My Theme" } else { &name }, skip)
     }
 
     /// `name`, or `name (2)`, `name (3)`... when another theme (not `skip`) already uses it.
@@ -1038,6 +1139,30 @@ mod tests {
             a.add_theme(sample_theme("Filler")).unwrap();
         }
         assert!(a.add_theme(sample_theme("One too many")).is_none());
+    }
+
+    #[test]
+    fn host_effects_round_trip_and_old_configs_load() {
+        let mut c = Config::default();
+        let host = HostFx { area: ScreenArea::Center, boost: 70, smoothing: 10, color2: [1, 2, 3], intensity: 20, auto_sens: false, sensitivity: 80, bass_only: true };
+        c.apps[0].profiles[0].lighting[1] = Lighting { effect: Effect::Screen, host, ..Default::default() };
+        let text = toml::to_string_pretty(&c).unwrap();
+        let back: Config = toml::from_str(&text).unwrap();
+        assert_eq!(back.apps[0].profiles[0].lighting[1].host, host);
+        assert_eq!(back.apps[0].profiles[0].lighting[1].effect, Effect::Screen);
+        let plain = toml::to_string_pretty(&Config::default()).unwrap();
+        assert!(!plain.contains("host"), "default host written out");
+        let back: Config = toml::from_str(&plain).unwrap();
+        assert_eq!(back.apps[0].profiles[0].lighting[0].host, HostFx::default());
+    }
+
+    #[test]
+    fn normalize_name_defaults_before_uniqueness() {
+        let mut a = Appearance::default();
+        a.add_theme(sample_theme("My Theme")).unwrap();
+        a.add_theme(sample_theme("B")).unwrap();
+        assert_eq!(a.normalize_name("  ", Some(1)), "My Theme (2)");
+        assert_eq!(a.normalize_name("my theme", Some(0)), "my theme");
     }
 
     #[test]

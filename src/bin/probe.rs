@@ -33,6 +33,9 @@ fn main() {
         Some("takeover-test") => std::process::exit(takeover_test()),
         Some("release") => std::process::exit(release()),
         Some("games") => std::process::exit(games()),
+        Some("fx-screen") => std::process::exit(fx_screen(std::env::args().nth(2).and_then(|a| a.parse().ok()).unwrap_or(3.0))),
+        Some("fx-screen-check") => std::process::exit(fx_screen_check()),
+        Some("fx-audio") => std::process::exit(fx_audio(std::env::args().nth(2).and_then(|a| a.parse().ok()).unwrap_or(5.0))),
         Some("export-theme") => std::process::exit(export_theme_cmd(&std::env::args().skip(2).collect::<Vec<_>>())),
         Some("import-theme") => std::process::exit(import_theme_cmd(&std::env::args().skip(2).collect::<Vec<_>>())),
         Some("game-sens") => {
@@ -157,6 +160,72 @@ fn onboard_cmd() -> i32 {
             }
             Err(e) => println!("slot {}: sector {sector} read failed: {e}", i + 1),
         }
+    }
+    0
+}
+
+fn fx_screen(secs: f32) -> i32 {
+    use ghubx::profile::ScreenArea;
+    use std::time::{Duration, Instant};
+    let mut src = ghubx::fx::win_source();
+    let (mut total, mut n) = (0.0f64, 0u32);
+    let end = Instant::now() + Duration::from_secs_f32(secs);
+    let hex = |c: Option<[u8; 3]>| c.map(|c| format!("#{:02X}{:02X}{:02X}", c[0], c[1], c[2])).unwrap_or_else(|| "failed".into());
+    while Instant::now() < end {
+        let t = Instant::now();
+        let (full, center) = (src.screen(ScreenArea::Full), src.screen(ScreenArea::Center));
+        let ms = t.elapsed().as_secs_f64() * 1000.0;
+        total += ms / 2.0;
+        n += 1;
+        println!("capture {ms:.1} ms  full {}  center {}", hex(full), hex(center));
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    let (w, h) = unsafe { (windows::Win32::UI::WindowsAndMessaging::GetSystemMetrics(windows::Win32::UI::WindowsAndMessaging::SM_CXSCREEN), windows::Win32::UI::WindowsAndMessaging::GetSystemMetrics(windows::Win32::UI::WindowsAndMessaging::SM_CYSCREEN)) };
+    println!("avg capture {:.1} ms over {n} samples (screen {w}x{h})", total / n.max(1) as f64);
+    0
+}
+
+fn fx_screen_check() -> i32 {
+    use ghubx::profile::ScreenArea;
+    let mut src = ghubx::fx::win_source();
+    let hex = |c: [u8; 3]| format!("#{:02X}{:02X}{:02X}", c[0], c[1], c[2]);
+    let diff = |a: [u8; 3], b: [u8; 3]| (0..3).map(|i| (a[i] as i32 - b[i] as i32).abs()).max().unwrap_or(0);
+    let mut best = i32::MAX;
+    for round in 1..=3 {
+        let (sf, sc) = (src.screen(ScreenArea::Full), src.screen(ScreenArea::Center));
+        let (ef, ec) = (ghubx::fx::exact_screen(ScreenArea::Full), ghubx::fx::exact_screen(ScreenArea::Center));
+        let (Some(sf), Some(sc), Some(ef), Some(ec)) = (sf, sc, ef, ec) else {
+            eprintln!("round {round}: capture failed");
+            return 1;
+        };
+        let (df, dc) = (diff(sf, ef), diff(sc, ec));
+        println!("round {round}  full {} vs {} (max diff {df})  center {} vs {} (max diff {dc})", hex(sf), hex(ef), hex(sc), hex(ec));
+        best = best.min(df.max(dc));
+        std::thread::sleep(std::time::Duration::from_millis(300));
+    }
+    println!("best max diff: {best}");
+    i32::from(best > 6)
+}
+
+fn fx_audio(secs: f32) -> i32 {
+    use std::time::{Duration, Instant};
+    let mut src = ghubx::fx::win_source();
+    println!("source: {}", src.describe());
+    let end = Instant::now() + Duration::from_secs_f32(secs);
+    while Instant::now() < end {
+        let a = src.audio();
+        for e in src.events() {
+            println!("{e}");
+        }
+        match a {
+            Some((p, b)) => println!("peak {p:.3} bass {b:.3}"),
+            None => println!("no audio device"),
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    src.release();
+    for e in src.events() {
+        println!("{e}");
     }
     0
 }

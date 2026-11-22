@@ -62,6 +62,8 @@ pub struct Applied {
     pub dpi: u16,
     pub rate_ms: u8,
     pub leds: [[u8; 11]; 2],
+    /// Zones whose colour the fx thread writes (RAM only).
+    pub host: [bool; 2],
 }
 
 /// Commands for the device IO thread.
@@ -69,6 +71,8 @@ pub struct Applied {
 pub enum DevCmd {
     TakeControl(Applied),
     Release,
+    /// Another program owns the mouse now: forget that we control it (no device I/O).
+    Yield,
     SetDpi(u16),
     SetRate(u8),
     SetMap([u8; 16]),
@@ -143,6 +147,8 @@ pub struct Engine {
     toggles: HashMap<String, Arc<AtomicBool>>,
     asleep: bool,
     pub(crate) osd: Box<dyn Fn(OsdKind) + Send>,
+    pub(crate) fx: Box<dyn FnMut([Option<Lighting>; 2]) + Send>,
+    fx_last: [Option<Lighting>; 2],
     pub(crate) persist: bool,
     pub(crate) flash_until: Option<Instant>,
     pub(crate) input: Arc<dyn Input>,
@@ -163,9 +169,24 @@ impl Engine {
             toggles: HashMap::new(),
             asleep: false,
             osd: Box::new(osd::show),
+            fx: Box::new(|_| {}),
+            fx_last: [None, None],
             persist: true,
             flash_until: None,
             input: Arc::new(RealInput),
+        }
+    }
+
+    pub fn with_host_lighting(mut self, h: crate::fx::Handle) -> Self {
+        self.fx = Box::new(move |z| h.set_device(z));
+        self
+    }
+
+    /// Tell the fx thread which zones it drives. `force` calls even when nothing changed.
+    fn set_fx(&mut self, zones: [Option<Lighting>; 2], force: bool) {
+        if force || zones != self.fx_last {
+            self.fx_last = zones;
+            (self.fx)(zones);
         }
     }
 
@@ -287,6 +308,7 @@ impl Engine {
     }
 
     fn drop_control_state(&mut self) {
+        self.set_fx([None, None], true);
         self.release_all();
         self.applied = None;
         self.st.controlled = false;
@@ -295,6 +317,7 @@ impl Engine {
     }
 
     fn release_device(&mut self) {
+        self.set_fx([None, None], true);
         if self.applied.is_some() {
             self.release_all();
             let _ = self.dev.send(DevCmd::Release);
@@ -338,18 +361,22 @@ impl Engine {
         let want = !observer() && self.st.connected && cfg.general.take_control && !self.st.ghub_running && self.retry_at.is_none();
         if want {
             let Some(p) = cfg.profile_at(active) else { return };
-            let leds = if self.flash_until.is_some() && self.applied.is_some() {
+            let flashing = self.flash_until.is_some() && self.applied.is_some();
+            let leds = if flashing {
                 self.applied.as_ref().map_or([[0u8; 11]; 2], |a| a.leds)
             } else if self.asleep {
                 [[0u8; 11]; 2]
             } else {
                 [p.lighting[0].to_led(), p.lighting[1].to_led()]
             };
+            let host = if flashing || self.asleep { [false; 2] } else { [p.lighting[0].effect.is_host(), p.lighting[1].effect.is_host()] };
+            self.set_fx([0, 1].map(|z| host[z].then_some(p.lighting[z])), false);
             let target = Applied {
                 map: p.spy_map(),
                 dpi: if self.dpi_shift { p.dpi.shift } else { p.dpi.active },
                 rate_ms: p.rate_ms,
                 leds,
+                host,
             };
             match &self.applied {
                 None => {
@@ -366,7 +393,7 @@ impl Engine {
                         let _ = self.dev.send(DevCmd::SetRate(target.rate_ms));
                     }
                     for z in 0..2 {
-                        if old.leds[z] != target.leds[z] {
+                        if !target.host[z] && (old.leds[z] != target.leds[z] || old.host[z]) {
                             let _ = self.dev.send(DevCmd::SetZone { zone: z as u8, led: target.leds[z] });
                         }
                     }
@@ -375,10 +402,13 @@ impl Engine {
             self.applied = Some(target);
             self.st.controlled = true;
         } else if self.applied.is_some() {
+            self.set_fx([None, None], true);
             self.release_all();
             // If G HUB just started it is initialising the mouse itself; don't fight it.
             if self.st.connected && !self.st.ghub_running {
                 let _ = self.dev.send(DevCmd::Release);
+            } else if self.st.connected {
+                let _ = self.dev.send(DevCmd::Yield);
             }
             self.applied = None;
             self.st.controlled = false;
@@ -619,12 +649,14 @@ impl Engine {
             (self.osd)(OsdKind::Dpi { value, levels, active: index as u8 });
         }
         if flash_on && !self.asleep && self.applied.is_some() {
+            self.set_fx([None, None], true);
             let led = Lighting { effect: Effect::Fixed, color: dpi_flash_color(index), ..Default::default() }.to_led();
             for zone in 0..2u8 {
                 let _ = self.dev.send(DevCmd::SetZone { zone, led });
             }
             if let Some(ap) = &mut self.applied {
                 ap.leds = [led; 2];
+                ap.host = [false; 2];
             }
             self.flash_until = Some(Instant::now() + Duration::from_millis(1200));
         }
@@ -1077,5 +1109,109 @@ mod tests {
         set_observer(true);
         r.e.reconcile();
         assert!(r.cmds().is_empty());
+    }
+
+    type FxLog = Arc<Mutex<Vec<([Option<Lighting>; 2], usize)>>>;
+
+    /// Records every fx call with the number of device commands waiting at that moment.
+    fn fx_rec(r: &mut Rig) -> FxLog {
+        let log: FxLog = Arc::default();
+        let (sink, rx) = (log.clone(), r.dev_rx.clone());
+        r.e.fx = Box::new(move |z| sink.lock().unwrap().push((z, rx.len())));
+        log
+    }
+
+    fn host_logo(effect: Effect) -> impl FnOnce(&mut Config) {
+        move |c| c.apps[0].profiles[0].lighting[1] = Lighting { effect, ..Default::default() }
+    }
+
+    fn zone_cmds(cmds: Vec<DevCmd>) -> Vec<(u8, [u8; 11])> {
+        cmds.into_iter().filter_map(|c| if let DevCmd::SetZone { zone, led } = c { Some((zone, led)) } else { None }).collect()
+    }
+
+    fn last_fx(log: &FxLog) -> ([Option<Lighting>; 2], usize) {
+        log.lock().unwrap().last().cloned().expect("no fx call")
+    }
+
+    #[test]
+    fn host_zone_is_taken_by_the_fx_thread() {
+        let mut r = rig(host_logo(Effect::Screen));
+        let log = fx_rec(&mut r);
+        r.e.reconcile();
+        let cmds = r.cmds();
+        let Some(DevCmd::TakeControl(ap)) = cmds.first() else { panic!("no TakeControl") };
+        assert_eq!(ap.host, [false, true]);
+        assert_eq!(ap.leds[1], fixed_led([0, 0, 0]));
+        let lighting = r.cfg.lock().unwrap().apps[0].profiles[0].lighting[1];
+        assert_eq!(last_fx(&log).0, [None, Some(lighting)]);
+    }
+
+    #[test]
+    fn leaving_a_host_effect_resends_the_device_effect() {
+        let mut r = rig(host_logo(Effect::Audio));
+        let log = fx_rec(&mut r);
+        r.take_control();
+        r.cfg.lock().unwrap().apps[0].profiles[0].lighting[1] = Lighting { effect: Effect::Fixed, color: [0, 0, 0], ..Default::default() };
+        r.e.reconcile();
+        assert_eq!(zone_cmds(r.cmds()), vec![(1, fixed_led([0, 0, 0]))]);
+        assert_eq!(last_fx(&log), ([None, None], 0));
+    }
+
+    #[test]
+    fn dpi_flash_pauses_the_fx_thread() {
+        let mut r = rig(|c| {
+            c.general.dpi_flash = true;
+            host_logo(Effect::Screen)(c);
+        });
+        let log = fx_rec(&mut r);
+        r.take_control();
+        r.press(7);
+        assert_eq!(last_fx(&log).0, [None, None]);
+        r.cmds();
+        r.e.flash_until = Some(Instant::now() - Duration::from_millis(1));
+        assert!(r.e.expire_flash());
+        r.e.reconcile();
+        assert!(last_fx(&log).0[1].is_some() && last_fx(&log).0[0].is_none());
+        let zones = zone_cmds(r.cmds());
+        let own0 = r.cfg.lock().unwrap().apps[0].profiles[0].lighting[0].to_led();
+        assert_eq!(zones, vec![(0, own0)]);
+    }
+
+    #[test]
+    fn ending_control_always_clears_the_fx_zones() {
+        let mut r = rig(host_logo(Effect::Screen));
+        let log = fx_rec(&mut r);
+        r.take_control();
+        r.e.on_control_lost();
+        assert_eq!(last_fx(&log).0, [None, None]);
+        drop(r);
+        let mut r = rig(host_logo(Effect::Screen));
+        let log = fx_rec(&mut r);
+        r.take_control();
+        r.cmds();
+        r.e.release_device();
+        let (z, waiting) = last_fx(&log);
+        assert_eq!((z, waiting), ([None, None], 0));
+        assert!(matches!(r.cmds().first(), Some(DevCmd::Release)));
+    }
+
+    #[test]
+    fn lighting_sleep_stops_host_zones() {
+        let mut r = rig(host_logo(Effect::Audio));
+        let log = fx_rec(&mut r);
+        r.take_control();
+        r.e.asleep = true;
+        r.e.reconcile();
+        assert_eq!(last_fx(&log).0, [None, None]);
+        assert_eq!(zone_cmds(r.cmds()), vec![(0, [0u8; 11]), (1, [0u8; 11])]);
+    }
+
+    #[test]
+    fn ghub_appearing_yields_instead_of_releasing() {
+        let mut r = rig(host_logo(Effect::Screen));
+        r.take_control();
+        r.e.st.ghub_running = true;
+        r.e.reconcile();
+        assert!(matches!(r.cmds().as_slice(), [DevCmd::Yield]));
     }
 }

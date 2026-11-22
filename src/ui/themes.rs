@@ -371,10 +371,7 @@ impl GhubApp {
                 let id = match existing.filter(|&i| i < ap.custom.len()) {
                     Some(i) => {
                         let mut t = draft;
-                        t.name = ap.unique_name(&t.name.trim().chars().take(24).collect::<String>(), Some(i));
-                        if t.name.is_empty() {
-                            t.name = "My Theme".into();
-                        }
+                        t.name = ap.normalize_name(&t.name, Some(i));
                         t.id = ap.custom[i].id.clone();
                         let id = t.id.clone();
                         ap.custom[i] = t;
@@ -404,7 +401,7 @@ impl GhubApp {
     }
 
     /// Open the editor on a draft (used by the shot pages).
-    pub fn open_theme_editor(&mut self, draft: CustomTheme, existing: Option<usize>, role: usize) {
+    pub(crate) fn open_theme_editor(&mut self, draft: CustomTheme, existing: Option<usize>, role: usize) {
         self.theme_edit = Some(ThemeEditor::new(draft, existing, role));
         self.route = Route::Settings(1);
     }

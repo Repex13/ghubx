@@ -155,6 +155,7 @@ pub struct GhubApp {
     pub(crate) ghub_autostart: Option<Option<bool>>,
     pub(crate) onboard: Vec<crate::profile::OnboardSlot>,
     pub(crate) onboard_asked: bool,
+    pub(crate) fx: Option<crate::fx::Handle>,
     pub(crate) theme_edit: Option<themes::ThemeEditor>,
     pub(crate) theme_page: usize,
     theme_io: Option<themes::ThemeIoRx>,
@@ -172,6 +173,7 @@ impl GhubApp {
         rx: Receiver<UiEvent>,
         exit: Arc<Exit>,
         shot: Option<Shot>,
+        fx: Option<crate::fx::Handle>,
     ) -> Self {
         let stash = Stash::default();
         if shot.is_none() {
@@ -222,6 +224,7 @@ impl GhubApp {
             ghub_autostart: None,
             onboard: Vec::new(),
             onboard_asked: false,
+            fx,
             theme_edit: None,
             theme_page: 0,
             theme_io: None,
@@ -242,7 +245,7 @@ impl GhubApp {
             "home" | "dropdown" => Route::Home,
             "assign" | "assign2" | "gshift" | "macro" | "macroedit" | "macrorec" | "select" | "keys" | "actions" | "gamecmds" | "p180game" => Route::Device(DevTab::Assignments),
             "sens" => Route::Device(DevTab::Sensitivity),
-            "light" | "fixed" => Route::Device(DevTab::Lighting),
+            "light" | "fixed" | "effectmenu" | "screenfx" | "audiofx" | "audiofxadv" => Route::Device(DevTab::Lighting),
             "devset" | "onboard" => Route::DeviceSettings,
             "profiles" | "appdetail" | "addgame" => Route::Profiles,
             "settings" | "sleep" => Route::Settings(0),
@@ -271,9 +274,29 @@ impl GhubApp {
         if page == "fixed" {
             let mut c = self.cfg.lock().unwrap();
             let p = c.current_profile_mut();
-            p.lighting[1] = crate::profile::Lighting { effect: crate::profile::Effect::Fixed, color: [0x00, 0xB8, 0xFC], period_ms: 4000, brightness: 80 };
+            p.lighting[1] = crate::profile::Lighting { effect: crate::profile::Effect::Fixed, color: [0x00, 0xB8, 0xFC], period_ms: 4000, brightness: 80, ..Default::default() };
             drop(c);
             self.light.zone = 1;
+        }
+        if matches!(page, "effectmenu" | "screenfx" | "audiofx" | "audiofxadv") {
+            use crate::profile::{Effect, HostFx, Lighting, ScreenArea};
+            let mut c = self.cfg.lock().unwrap();
+            c.current_profile_mut().lighting[1] = match page {
+                "effectmenu" => Lighting { effect: Effect::Fixed, color: [0x00, 0xB8, 0xFC], period_ms: 4000, brightness: 80, ..Default::default() },
+                "screenfx" => Lighting { effect: Effect::Screen, host: HostFx { area: ScreenArea::Center, boost: 50, smoothing: 40, ..Default::default() }, ..Default::default() },
+                _ => Lighting {
+                    effect: Effect::Audio,
+                    color: [0x00, 0xB8, 0xFC],
+                    host: HostFx { color2: [0x10, 0x10, 0x30], auto_sens: page != "audiofxadv", bass_only: page == "audiofxadv", ..Default::default() },
+                    ..Default::default()
+                },
+            };
+            drop(c);
+            self.light.zone = 1;
+            self.light.set_advanced(page == "audiofxadv");
+            if page == "effectmenu" {
+                self.overlay = Some(Overlay::Effect(Rect::from_min_size(pos2(88.0, 386.0), vec2(70.0, 20.0))));
+            }
         }
         if page == "themeedit" || page == "mythemes" {
             use crate::profile::CustomTheme;
@@ -415,6 +438,13 @@ impl GhubApp {
             let l = cfg.current().1.lighting[1];
             match l.effect {
                 Effect::Fixed | Effect::Breathing if l.color.iter().max().copied().unwrap_or(0) >= 40 => Some(l.color),
+                Effect::Screen | Effect::Audio => {
+                    ctx.request_repaint_after(Duration::from_millis(100));
+                    self.fx.as_ref().and_then(|h| {
+                        h.preview_zone(1, l);
+                        h.preview(1)
+                    })
+                }
                 Effect::Cycle => {
                     ctx.request_repaint_after(Duration::from_millis(100));
                     let period = (l.period_ms.max(1) as f64) / 1000.0;
@@ -644,7 +674,7 @@ impl GhubApp {
         let Some(kind) = &self.overlay else { return };
         let (anchor, size) = match kind {
             Overlay::Profiles(r) => (r.left_bottom() + vec2(0.0, 4.0), vec2(r.width().max(240.0), 0.0)),
-            Overlay::Effect(r) => (r.left_bottom() + vec2(0.0, 2.0), vec2(160.0, 0.0)),
+            Overlay::Effect(r) => (r.left_bottom() + vec2(0.0, 2.0), vec2(200.0, 0.0)),
             Overlay::Slot { pos, .. } | Overlay::Dpi { pos, .. } => (*pos, vec2(200.0, 0.0)),
             Overlay::Persistent(r) => (r.left_bottom() + vec2(0.0, 4.0), vec2(r.width(), 0.0)),
         };

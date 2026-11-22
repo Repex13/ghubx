@@ -87,6 +87,8 @@ fn main() -> eframe::Result<()> {
         }
     }
     let cfg = Arc::new(Mutex::new(config));
+    let mailbox = ghubx::fx::Mailbox::default();
+    let fx = shot.is_none().then(|| ghubx::fx::Handle::spawn(mailbox.clone(), ghubx::fx::win_source));
 
     let (dev_tx, dev_rx) = unbounded::<DevCmd>();
     let (eng_tx, eng_rx) = unbounded::<EngineMsg>();
@@ -97,13 +99,16 @@ fn main() -> eframe::Result<()> {
         std::thread::Builder::new()
             .name("hid-io".into())
             .spawn(move || {
-                ghubx::io::run(dev_rx, eng_tx, ui_tx);
+                ghubx::io::run(dev_rx, eng_tx, ui_tx, mailbox);
                 let _ = done_tx.send(());
             })
             .expect("spawn io thread");
     }
     {
-        let engine = Engine::new(cfg.clone(), dev_tx, ui_tx);
+        let mut engine = Engine::new(cfg.clone(), dev_tx, ui_tx);
+        if let Some(h) = fx.clone() {
+            engine = engine.with_host_lighting(h);
+        }
         std::thread::Builder::new().name("engine".into()).spawn(move || engine.run(eng_rx)).expect("spawn engine thread");
     }
 
@@ -139,7 +144,7 @@ fn main() -> eframe::Result<()> {
                     },
                 );
             }
-            let mut app = GhubApp::new(cc, cfg, eng_tx, ui_rx, exit, shot);
+            let mut app = GhubApp::new(cc, cfg, eng_tx, ui_rx, exit, shot, fx);
             if let Some(r) = script {
                 app.set_script(r);
             }

@@ -331,6 +331,59 @@ def lighting():
 
 
 @scenario
+def picker_matches_pixels():
+    for i, (x, y) in enumerate([(150, 480), (300, 520)]):  # two points inside the SV square (92..370 x 435..552)
+        name = f"picker_matches_pixels_{i}"
+        res = run_script(name, ["wait 1500", HOME_TILE, SETTLE, RAIL_LIGHT, SETTLE,
+                                "click 194 320",  # LOGO tab
+                                SETTLE, "click 110 396",  # EFFECT menu
+                                SETTLE, "click 110 430",  # menu: FIXED
+                                SETTLE, "shot {shots}/before.png",
+                                f"click {x} {y}",  # inside the SV square
+                                SETTLE])
+        ok_run(res)
+        want = pixel(res, "before.png", (x, y))
+        got = prof(res.cfg)["lighting"][1]["color"]
+        must(all(abs(a - b) <= 6 for a, b in zip(got, want)), f"click ({x},{y}): saved {got}, pixel {want}")
+
+
+LIGHT_LOGO_EFFECT_MENU = ["wait 1500", HOME_TILE, SETTLE, RAIL_LIGHT, SETTLE,
+                          "click 194 320",  # LOGO tab
+                          SETTLE, "click 110 396",  # EFFECT menu
+                          SETTLE]
+
+
+@scenario
+def lighting_screen_sampler():
+    res = run_script("lighting_screen_sampler", LIGHT_LOGO_EFFECT_MENU + [
+        "click 110 538",  # menu: SCREEN SAMPLER
+        SETTLE, "click 108 507",  # mini screen: top-left cell
+        SETTLE, "click 227 590",  # COLOR BOOST slider at about 75 %
+        SETTLE])
+    ok_run(res)
+    l1, l0 = prof(res.cfg)["lighting"][1], prof(res.cfg)["lighting"][0]
+    must(l1["effect"] == "Screen" and l1["host"]["area"] == "TopLeft", l1)
+    must(70 <= l1["host"]["boost"] <= 80, l1)
+    must(l0["effect"] == "Cycle", l0)
+
+
+@scenario
+def lighting_audio_visualizer():
+    res = run_script("lighting_audio_visualizer", LIGHT_LOGO_EFFECT_MENU + [
+        "click 110 574",  # menu: AUDIO VISUALIZER
+        SETTLE, "click 240 442",  # BACKGROUND COLOR tab
+        SETTLE, "dclick 345 620", "text 101030", "key Enter",  # picker hex field
+        SETTLE, "click 130 692",  # ADVANCED SETTINGS row
+        SETTLE, "click 150 603",  # PULSE ON BASS ONLY
+        SETTLE, "click 150 523",  # AUTO-ADJUST SENSITIVITY
+        SETTLE])
+    ok_run(res)
+    l1 = prof(res.cfg)["lighting"][1]
+    h = l1["host"]
+    must(l1["effect"] == "Audio" and h["color2"] == [16, 16, 48] and h["bass_only"] is True and h["auto_sens"] is False, l1)
+
+
+@scenario
 def profiles_crud():
     res = run_script("profiles_crud", ["wait 1500", HOME_NAV_PROFILES, SETTLE,
                                        "click 498 400",  # Desktop tile

@@ -32,7 +32,7 @@ impl OnboardJob {
     }
 }
 
-pub fn run(cmd_rx: Receiver<DevCmd>, eng: Sender<EngineMsg>, ui: Sender<UiEvent>) {
+pub fn run(cmd_rx: Receiver<DevCmd>, eng: Sender<EngineMsg>, ui: Sender<UiEvent>, mailbox: crate::fx::Mailbox) {
     let mut api = match HidApi::new() {
         Ok(a) => a,
         Err(e) => {
@@ -94,6 +94,17 @@ pub fn run(cmd_rx: Receiver<DevCmd>, eng: Sender<EngineMsg>, ui: Sender<UiEvent>
                     Err(TryRecvError::Empty) => break,
                 }
             }
+            if st.controlled {
+                for (zone, rgb) in mailbox.take().into_iter().enumerate() {
+                    if let Some(color) = rgb {
+                        let led = crate::profile::Lighting { effect: crate::profile::Effect::Fixed, color, ..Default::default() }.to_led();
+                        // RAM only: a host-driven colour must never reach the flash
+                        if dev.set_zone_effect(zone as u8, &led, false).is_ok() {
+                            st.zone_leds[zone] = led;
+                        }
+                    }
+                }
+            }
             if let Some(job) = &mut onboard_job
                 && let Some(slots) = job.step(&dev)
             {
@@ -152,6 +163,7 @@ fn exec(dev: &G502, st: &mut DeviceState, cmd: DevCmd) -> Result<()> {
             st.controlled = false;
             refresh(dev, st);
         }
+        DevCmd::Yield => st.controlled = false,
         DevCmd::SetDpi(d) => {
             dev.set_dpi(d)?;
             st.dpi = d;
