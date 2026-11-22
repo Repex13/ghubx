@@ -70,13 +70,13 @@ Now that the repo is public (`https://github.com/Repex13/ghubx`):
 
 ## 4. Quality of life `[proposed]`
 
-- **Tray quick-menu** `[done TBD]` — right-click tray icon: switch profile,
+- **Tray quick-menu** `[done 5e67bc3]` — right-click tray icon: switch profile,
   current DPI, who controls the mouse (GHUB-X / G HUB / on-board).
-- **Profile hotkey** `[done TBD]` — a combo that cycles profiles without
+- **Profile hotkey** `[done 5e67bc3]` — a combo that cycles profiles without
   opening.
-- **Auto-backup** `[done TBD]` — snapshot `config.toml` + on-board backup
+- **Auto-backup** `[done 5e67bc3]` — snapshot `config.toml` + on-board backup
   into `backups/` on every write/import, keep last 10.
-- **Diagnostics page** `[done TBD]` — firmware version, HID++ feature table,
+- **Diagnostics page** `[done 5e67bc3]` — firmware version, HID++ feature table,
   one-click "copy report" for debugging.
 
 ## 5. Lighting extras `[proposed]`
