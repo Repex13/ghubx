@@ -443,6 +443,23 @@ impl Default for General {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Appearance {
+    /// Preset id (see `ui::palette::THEMES`).
+    pub theme: String,
+    /// Custom accent colour; `None` keeps the preset's own.
+    pub accent: Option<[u8; 3]>,
+    /// Use the logo zone's lighting colour as the accent.
+    pub follow_lighting: bool,
+}
+
+impl Default for Appearance {
+    fn default() -> Self {
+        Self { theme: "ghub-dark".into(), accent: None, follow_lighting: false }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Config {
     pub apps: Vec<AppEntry>,
     /// Application whose profile the selector shows (0 = Desktop).
@@ -457,6 +474,8 @@ pub struct Config {
     pub general: General,
     #[serde(default)]
     pub extras: Extras,
+    #[serde(default)]
+    pub appearance: Appearance,
 }
 
 impl Default for Config {
@@ -468,6 +487,7 @@ impl Default for Config {
             persistent: None,
             general: General::default(),
             extras: Extras::default(),
+            appearance: Appearance::default(),
         }
     }
 }
@@ -535,7 +555,7 @@ impl Config {
     }
 
     pub fn path() -> std::path::PathBuf {
-        let base = std::env::var("APPDATA").unwrap_or_else(|_| ".".into());
+        let base = std::env::var("GHUBX_CONFIG_DIR").or_else(|_| std::env::var("APPDATA")).unwrap_or_else(|_| ".".into());
         std::path::Path::new(&base).join("ghubx").join("config.toml")
     }
 
@@ -626,6 +646,14 @@ impl OnboardProfile {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn config_without_appearance_loads_defaults() {
+        let c: Config = toml::from_str("apps = []").unwrap();
+        assert_eq!(c.appearance.theme, "ghub-dark");
+        assert_eq!(c.appearance.accent, None);
+        assert!(!c.appearance.follow_lighting);
+    }
+
     use super::*;
 
     /// Sector 1 as read from the user's G502 HERO (probe round 8).

@@ -89,7 +89,7 @@ enum ListItem {
 
 impl GhubApp {
     pub(crate) fn assignments(&mut self, ui: &mut Ui, panel: Rect, content: Rect) {
-        text(ui, pos2(panel.left() + 16.0, panel.top() + 17.0), Align2::LEFT_TOP, "Assignments", T_PANEL_TITLE);
+        text(ui, pos2(panel.left() + 16.0, panel.top() + 17.0), Align2::LEFT_TOP, "Assignments", t_panel_title());
         let x0 = panel.left() + 16.0;
         if let Some(i) = tabs(ui, pos2(x0, panel.top() + 74.0), &TABS[..3], self.asg.tab.min(9), 16.0, "asg-tabs1") {
             self.asg.tab = i;
@@ -110,7 +110,7 @@ impl GhubApp {
                 3 => "Drag a macro onto a target to assign it to this device.",
                 _ => "Drag a system control onto a target to assign it to this device.",
             };
-            para(ui, pos2(x0, panel.top() + 146.0), 278.0, hint, Ts::new(Fam::Reg, 12.0, HIGH).ls(0.6));
+            para(ui, pos2(x0, panel.top() + 146.0), 278.0, hint, Ts::new(Fam::Reg, 12.0, pal().text_high).ls(0.6));
             let placeholder = match self.asg.tab {
                 0 => "Search for a command",
                 1 => "Search for a key",
@@ -215,8 +215,8 @@ impl GhubApp {
                         let open = !self.asg.collapsed.contains(title.as_str());
                         let tx = rect.left();
                         let _ = tag;
-                        text(ui, pos2(tx, rect.center().y), Align2::LEFT_CENTER, title, Ts::new(Fam::Bold, 14.0, WHITE).ls(0.3));
-                        chevron(ui.painter(), pos2(rect.right() - 12.0, rect.center().y), 4.5, open, Stroke::new(1.6, WHITE));
+                        text(ui, pos2(tx, rect.center().y), Align2::LEFT_CENTER, title, Ts::new(Fam::Bold, 14.0, pal().text).ls(0.3));
+                        chevron(ui.painter(), pos2(rect.right() - 12.0, rect.center().y), 4.5, open, Stroke::new(1.6, pal().text));
                         if r.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
                             toggle_section = Some(title.clone());
                         }
@@ -225,10 +225,10 @@ impl GhubApp {
                             let te = egui::TextEdit::singleline(&mut launch_path)
                                 .hint_text("Path to an .exe")
                                 .frame(egui::Frame::NONE)
-                                .font(Ts::new(Fam::Reg, 12.0, WHITE).font())
-                                .text_color(WHITE);
+                                .font(Ts::new(Fam::Reg, 12.0, pal().text).font())
+                                .text_color(pal().text);
                             ui.put(Rect::from_min_max(row.min + vec2(4.0, 6.0), pos2(row.right() - 104.0, row.bottom() - 6.0)), te);
-                            ui.painter().line_segment([pos2(row.left(), row.bottom() - 4.0), pos2(row.right() - 104.0, row.bottom() - 4.0)], Stroke::new(1.0, OUTLINE_HI));
+                            ui.painter().line_segment([pos2(row.left(), row.bottom() - 4.0), pos2(row.right() - 104.0, row.bottom() - 4.0)], Stroke::new(1.0, pal().outline_hi));
                             let br = Rect::from_min_size(pos2(row.right() - 96.0, row.top() + 4.0), vec2(96.0, 26.0));
                             let r = click(ui, br, "add-app");
                             plus_text(ui, br, "ADD APPLICATION", r.hovered());
@@ -239,29 +239,29 @@ impl GhubApp {
                     }
                     ListItem::Card(c) => {
                         let left_w = if c.detail.is_empty() { 190.0 } else { 112.0 };
-                        let lt = if tab == 4 || tab == 1 { Ts::new(Fam::Light, 12.0, MUTED) } else { Ts::new(Fam::Reg, 12.0, WHITE).ls(0.6) };
+                        let lt = if tab == 4 || tab == 1 { Ts::new(Fam::Light, 12.0, pal().muted) } else { Ts::new(Fam::Reg, 12.0, pal().text).ls(0.6) };
                         let gl = galley(ui, &c.name, lt, left_w);
-                        let gd = galley(ui, &c.detail, Ts::new(Fam::Reg, 12.0, MUTED).ls(0.6), 140.0);
+                        let gd = galley(ui, &c.detail, Ts::new(Fam::Reg, 12.0, pal().muted).ls(0.6), 140.0);
                         let h = (gl.size().y.max(gd.size().y) + 10.0).max(32.0);
                         let (rect, r) = ui.allocate_exact_size(vec2(w, h), Sense::click_and_drag());
                         let r = r.on_hover_cursor(egui::CursorIcon::Grab);
                         r.dnd_set_drag_payload(c.assignment.clone());
                         if r.hovered() {
-                            ui.painter().rect_filled(rect, CornerRadius::same(3), Color32::from_white_alpha(10));
+                            ui.painter().rect_filled(rect, CornerRadius::same(3), pal().ink(10));
                         }
                         let mut lx = rect.left() + 2.0;
                         if matches!(c.assignment, Assignment::Macro(_)) {
                             macro_badge(ui, Rect::from_min_size(pos2(lx, rect.center().y - 7.0), vec2(14.0, 14.0)));
                             lx += 22.0;
                         }
-                        let lcol = if r.hovered() { WHITE } else { lt.color };
+                        let lcol = if r.hovered() { pal().text } else { lt.color };
                         ui.painter().galley(pos2(lx, rect.center().y - gl.size().y / 2.0), gl, lcol);
                         if !c.detail.is_empty() {
-                            ui.painter().galley(pos2(rect.left() + 121.0, rect.center().y - gd.size().y / 2.0), gd, MUTED);
+                            ui.painter().galley(pos2(rect.left() + 121.0, rect.center().y - gd.size().y / 2.0), gd, pal().muted);
                         }
                         let assigned = slots_for(&c.assignment);
                         if !assigned.is_empty() && c.detail.is_empty() {
-                            text(ui, pos2(rect.right() - 30.0, rect.center().y), Align2::RIGHT_CENTER, &assigned, Ts::new(Fam::Reg, 12.0, WHITE).ls(0.3));
+                            text(ui, pos2(rect.right() - 30.0, rect.center().y), Align2::RIGHT_CENTER, &assigned, Ts::new(Fam::Reg, 12.0, pal().text).ls(0.3));
                         }
                         if let Assignment::Macro(id) = &c.assignment
                             && r.hovered()
@@ -269,16 +269,16 @@ impl GhubApp {
                                 let er = Rect::from_center_size(pos2(rect.right() - 60.0, rect.center().y), vec2(36.0, 20.0));
                                 let xr = Rect::from_center_size(pos2(rect.right() - 16.0, rect.center().y), vec2(20.0, 20.0));
                                 let e = click(ui, er, ("edit", i));
-                                text(ui, er.center(), Align2::CENTER_CENTER, "EDIT", Ts::new(Fam::Bold, 10.0, if e.hovered() { PRIMARY } else { WHITE }));
+                                text(ui, er.center(), Align2::CENTER_CENTER, "EDIT", Ts::new(Fam::Bold, 10.0, if e.hovered() { pal().primary } else { pal().text }));
                                 let x = click(ui, xr, ("del", i));
-                                caption_glyph(ui.painter(), xr.center(), 2, if x.hovered() { ERROR } else { MUTED });
+                                caption_glyph(ui.painter(), xr.center(), 2, if x.hovered() { pal().error } else { pal().muted });
                                 if e.clicked() {
                                     edit_macro = Some(id.clone());
                                 } else if x.clicked() {
                                     delete_macro = Some(id.clone());
                                 }
                         }
-                        ui.painter().line_segment([pos2(rect.left(), rect.bottom() - 0.5), pos2(rect.right(), rect.bottom() - 0.5)], Stroke::new(1.0, ROW_LINE));
+                        ui.painter().line_segment([pos2(rect.left(), rect.bottom() - 0.5), pos2(rect.right(), rect.bottom() - 0.5)], Stroke::new(1.0, pal().row_line));
                         if r.clicked() && edit_macro.is_none() && delete_macro.is_none() {
                             picked = Some(c.assignment.clone());
                         }
@@ -288,7 +288,7 @@ impl GhubApp {
             if tab == 3 && macros.is_empty() {
                 ui.add_space(8.0);
                 let (r, _) = ui.allocate_exact_size(vec2(w, 60.0), Sense::hover());
-                para(ui, r.min, w, "No macros yet. Create one, then drag it onto a button.", Ts::new(Fam::Reg, 12.0, MUTED).ls(0.6));
+                para(ui, r.min, w, "No macros yet. Create one, then drag it onto a button.", Ts::new(Fam::Reg, 12.0, pal().muted).ls(0.6));
             }
             ui.add_space(12.0);
         });
@@ -339,7 +339,7 @@ impl GhubApp {
         let mut x = top.x;
         for (bit, name) in [(MOD_CTRL, "CTRL"), (MOD_SHIFT, "SHIFT"), (MOD_ALT, "ALT"), (MOD_WIN, "WIN")] {
             let on = self.asg.mods & bit != 0;
-            let g = galley(ui, name, Ts::new(Fam::Bold, 11.0, WHITE), f32::INFINITY);
+            let g = galley(ui, name, Ts::new(Fam::Bold, 11.0, pal().text), f32::INFINITY);
             let r = Rect::from_min_size(pos2(x, top.y + 2.0), vec2(g.size().x + 20.0, 24.0));
             if pill(ui, r, name, on, ("mod", bit)).clicked() {
                 self.asg.mods ^= bit;
@@ -354,10 +354,10 @@ impl GhubApp {
         let cfg = self.cfg();
         let e = cfg.extras.clone();
         let box_r = Rect::from_min_size(top, vec2(278.0, 300.0));
-        ui.painter().rect_filled(box_r, CornerRadius::same(8), Color32::from_rgb(0x2a, 0x2b, 0x30));
+        ui.painter().rect_filled(box_r, CornerRadius::same(8), pal().surface_hi);
         let x = box_r.left() + 12.0;
-        text(ui, pos2(x, box_r.top() + 12.0), Align2::LEFT_TOP, "PERFECT 180", Ts::new(Fam::Bold, 12.0, WHITE));
-        para(ui, pos2(x, box_r.top() + 30.0), 254.0, "One press turns you 180°. Calibrate it from your in-game sensitivity.", Ts::new(Fam::Reg, 11.0, MUTED).ls(0.4));
+        text(ui, pos2(x, box_r.top() + 12.0), Align2::LEFT_TOP, "PERFECT 180", Ts::new(Fam::Bold, 12.0, pal().text));
+        para(ui, pos2(x, box_r.top() + 30.0), 254.0, "One press turns you 180°. Calibrate it from your in-game sensitivity.", Ts::new(Fam::Reg, 11.0, pal().muted).ls(0.4));
 
         // game presets (2 x 2); a count that doesn't match the preset maths shows as CUSTOM
         let custom = P180_GAMES.len() - 1;
@@ -378,7 +378,7 @@ impl GhubApp {
         let row = |i: usize| box_r.top() + 136.0 + i as f32 * 28.0;
 
         // in-game sensitivity
-        text(ui, pos2(x, row(0)), Align2::LEFT_CENTER, "IN-GAME SENS", T_SMALL_LABEL.color(if yaw > 0.0 { LABEL } else { DISABLED }));
+        text(ui, pos2(x, row(0)), Align2::LEFT_CENTER, "IN-GAME SENS", t_small_label().color(if yaw > 0.0 { pal().label } else { pal().disabled }));
         let sens_r = Rect::from_min_size(pos2(x + 108.0, row(0) - 11.0), vec2(80.0, 22.0));
         let mut sens_val = e.p180_sens;
         if yaw > 0.0 {
@@ -389,11 +389,11 @@ impl GhubApp {
                 recalc = true;
             }
         } else {
-            ui.painter().rect_stroke(sens_r, CornerRadius::same(4), Stroke::new(1.0, Color32::from_white_alpha(20)), StrokeKind::Inside);
+            ui.painter().rect_stroke(sens_r, CornerRadius::same(4), Stroke::new(1.0, pal().ink(20)), StrokeKind::Inside);
         }
 
         // counts: exact field + log slider (100 .. 100 000)
-        text(ui, pos2(x, row(1)), Align2::LEFT_CENTER, "COUNTS", T_SMALL_LABEL);
+        text(ui, pos2(x, row(1)), Align2::LEFT_CENTER, "COUNTS", t_small_label());
         let counts_r = Rect::from_min_size(pos2(x + 108.0, row(1) - 11.0), vec2(80.0, 22.0));
         let mut counts = e.p180_counts;
         let mut manual = false;
@@ -413,11 +413,11 @@ impl GhubApp {
         }
 
         // speed
-        text(ui, pos2(x, row(3)), Align2::LEFT_CENTER, "SPEED", T_SMALL_LABEL);
+        text(ui, pos2(x, row(3)), Align2::LEFT_CENTER, "SPEED", t_small_label());
         let mut ms = e.p180_ms as f32;
         let speed_r = Rect::from_min_size(pos2(x + 60.0, row(3) - 6.0), vec2(140.0, 12.0));
         let ms_changed = slider(ui, speed_r, &mut ms, 0.0..=200.0, "p180-ms");
-        text(ui, pos2(box_r.right() - 12.0, row(3)), Align2::RIGHT_CENTER, &format!("{}ms", ms.round() as u16), T_BODY_BOLD);
+        text(ui, pos2(box_r.right() - 12.0, row(3)), Align2::RIGHT_CENTER, &format!("{}ms", ms.round() as u16), t_body_bold());
 
         if recalc && let Some(c) = p180_counts_for(yaw, sens_val) {
             counts = c;
@@ -450,7 +450,7 @@ impl GhubApp {
                 let _ = self.eng.send(EngineMsg::TestPerfect180);
             }
         }
-        para(ui, pos2(x, br.bottom() + 8.0), 254.0, "Some games ignore injected input or don't allow turn binds in competitive play.", Ts::new(Fam::Reg, 10.0, MUTED).ls(0.3));
+        para(ui, pos2(x, br.bottom() + 8.0), 254.0, "Some games ignore injected input or don't allow turn binds in competitive play.", Ts::new(Fam::Reg, 10.0, pal().muted).ls(0.3));
         ui.add_space(312.0);
     }
 
@@ -473,7 +473,7 @@ impl GhubApp {
         let tex = if self.asg.side { self.tex.side.clone() } else { self.tex.front.clone() };
         let top = content.top() + (190.0 - 88.0) / 768.0 * win_h;
         let placed = Placed::new(view.origin, content.center().x, top, win_h * 0.504);
-        draw_render(ui, tex.as_ref(), placed, WHITE);
+        draw_render(ui, tex.as_ref(), placed, Color32::WHITE);
 
         let cfg = self.cfg();
         let (app, prof) = cfg.current();
@@ -492,7 +492,7 @@ impl GhubApp {
             let side = if hs.label.x < 0.0 { -1 } else if hs.label.x > view.origin.x { 1 } else { 0 };
 
             // label geometry
-            let ts = T_CALLOUT;
+            let ts = t_callout();
             let g = galley(ui, &label, ts, f32::INFINITY);
             let extra = match style {
                 LabelStyle::Key => 16.0,
@@ -528,7 +528,7 @@ impl GhubApp {
             let pressed = self.mask & (1 << slot) != 0;
 
             // leader line
-            let lc = if hot { Color32::from_rgb(0x8a, 0x8a, 0x8a) } else { LEADER };
+            let lc = if hot { pal().n(0x8a) } else { pal().leader };
             let st = Stroke::new(1.0, lc);
             let p = ui.painter();
             match side {
@@ -544,17 +544,17 @@ impl GhubApp {
                 }
             }
             // marker
-            let ring = if selected || dnd_hover { PRIMARY } else if pressed { AMBER } else { Color32::from_white_alpha(if hot { 120 } else { 70 }) };
+            let ring = if selected || dnd_hover { pal().primary } else if pressed { pal().amber } else { Color32::from_white_alpha(if hot { 120 } else { 70 }) };
             p.circle_filled(mp, 10.0, ring.gamma_multiply(if selected || dnd_hover || pressed { 1.0 } else { 0.55 }));
-            p.circle_filled(mp, 7.0, WHITE);
+            p.circle_filled(mp, 7.0, Color32::WHITE);
 
             // label
             let dim = gs && layer_a == Assignment::Default && !gshift_btn;
             let base_c = match style {
-                LabelStyle::Dpi => AMBER,
-                _ => WHITE,
+                LabelStyle::Dpi => pal().amber,
+                _ => pal().text,
             };
-            let color = if selected || dnd_hover { PRIMARY } else if dim { MUTED } else { base_c };
+            let color = if selected || dnd_hover { pal().primary } else if dim { pal().muted } else { base_c };
             match style {
                 LabelStyle::Key => keycap(ui, lrect, &label, ts.color(color)),
                 LabelStyle::Macro => {
@@ -590,9 +590,9 @@ impl GhubApp {
         }
         let ty = vy + 52.0;
         let sc = pos2(cx + 2.5, ty);
-        text(ui, pos2(sc.x - 27.0, ty), Align2::RIGHT_CENTER, "DEFAULT", Ts::new(Fam::Bold, 12.0, if gs { Color32::from_white_alpha(102) } else { WHITE }).ls(1.44));
-        text(ui, pos2(sc.x + 27.0, ty), Align2::LEFT_CENTER, "G-SHIFT", Ts::new(Fam::Bold, 12.0, if gs { WHITE } else { Color32::from_white_alpha(102) }).ls(1.44));
-        if switch(ui, sc, gs, GSHIFT, "gshift-switch").clicked() {
+        text(ui, pos2(sc.x - 27.0, ty), Align2::RIGHT_CENTER, "DEFAULT", Ts::new(Fam::Bold, 12.0, if gs { pal().ink(102) } else { pal().text }).ls(1.44));
+        text(ui, pos2(sc.x + 27.0, ty), Align2::LEFT_CENTER, "G-SHIFT", Ts::new(Fam::Bold, 12.0, if gs { pal().text } else { pal().ink(102) }).ls(1.44));
+        if switch(ui, sc, gs, pal().gshift, "gshift-switch").clicked() {
             self.asg.gshift = !gs;
             if self.asg.gshift && !prof.uses_gshift() {
                 self.say("Assign G-Shift to a button (SYSTEM > Device) to use this layer");
@@ -600,7 +600,7 @@ impl GhubApp {
         }
         if let Some(slot) = self.asg.selected {
             let name = catalog::slot_name(slot);
-            text(ui, pos2(cx, content.top() + 26.0), Align2::CENTER_CENTER, &format!("{name} selected — pick a command, or right-click for options"), Ts::new(Fam::Reg, 12.0, MUTED).ls(0.6));
+            text(ui, pos2(cx, content.top() + 26.0), Align2::CENTER_CENTER, &format!("{name} selected — pick a command, or right-click for options"), Ts::new(Fam::Reg, 12.0, pal().muted).ls(0.6));
         }
     }
 
@@ -610,10 +610,10 @@ impl GhubApp {
         let cfg = self.cfg();
         let (label, _) = catalog::label(&a, 0, &cfg.current().0.macros);
         let painter = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::unique("dnd-ghost")));
-        let g = galley(ui, &label, Ts::new(Fam::Bold, 12.0, WHITE), f32::INFINITY);
+        let g = galley(ui, &label, Ts::new(Fam::Bold, 12.0, pal().on_primary), f32::INFINITY);
         let r = Rect::from_min_size(p + vec2(14.0, 10.0), g.size() + vec2(24.0, 14.0));
-        painter.rect_filled(r, CornerRadius::same(100), PRIMARY);
-        painter.galley(r.center() - g.size() / 2.0, g, WHITE);
+        painter.rect_filled(r, CornerRadius::same(100), pal().primary);
+        painter.galley(r.center() - g.size() / 2.0, g, pal().on_primary);
         ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
     }
 
@@ -645,18 +645,18 @@ impl GhubApp {
             }
             ui.ctx().request_repaint();
         }
-        text(ui, pos2(x0, y), Align2::LEFT_TOP, if ed.id.is_some() { "EDIT MACRO" } else { "NEW MACRO" }, T_SECTION);
+        text(ui, pos2(x0, y), Align2::LEFT_TOP, if ed.id.is_some() { "EDIT MACRO" } else { "NEW MACRO" }, t_section());
         y += 28.0;
-        let te = egui::TextEdit::singleline(&mut ed.name).hint_text("Macro name").frame(egui::Frame::NONE).font(Ts::new(Fam::Reg, 14.0, WHITE).font()).text_color(WHITE);
+        let te = egui::TextEdit::singleline(&mut ed.name).hint_text("Macro name").frame(egui::Frame::NONE).font(Ts::new(Fam::Reg, 14.0, pal().text).font()).text_color(pal().text);
         ui.put(Rect::from_min_size(pos2(x0, y), vec2(w, 22.0)), te);
-        ui.painter().line_segment([pos2(x0, y + 24.0), pos2(x0 + w, y + 24.0)], Stroke::new(1.0, OUTLINE_HI));
+        ui.painter().line_segment([pos2(x0, y + 24.0), pos2(x0 + w, y + 24.0)], Stroke::new(1.0, pal().outline_hi));
         y += 40.0;
         for (kind, label) in [(MacroKind::NoRepeat, "NO REPEAT"), (MacroKind::RepeatWhileHolding, "REPEAT WHILE HOLDING"), (MacroKind::Toggle, "TOGGLE")] {
             if radio(ui, pos2(x0 + 6.0, y), ed.kind == kind, ("kind", label)).clicked() {
                 ed.kind = kind;
             }
             let r = click(ui, Rect::from_min_size(pos2(x0 + 16.0, y - 9.0), vec2(220.0, 18.0)), ("kind-l", label));
-            text(ui, pos2(x0 + 22.0, y), Align2::LEFT_CENTER, label, Ts::new(Fam::Reg, 12.0, if ed.kind == kind { WHITE } else { MUTED }));
+            text(ui, pos2(x0 + 22.0, y), Align2::LEFT_CENTER, label, Ts::new(Fam::Reg, 12.0, if ed.kind == kind { pal().text } else { pal().muted }));
             if r.clicked() {
                 ed.kind = kind;
             }
@@ -672,7 +672,7 @@ impl GhubApp {
         }
         if ed.recording {
             let t = ui.ctx().input(|i| i.time);
-            ui.painter().circle_filled(pos2(rb.left() + 14.0, rb.center().y), 4.0, ERROR.gamma_multiply(0.55 + 0.45 * (t * 4.0).sin().abs() as f32));
+            ui.painter().circle_filled(pos2(rb.left() + 14.0, rb.center().y), 4.0, pal().error.gamma_multiply(0.55 + 0.45 * (t * 4.0).sin().abs() as f32));
         }
         if checkbox(ui, pos2(rb.right() + 12.0, y + 8.0), "DELAYS", ed.record_delays, true, "rec-delays").clicked() {
             ed.record_delays = !ed.record_delays;
@@ -698,21 +698,21 @@ impl GhubApp {
         egui::ScrollArea::vertical().id_salt("macro-steps").auto_shrink([false, false]).stick_to_bottom(true).show(&mut child, |ui| {
             if ed.steps.is_empty() {
                 let (r, _) = ui.allocate_exact_size(vec2(270.0, 40.0), Sense::hover());
-                para(ui, r.min, 270.0, "Press Start Recording, then type the keys for this macro.", Ts::new(Fam::Reg, 12.0, MUTED).ls(0.6));
+                para(ui, r.min, 270.0, "Press Start Recording, then type the keys for this macro.", Ts::new(Fam::Reg, 12.0, pal().muted).ls(0.6));
             }
             for (i, s) in ed.steps.iter().enumerate() {
                 let (r, resp) = ui.allocate_exact_size(vec2(270.0, 26.0), Sense::hover());
                 if s.delay_ms > 0 {
-                    text(ui, pos2(r.left() + 2.0, r.center().y), Align2::LEFT_CENTER, &format!("{} ms", s.delay_ms), Ts::new(Fam::Reg, 11.0, MUTED).ls(0.4));
+                    text(ui, pos2(r.left() + 2.0, r.center().y), Align2::LEFT_CENTER, &format!("{} ms", s.delay_ms), Ts::new(Fam::Reg, 11.0, pal().muted).ls(0.4));
                 }
                 let arrow = if s.down { "▼" } else { "▲" };
                 let _ = arrow;
-                chevron(ui.painter(), pos2(r.left() + 70.0, r.center().y), 4.0, !s.down, Stroke::new(1.5, if s.down { PRIMARY } else { MUTED }));
-                text(ui, pos2(r.left() + 84.0, r.center().y), Align2::LEFT_CENTER, &catalog::vk_name(s.vk), Ts::new(Fam::Reg, 12.0, WHITE).ls(0.4));
+                chevron(ui.painter(), pos2(r.left() + 70.0, r.center().y), 4.0, !s.down, Stroke::new(1.5, if s.down { pal().primary } else { pal().muted }));
+                text(ui, pos2(r.left() + 84.0, r.center().y), Align2::LEFT_CENTER, &catalog::vk_name(s.vk), Ts::new(Fam::Reg, 12.0, pal().text).ls(0.4));
                 if resp.hovered() {
                     let xr = Rect::from_center_size(pos2(r.right() - 12.0, r.center().y), vec2(20.0, 20.0));
                     let x = click(ui, xr, ("step-x", i));
-                    caption_glyph(ui.painter(), xr.center(), 2, if x.hovered() { ERROR } else { MUTED });
+                    caption_glyph(ui.painter(), xr.center(), 2, if x.hovered() { pal().error } else { pal().muted });
                     if x.clicked() {
                         remove = Some(i);
                     }
@@ -761,7 +761,7 @@ fn launch_cards(cfg: &Config) -> Vec<Card> {
 }
 
 fn plus_text(ui: &Ui, r: Rect, label: &str, hot: bool) {
-    let c = if hot { PRIMARY } else { WHITE };
+    let c = if hot { pal().primary } else { pal().text };
     let pc = pos2(r.left() + 6.0, r.center().y);
     ui.painter().line_segment([pc - vec2(3.5, 0.0), pc + vec2(3.5, 0.0)], Stroke::new(1.5, c));
     ui.painter().line_segment([pc - vec2(0.0, 3.5), pc + vec2(0.0, 3.5)], Stroke::new(1.5, c));
@@ -769,28 +769,28 @@ fn plus_text(ui: &Ui, r: Rect, label: &str, hot: bool) {
 }
 
 pub(crate) fn search_field(ui: &mut Ui, rect: Rect, value: &mut String, placeholder: &str) {
-    search(ui.painter(), pos2(rect.left() + 8.0, rect.center().y), Stroke::new(1.6, WHITE));
+    search(ui.painter(), pos2(rect.left() + 8.0, rect.center().y), Stroke::new(1.6, pal().text));
     let te = egui::TextEdit::singleline(value)
-        .hint_text(egui::RichText::new(placeholder).color(LABEL).font(Ts::new(Fam::Reg, 14.0, LABEL).font()))
+        .hint_text(egui::RichText::new(placeholder).color(pal().label).font(Ts::new(Fam::Reg, 14.0, pal().label).font()))
         .frame(egui::Frame::NONE)
-        .font(Ts::new(Fam::Reg, 14.0, WHITE).font())
-        .text_color(WHITE);
+        .font(Ts::new(Fam::Reg, 14.0, pal().text).font())
+        .text_color(pal().text);
     let mut child = ui.new_child(UiBuilder::new().max_rect(Rect::from_min_max(pos2(rect.left() + 26.0, rect.top()), rect.right_bottom())));
     child.put(Rect::from_min_max(pos2(rect.left() + 26.0, rect.top() + 3.0), rect.right_bottom()), te);
-    ui.painter().line_segment([pos2(rect.left(), rect.bottom() + 1.0), pos2(rect.right(), rect.bottom() + 1.0)], Stroke::new(1.0, Color32::from_rgb(0xaf, 0xb1, 0xb4)));
+    ui.painter().line_segment([pos2(rect.left(), rect.bottom() + 1.0), pos2(rect.right(), rect.bottom() + 1.0)], Stroke::new(1.0, pal().n(0xb2)));
     let _ = StrokeKind::Inside;
 }
 
 /// Small numeric input. Shows `current` unless focused; returns a parsed
 /// value when the user changes the text.
 fn number_field(ui: &mut Ui, rect: Rect, buf: &mut String, current: &str, id: &str) -> Option<f64> {
-    ui.painter().rect_stroke(rect, CornerRadius::same(4), Stroke::new(1.0, OUTLINE_HI), StrokeKind::Inside);
+    ui.painter().rect_stroke(rect, CornerRadius::same(4), Stroke::new(1.0, pal().outline_hi), StrokeKind::Inside);
     let te = egui::TextEdit::singleline(buf)
         .id_salt(id)
         .frame(egui::Frame::NONE)
         .char_limit(8)
-        .font(Ts::new(Fam::Bold, 12.0, WHITE).font())
-        .text_color(WHITE);
+        .font(Ts::new(Fam::Bold, 12.0, pal().text).font())
+        .text_color(pal().text);
     let mut child = ui.new_child(UiBuilder::new().max_rect(rect));
     let resp = child.put(rect.shrink2(vec2(8.0, 3.0)), te);
     let out = if resp.changed() { buf.trim().replace(',', ".").parse::<f64>().ok() } else { None };

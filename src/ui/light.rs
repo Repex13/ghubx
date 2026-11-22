@@ -59,22 +59,22 @@ impl GhubApp {
         let prof = cfg.current().1.clone();
         let x0 = panel.left() + 16.0;
         let top = panel.top();
-        text(ui, pos2(x0, top + 17.0), Align2::LEFT_TOP, "LIGHTSYNC", T_PANEL_TITLE);
+        text(ui, pos2(x0, top + 17.0), Align2::LEFT_TOP, "LIGHTSYNC", t_panel_title());
 
         let info = Rect::from_min_size(pos2(x0 + 12.0, top + 64.0), vec2(266.0, 72.0));
-        ui.painter().rect_filled(info, CornerRadius::same(8), Color32::from_rgb(0x2a, 0x2b, 0x30));
-        burst(ui.painter(), pos2(info.left() + 22.0, info.top() + 22.0), PRIMARY);
-        text(ui, pos2(info.left() + 42.0, info.top() + 22.0), Align2::LEFT_CENTER, "DEVICE LIGHTING", Ts::new(Fam::Bold, 12.0, PRIMARY));
-        para(ui, pos2(info.left() + 14.0, info.top() + 38.0), 240.0, "If Windows Dynamic Lighting controls this mouse it can override these effects.", Ts::new(Fam::Reg, 11.0, HIGH).ls(0.4));
+        ui.painter().rect_filled(info, CornerRadius::same(8), pal().surface_hi);
+        burst(ui.painter(), pos2(info.left() + 22.0, info.top() + 22.0), pal().primary);
+        text(ui, pos2(info.left() + 42.0, info.top() + 22.0), Align2::LEFT_CENTER, "DEVICE LIGHTING", Ts::new(Fam::Bold, 12.0, pal().primary));
+        para(ui, pos2(info.left() + 14.0, info.top() + 38.0), 240.0, "If Windows Dynamic Lighting controls this mouse it can override these effects.", Ts::new(Fam::Reg, 11.0, pal().text_high).ls(0.4));
 
         if let Some(z) = tabs(ui, pos2(x0, top + 216.0), &ZONE_NAMES, self.light.zone, 16.0, "zones") {
             self.light.zone = z;
         }
         let zone = self.light.zone;
         let l = prof.lighting[zone];
-        text(ui, pos2(x0, top + 264.0), Align2::LEFT_TOP, "EFFECT", T_SECTION);
-        let er = text(ui, pos2(x0, top + 302.0), Align2::LEFT_CENTER, effect_name(l.effect), Ts::new(Fam::Light, 12.0, WHITE).ls(1.0));
-        chevron(ui.painter(), pos2(er.right() + 12.0, er.center().y), 4.0, false, Stroke::new(1.5, WHITE));
+        text(ui, pos2(x0, top + 264.0), Align2::LEFT_TOP, "EFFECT", t_section());
+        let er = text(ui, pos2(x0, top + 302.0), Align2::LEFT_CENTER, effect_name(l.effect), Ts::new(Fam::Light, 12.0, pal().text).ls(1.0));
+        chevron(ui.painter(), pos2(er.right() + 12.0, er.center().y), 4.0, false, Stroke::new(1.5, pal().text));
         let eresp = click(ui, Rect::from_min_max(er.min - vec2(4.0, 6.0), pos2(er.right() + 22.0, er.bottom() + 6.0)), "effect-dd");
         if eresp.clicked() {
             self.open_overlay(ui.ctx(), Overlay::Effect(eresp.rect));
@@ -89,7 +89,7 @@ impl GhubApp {
             y += 196.0;
         }
         if matches!(l.effect, Effect::Breathing | Effect::Cycle) {
-            text(ui, pos2(x0, y), Align2::LEFT_TOP, "EFFECT RATE", Ts::new(Fam::Reg, 12.0, LABEL));
+            text(ui, pos2(x0, y), Align2::LEFT_TOP, "EFFECT RATE", Ts::new(Fam::Reg, 12.0, pal().label));
             let mut v = l.period_ms as f32;
             if slider(ui, Rect::from_min_size(pos2(x0, y + 26.0), vec2(180.0, 12.0)), &mut v, 1000.0..=20000.0, ("rate", zone)) {
                 new_l.period_ms = ((v / 100.0).round() * 100.0) as u16;
@@ -98,7 +98,7 @@ impl GhubApp {
             y += 65.0;
         }
         if l.effect != Effect::Off {
-            text(ui, pos2(x0, y), Align2::LEFT_TOP, "EFFECT BRIGHTNESS", Ts::new(Fam::Reg, 12.0, LABEL));
+            text(ui, pos2(x0, y), Align2::LEFT_TOP, "EFFECT BRIGHTNESS", Ts::new(Fam::Reg, 12.0, pal().label));
             let mut v = l.brightness as f32;
             if slider(ui, Rect::from_min_size(pos2(x0, y + 26.0), vec2(180.0, 12.0)), &mut v, 1.0..=100.0, ("bright", zone)) {
                 new_l.brightness = v.round() as u8;
@@ -122,7 +122,7 @@ impl GhubApp {
         // preview
         let win_h = ui.ctx().content_rect().height();
         let placed = Placed::new(self.meta.front.origin, content.center().x, win_h * 0.333, win_h * 0.465);
-        draw_render(ui, self.tex.front.as_ref(), placed, WHITE);
+        draw_render(ui, self.tex.front.as_ref(), placed, Color32::WHITE);
         let t = ui.ctx().input(|i| i.time);
         let mut clicked_zone = None;
         for (zi, zr) in self.meta.front.zones.clone() {
@@ -166,7 +166,7 @@ impl GhubApp {
         let pure = Hsva::new(h, 1.0, 1.0, 1.0).to_srgb();
         let pure = Color32::from_rgb(pure[0], pure[1], pure[2]);
         let mut m = Mesh::default();
-        for (p, c) in [(sv.left_top(), WHITE), (sv.right_top(), pure), (sv.right_bottom(), Color32::BLACK), (sv.left_bottom(), Color32::BLACK)] {
+        for (p, c) in [(sv.left_top(), Color32::WHITE), (sv.right_top(), pure), (sv.right_bottom(), Color32::BLACK), (sv.left_bottom(), Color32::BLACK)] {
             m.colored_vertex(p, c);
         }
         m.add_triangle(0, 1, 2);
@@ -204,10 +204,10 @@ impl GhubApp {
             changed = true;
         }
         let cur = pos2(sv.left() + s * sv.width(), sv.top() + (1.0 - v) * sv.height());
-        ui.painter().circle_stroke(cur, 6.0, Stroke::new(2.0, WHITE));
+        ui.painter().circle_stroke(cur, 6.0, Stroke::new(2.0, Color32::WHITE));
         ui.painter().circle_stroke(cur, 7.5, Stroke::new(1.0, Color32::from_black_alpha(120)));
         let hx = hue.left() + h * hue.width();
-        ui.painter().rect_stroke(Rect::from_center_size(pos2(hx, hue.center().y), vec2(6.0, 16.0)), CornerRadius::same(2), Stroke::new(2.0, WHITE), StrokeKind::Middle);
+        ui.painter().rect_stroke(Rect::from_center_size(pos2(hx, hue.center().y), vec2(6.0, 16.0)), CornerRadius::same(2), Stroke::new(2.0, Color32::WHITE), StrokeKind::Middle);
 
         // swatches + hex
         let sy = hue.bottom() + 22.0;
@@ -217,17 +217,17 @@ impl GhubApp {
             let sr = click(ui, Rect::from_center_size(center, vec2(18.0, 18.0)), ("sw", i));
             ui.painter().circle_filled(center, 8.0, Color32::from_rgb(c[0], c[1], c[2]));
             if *c == color || sr.hovered() {
-                ui.painter().circle_stroke(center, 10.5, Stroke::new(1.5, WHITE));
+                ui.painter().circle_stroke(center, 10.5, Stroke::new(1.5, Color32::WHITE));
             }
             if sr.clicked() {
                 out = Some(*c);
             }
         }
         let hr = Rect::from_min_size(pos2(origin.x + 206.0, sy - 12.0), vec2(72.0, 24.0));
-        ui.painter().rect_stroke(hr, CornerRadius::same(4), Stroke::new(1.0, OUTLINE_HI), StrokeKind::Inside);
-        text(ui, pos2(hr.left() + 8.0, hr.center().y), Align2::LEFT_CENTER, "#", Ts::new(Fam::Reg, 12.0, MUTED));
+        ui.painter().rect_stroke(hr, CornerRadius::same(4), Stroke::new(1.0, pal().outline_hi), StrokeKind::Inside);
+        text(ui, pos2(hr.left() + 8.0, hr.center().y), Align2::LEFT_CENTER, "#", Ts::new(Fam::Reg, 12.0, pal().muted));
         let mut hex = self.light.hex.clone();
-        let te = egui::TextEdit::singleline(&mut hex).frame(egui::Frame::NONE).char_limit(6).font(Ts::new(Fam::Reg, 12.0, WHITE).font()).text_color(WHITE);
+        let te = egui::TextEdit::singleline(&mut hex).frame(egui::Frame::NONE).char_limit(6).font(Ts::new(Fam::Reg, 12.0, pal().text).font()).text_color(pal().text);
         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(hr));
         let resp = child.put(Rect::from_min_max(pos2(hr.left() + 18.0, hr.top() + 4.0), hr.right_bottom() - vec2(4.0, 2.0)), te);
         if hex != self.light.hex {
@@ -254,6 +254,6 @@ impl GhubApp {
 }
 
 fn value_label(ui: &Ui, right_mid: Pos2, value: &str, unit: &str) {
-    let ur = text(ui, right_mid, Align2::RIGHT_CENTER, unit, Ts::new(Fam::Reg, 14.0, WHITE).ls(0.0));
-    text(ui, pos2(ur.left(), right_mid.y), Align2::RIGHT_CENTER, value, Ts::new(Fam::Bold, 14.0, WHITE).ls(0.0));
+    let ur = text(ui, right_mid, Align2::RIGHT_CENTER, unit, Ts::new(Fam::Reg, 14.0, pal().text).ls(0.0));
+    text(ui, pos2(ur.left(), right_mid.y), Align2::RIGHT_CENTER, value, Ts::new(Fam::Bold, 14.0, pal().text).ls(0.0));
 }

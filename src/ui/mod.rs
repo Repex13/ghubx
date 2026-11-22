@@ -7,6 +7,7 @@ mod assign;
 mod device;
 mod home;
 mod light;
+pub mod palette;
 mod profiles;
 mod sens;
 mod settings;
@@ -14,7 +15,7 @@ pub mod theme;
 
 use crate::device::DeviceState;
 use crate::engine::{EngineMsg, Status, UiEvent};
-use crate::profile::Config;
+use crate::profile::{Config, Effect};
 use assets::{DeviceMeta, Textures};
 use crossbeam_channel::{Receiver, Sender};
 use egui::{Align2, Color32, CornerRadius, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, ViewportCommand, pos2, vec2};
@@ -56,11 +57,13 @@ pub struct Shot {
     frames: u32,
     requested: bool,
     done: Arc<Mutex<bool>>,
+    /// Switch to this theme on frame 10 (exercises the live-switch path).
+    pub switch_to: Option<String>,
 }
 
 impl Shot {
     pub fn new(page: String, out: PathBuf) -> Self {
-        Self { page, out, started: Instant::now(), frames: 0, requested: false, done: Default::default() }
+        Self { page, out, started: Instant::now(), frames: 0, requested: false, done: Default::default(), switch_to: None }
     }
 }
 
@@ -147,6 +150,7 @@ pub struct GhubApp {
     pub(crate) p180_at: Option<Instant>,
     pub(crate) list_view: bool,
     pub(crate) import_armed: Option<Instant>,
+    pub(crate) appear_hex: String,
 }
 
 impl GhubApp {
@@ -165,6 +169,7 @@ impl GhubApp {
         let ctx = &cc.egui_ctx;
         let fonts = assets::load_fonts();
         ctx.set_fonts(fonts.defs);
+        set_palette(resolve(&cfg.lock().unwrap().appearance, None));
         style(ctx);
         let depot = assets::find_depot();
         let meta = assets::load_meta(depot.as_deref());
@@ -203,6 +208,7 @@ impl GhubApp {
             p180_at: None,
             list_view: false,
             import_armed: None,
+            appear_hex: String::new(),
         };
         if let Some(s) = shot {
             app.prepare_shot(&s.page);
@@ -220,7 +226,8 @@ impl GhubApp {
             "devset" => Route::DeviceSettings,
             "profiles" | "appdetail" => Route::Profiles,
             "settings" | "sleep" => Route::Settings(0),
-            "diag" => Route::Settings(1),
+            "appearance" => Route::Settings(1),
+            "diag" => Route::Settings(2),
             _ => Route::Home,
         };
         self.asg.side = page == "assign2";
@@ -321,6 +328,29 @@ impl GhubApp {
         }
     }
 
+    /// Preset + accent from the config. The lighting accent follows the logo zone
+    /// of the profile the UI is showing.
+    fn wanted_palette(&self, ctx: &egui::Context) -> Palette {
+        let cfg = self.cfg.lock().unwrap();
+        let lighting = if cfg.appearance.follow_lighting {
+            let l = cfg.current().1.lighting[1];
+            match l.effect {
+                Effect::Fixed | Effect::Breathing if l.color.iter().max().copied().unwrap_or(0) >= 40 => Some(l.color),
+                Effect::Cycle => {
+                    ctx.request_repaint_after(Duration::from_millis(100));
+                    let period = (l.period_ms.max(1) as f64) / 1000.0;
+                    let h = (ctx.input(|i| i.time) / period).fract() as f32;
+                    let c = egui::ecolor::Hsva::new(h, 1.0, 1.0, 1.0).to_srgb();
+                    Some([c[0], c[1], c[2]])
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
+        resolve(&cfg.appearance, lighting)
+    }
+
     fn hide_to_tray(&mut self) {
         if self.dirty_at.take().is_some()
             && let Err(e) = self.cfg.lock().unwrap().save()
@@ -347,6 +377,12 @@ impl GhubApp {
     fn shot_tick(&mut self, ctx: &egui::Context) {
         let Some(s) = &mut self.shot else { return };
         s.frames += 1;
+        if s.frames == 10
+            && let Some(id) = s.switch_to.take()
+        {
+            self.set_theme(&id);
+        }
+        let Some(s) = &mut self.shot else { return };
         let ready = (self.tex.front.is_some() && self.dev.connected) || s.started.elapsed() > Duration::from_secs(6);
         if ready && s.frames > 20 && !s.requested {
             s.requested = true;
@@ -385,10 +421,10 @@ impl GhubApp {
             let c = pos2(win.right() - x, win.top() + 16.0);
             let r = click(ui, Rect::from_center_size(c, vec2(32.0, 32.0)), ("caption", i));
             if r.hovered() {
-                let fill = if i == 2 { Color32::from_rgb(0xe8, 0x11, 0x23) } else { Color32::from_white_alpha(24) };
+                let fill = if i == 2 { Color32::from_rgb(0xe8, 0x11, 0x23) } else { pal().ink(24) };
                 ui.painter().rect_filled(r.rect, CornerRadius::ZERO, fill);
             }
-            caption_glyph(ui.painter(), c, i as u8, if r.hovered() { WHITE } else { HIGH });
+            caption_glyph(ui.painter(), c, i as u8, if r.hovered() { pal().text } else { pal().text_high });
             if r.clicked() {
                 ui.ctx().send_viewport_cmd(match i {
                     0 => ViewportCommand::Minimized(true),
@@ -425,23 +461,23 @@ impl GhubApp {
         let bar = Rect::from_min_max(win.left_top(), pos2(win.right(), win.top() + 88.0));
         self.drag_area(ui, bar);
         let p = ui.painter();
-        p.line_segment([pos2(win.left(), bar.bottom()), pos2(win.right(), bar.bottom())], Stroke::new(1.0, DIVIDER));
+        p.line_segment([pos2(win.left(), bar.bottom()), pos2(win.right(), bar.bottom())], Stroke::new(1.0, pal().divider));
         let logo = click(ui, Rect::from_center_size(pos2(win.left() + 52.0, win.top() + 59.0), vec2(30.0, 30.0)), "logo");
-        logo_g(ui.painter(), logo.rect.center(), 22.0, WHITE);
+        logo_g(ui.painter(), logo.rect.center(), 22.0, pal().text);
         if logo.clicked() {
             self.route = Route::Home;
         }
         let mut x = win.left() + 121.0;
         for (label, route) in [("Devices", Route::Home), ("Profiles", Route::Profiles)] {
             let active = self.route == route;
-            let ts = if active { Ts::new(Fam::PanBold, 14.0, PRIMARY).ls(-0.42) } else { T_NAV };
+            let ts = if active { Ts::new(Fam::PanBold, 14.0, pal().primary).ls(-0.42) } else { t_nav() };
             let g = galley(ui, label, ts, f32::INFINITY);
             let rect = Rect::from_min_size(pos2(x, win.top() + 50.0), g.size());
             let r = click(ui, rect.expand2(vec2(10.0, 14.0)), ("nav", label));
-            let color = if active { PRIMARY } else if r.hovered() { WHITE } else { NAV };
+            let color = if active { pal().primary } else if r.hovered() { pal().text } else { pal().nav };
             ui.painter().galley(rect.min, galley(ui, label, ts.color(color), f32::INFINITY), color);
             if active {
-                ui.painter().line_segment([pos2(rect.left(), bar.bottom() - 1.5), pos2(rect.right(), bar.bottom() - 1.5)], Stroke::new(3.0, PRIMARY));
+                ui.painter().line_segment([pos2(rect.left(), bar.bottom() - 1.5), pos2(rect.right(), bar.bottom() - 1.5)], Stroke::new(3.0, pal().primary));
             }
             if r.clicked() {
                 self.route = route;
@@ -454,9 +490,9 @@ impl GhubApp {
         let g = click(ui, Rect::from_center_size(gear_c, vec2(36.0, 36.0)), "settings");
         let active = matches!(self.route, Route::Settings(_));
         if active || g.hovered() {
-            ui.painter().circle_filled(gear_c, 17.0, if active { PRIMARY } else { SURFACE_HI });
+            ui.painter().circle_filled(gear_c, 17.0, if active { pal().primary } else { pal().surface_hi });
         }
-        gear(ui.painter(), gear_c, 19.0, Stroke::new(1.6, WHITE));
+        gear(ui.painter(), gear_c, 19.0, Stroke::new(1.6, if active { pal().on_primary } else { pal().text }));
         if g.on_hover_text("General Settings").clicked() {
             self.route = Route::Settings(0);
         }
@@ -469,15 +505,15 @@ impl GhubApp {
         let open = matches!(self.overlay, Some(Overlay::Profiles(_)));
         let r = click(ui, rect, "profile-selector");
         let p = ui.painter();
-        p.rect_filled(rect, CornerRadius::same(6), if r.hovered() && !open { SURFACE_HI } else { SURFACE });
+        p.rect_filled(rect, CornerRadius::same(6), if r.hovered() && !open { pal().surface_hi } else { pal().surface });
         if open {
-            p.rect_stroke(rect, CornerRadius::same(6), Stroke::new(1.0, OUTLINE_HI), StrokeKind::Inside);
+            p.rect_stroke(rect, CornerRadius::same(6), Stroke::new(1.0, pal().outline_hi), StrokeKind::Inside);
         }
-        profile_icon(p, pos2(rect.left() + 29.0, rect.center().y), WHITE);
+        profile_icon(p, pos2(rect.left() + 29.0, rect.center().y), pal().text);
         let label = format!("{}: {}", app.name, prof.name);
-        let tr = text(ui, pos2(rect.left() + 49.0, rect.center().y), Align2::LEFT_CENTER, &label, Ts::new(Fam::PanBold, 14.0, WHITE).ls(-0.42));
+        let tr = text(ui, pos2(rect.left() + 49.0, rect.center().y), Align2::LEFT_CENTER, &label, Ts::new(Fam::PanBold, 14.0, pal().text).ls(-0.42));
         let _ = tr;
-        chevron(ui.painter(), pos2(rect.right() - 21.0, rect.center().y), 5.5, open, Stroke::new(1.8, WHITE));
+        chevron(ui.painter(), pos2(rect.right() - 21.0, rect.center().y), 5.5, open, Stroke::new(1.8, pal().text));
         if r.clicked() {
             if open {
                 self.overlay = None;
@@ -492,9 +528,9 @@ impl GhubApp {
         if !(self.status.ghub_running && self.dev.connected) {
             return;
         }
-        ui.painter().rect_filled(rect, CornerRadius::same(6), Color32::from_rgb(0x2b, 0x22, 0x0e));
-        ui.painter().rect_stroke(rect, CornerRadius::same(6), Stroke::new(1.0, Color32::from_rgb(0x5c, 0x45, 0x10)), StrokeKind::Inside);
-        text(ui, pos2(rect.left() + 12.0, rect.center().y), Align2::LEFT_CENTER, "G HUB IN CONTROL", Ts::new(Fam::Bold, 11.0, AMBER));
+        ui.painter().rect_filled(rect, CornerRadius::same(6), pal().amber_tint);
+        ui.painter().rect_stroke(rect, CornerRadius::same(6), Stroke::new(1.0, pal().amber_line), StrokeKind::Inside);
+        text(ui, pos2(rect.left() + 12.0, rect.center().y), Align2::LEFT_CENTER, "G HUB IN CONTROL", Ts::new(Fam::Bold, 11.0, pal().amber));
         let b = Rect::from_min_size(pos2(rect.right() - 104.0, rect.center().y - 13.0), vec2(96.0, 26.0));
         if blue_button(ui, b, "CLOSE G HUB", "close-ghub-h").on_hover_text("Changes are saved now and apply when GHUB-X takes over").clicked() {
             let _ = self.eng.send(EngineMsg::CloseGhub);
@@ -507,11 +543,11 @@ impl GhubApp {
         if !busy {
             return false;
         }
-        ui.painter().rect_filled(rect, CornerRadius::same(8), Color32::from_rgb(0x2b, 0x22, 0x0e));
-        ui.painter().rect_stroke(rect, CornerRadius::same(8), Stroke::new(1.0, Color32::from_rgb(0x5c, 0x45, 0x10)), StrokeKind::Inside);
+        ui.painter().rect_filled(rect, CornerRadius::same(8), pal().amber_tint);
+        ui.painter().rect_stroke(rect, CornerRadius::same(8), Stroke::new(1.0, pal().amber_line), StrokeKind::Inside);
         let tr = Rect::from_min_max(rect.min + vec2(14.0, 0.0), pos2(rect.right() - 130.0, rect.bottom()));
-        text(ui, pos2(tr.left(), rect.center().y - 7.0), Align2::LEFT_CENTER, "G HUB IS CONTROLLING THIS MOUSE", Ts::new(Fam::Bold, 12.0, AMBER));
-        text(ui, pos2(tr.left(), rect.center().y + 9.0), Align2::LEFT_CENTER, "Changes are saved and apply when GHUB-X takes over.", Ts::new(Fam::Reg, 11.0, HIGH).ls(0.4));
+        text(ui, pos2(tr.left(), rect.center().y - 7.0), Align2::LEFT_CENTER, "G HUB IS CONTROLLING THIS MOUSE", Ts::new(Fam::Bold, 12.0, pal().amber));
+        text(ui, pos2(tr.left(), rect.center().y + 9.0), Align2::LEFT_CENTER, "Changes are saved and apply when GHUB-X takes over.", Ts::new(Fam::Reg, 11.0, pal().text_high).ls(0.4));
         let b = Rect::from_min_size(pos2(rect.right() - 120.0, rect.center().y - 15.0), vec2(108.0, 30.0));
         if blue_button(ui, b, "CLOSE G HUB", "close-ghub").clicked() {
             let _ = self.eng.send(EngineMsg::CloseGhub);
@@ -541,18 +577,22 @@ impl GhubApp {
                 let h = items.len() as f32 * row_h + 12.0;
                 let (rect, _) = ui.allocate_exact_size(vec2(size.x, h), Sense::hover());
                 soft_shadow(ui, rect, 6);
-                ui.painter().rect_filled(rect, CornerRadius::same(6), Color32::from_rgb(0x2a, 0x2b, 0x2f));
+                let th = pal();
+                ui.painter().rect_filled(rect, CornerRadius::same(6), if th.dark { th.surface_hi } else { th.surface });
+                if !th.dark {
+                    ui.painter().rect_stroke(rect, CornerRadius::same(6), Stroke::new(1.0, th.outline_hi), StrokeKind::Inside);
+                }
                 for (i, (label, active, enabled)) in items.iter().enumerate() {
                     let rr = Rect::from_min_size(pos2(rect.left(), rect.top() + 6.0 + i as f32 * row_h), vec2(rect.width(), row_h));
                     if label.is_empty() {
-                        ui.painter().line_segment([pos2(rr.left() + 12.0, rr.center().y), pos2(rr.right() - 12.0, rr.center().y)], Stroke::new(1.0, OUTLINE_HI));
+                        ui.painter().line_segment([pos2(rr.left() + 12.0, rr.center().y), pos2(rr.right() - 12.0, rr.center().y)], Stroke::new(1.0, pal().outline_hi));
                         continue;
                     }
                     let r = if *enabled { click(ui, rr, ("ov", i)) } else { hit(ui, rr, ("ov", i), Sense::hover()) };
                     if r.hovered() && *enabled {
-                        ui.painter().rect_filled(rr.shrink2(vec2(6.0, 1.0)), CornerRadius::same(4), Color32::from_white_alpha(14));
+                        ui.painter().rect_filled(rr.shrink2(vec2(6.0, 1.0)), CornerRadius::same(4), pal().ink(14));
                     }
-                    let color = if !enabled { DISABLED } else if *active { PRIMARY } else { WHITE };
+                    let color = if !enabled { pal().disabled } else if *active { pal().primary } else { pal().text };
                     let bold = label.chars().all(|c| !c.is_lowercase());
                     let ts = if bold { Ts::new(Fam::Bold, 12.0, color) } else { Ts::new(Fam::Pan, 14.0, color).ls(-0.2) };
                     let pos = if bold && matches!(kind, Overlay::Profiles(_)) {
@@ -562,7 +602,7 @@ impl GhubApp {
                     };
                     let _ = pos;
                     if *active {
-                        check(ui.painter(), pos2(rr.right() - 22.0, rr.center().y), 4.5, Stroke::new(1.8, PRIMARY));
+                        check(ui.painter(), pos2(rr.right() - 22.0, rr.center().y), 4.5, Stroke::new(1.8, pal().primary));
                     }
                     if r.clicked() {
                         chosen = Some(i);
@@ -698,26 +738,29 @@ impl GhubApp {
             return;
         }
         let a = ((2.8 - age) / 0.3).clamp(0.0, 1.0);
-        let g = galley(ui, msg, Ts::new(Fam::Reg, 12.0, WHITE.gamma_multiply(a)), 600.0);
+        let g = galley(ui, msg, Ts::new(Fam::Reg, 12.0, pal().text.gamma_multiply(a)), 600.0);
         let rect = Rect::from_center_size(pos2(win.center().x, win.bottom() - 20.0), g.size() + vec2(36.0, 14.0));
-        ui.painter().rect_filled(rect, CornerRadius::same(100), Color32::from_rgb(0x2a, 0x2b, 0x2f).gamma_multiply(a));
-        ui.painter().galley(rect.center() - g.size() / 2.0, g, WHITE);
+        ui.painter().rect_filled(rect, CornerRadius::same(100), pal().surface_hi.gamma_multiply(a));
+        ui.painter().galley(rect.center() - g.size() / 2.0, g, pal().text);
         ui.ctx().request_repaint();
     }
 }
 
 fn style(ctx: &egui::Context) {
+    let th = pal();
     ctx.all_styles_mut(|s| {
-        s.visuals = egui::Visuals::dark();
-        s.visuals.panel_fill = BG;
-        s.visuals.window_fill = SURFACE;
-        s.visuals.extreme_bg_color = BG;
-        s.visuals.selection.bg_fill = PRIMARY.gamma_multiply(0.5);
-        s.visuals.selection.stroke = Stroke::new(1.0, WHITE);
-        s.visuals.text_cursor.stroke = Stroke::new(1.5, WHITE);
-        s.visuals.widgets.inactive.bg_fill = Color32::from_white_alpha(40);
-        s.visuals.widgets.hovered.bg_fill = Color32::from_white_alpha(90);
-        s.visuals.widgets.active.bg_fill = Color32::from_white_alpha(150);
+        s.visuals = if th.dark { egui::Visuals::dark() } else { egui::Visuals::light() };
+        s.visuals.panel_fill = th.bg;
+        s.visuals.window_fill = th.surface_hi;
+        s.visuals.window_stroke = Stroke::new(1.0, th.outline_hi);
+        s.visuals.extreme_bg_color = th.bg;
+        s.visuals.hyperlink_color = th.primary;
+        s.visuals.selection.bg_fill = th.primary.gamma_multiply(0.5);
+        s.visuals.selection.stroke = Stroke::new(1.0, th.text);
+        s.visuals.text_cursor.stroke = Stroke::new(1.5, th.text);
+        s.visuals.widgets.inactive.bg_fill = th.ink(40);
+        s.visuals.widgets.hovered.bg_fill = th.ink(90);
+        s.visuals.widgets.active.bg_fill = th.ink(150);
         s.spacing.scroll = egui::style::ScrollStyle::thin();
         s.spacing.scroll.bar_width = 4.0;
         s.spacing.item_spacing = vec2(0.0, 0.0);
@@ -728,13 +771,18 @@ fn style(ctx: &egui::Context) {
 impl eframe::App for GhubApp {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        let want = self.wanted_palette(&ctx);
+        if want != pal() {
+            set_palette(want);
+            style(&ctx);
+        }
         if self.shot.is_none() && crate::win::tray_ready() && self.cfg.lock().unwrap().general.close_to_tray && ctx.input(|i| i.viewport().close_requested()) {
             ctx.send_viewport_cmd(ViewportCommand::CancelClose);
             self.hide_to_tray();
         }
         self.pump(&ctx);
         let win = ui.max_rect();
-        ui.painter().rect_filled(win, CornerRadius::ZERO, BG);
+        ui.painter().rect_filled(win, CornerRadius::ZERO, pal().bg);
         match self.route {
             Route::Home => {
                 self.top_nav(ui, win);
@@ -751,7 +799,7 @@ impl eframe::App for GhubApp {
             Route::Device(tab) => self.device_page(ui, win, tab),
             Route::DeviceSettings => self.device_settings(ui, win),
         }
-        ui.painter().rect_stroke(win, CornerRadius::ZERO, Stroke::new(1.0, Color32::from_rgb(0x30, 0x30, 0x34)), StrokeKind::Inside);
+        ui.painter().rect_stroke(win, CornerRadius::ZERO, Stroke::new(1.0, if pal().dark { pal().n(0x30) } else { pal().outline_hi }), StrokeKind::Inside);
         self.caption(ui, win);
         self.resize_edges(ui, win);
         self.draw_overlay(&ctx);

@@ -26,7 +26,7 @@ impl GhubApp {
         let cfg = self.cfg();
         let top = win.top() + 88.0;
         let col = win.left() + 338.0;
-        ui.painter().line_segment([pos2(col, top + 1.0), pos2(col, win.bottom())], Stroke::new(1.0, DIVIDER));
+        ui.painter().line_segment([pos2(col, top + 1.0), pos2(col, win.bottom())], Stroke::new(1.0, pal().divider));
 
         // filters
         let counts = [cfg.apps.len(), cfg.apps.iter().filter(|a| a.enabled).count(), cfg.apps.iter().filter(|a| !a.enabled).count()];
@@ -35,11 +35,11 @@ impl GhubApp {
             let resp = click(ui, r, ("filter", i));
             let on = self.prof.filter == i;
             if on {
-                ui.painter().rect_filled(r, CornerRadius::same(6), Color32::from_rgb(0x06, 0x26, 0x3d));
+                ui.painter().rect_filled(r, CornerRadius::same(6), pal().primary_tint);
             } else if resp.hovered() {
-                ui.painter().rect_filled(r, CornerRadius::same(6), SURFACE);
+                ui.painter().rect_filled(r, CornerRadius::same(6), pal().surface);
             }
-            let c = if on { PRIMARY } else { WHITE };
+            let c = if on { pal().primary } else { pal().text };
             text(ui, pos2(r.left() + 12.0, r.center().y), Align2::LEFT_CENTER, name, Ts::new(Fam::Bold, 14.0, c).ls(0.3));
             if on {
                 text(ui, pos2(r.right() - 14.0, r.center().y), Align2::RIGHT_CENTER, &counts[i].to_string(), Ts::new(Fam::Bold, 14.0, c));
@@ -52,14 +52,14 @@ impl GhubApp {
 
         // profile switching
         let by = win.bottom() - 223.0;
-        let t = text(ui, pos2(win.left() + 59.0, by), Align2::LEFT_CENTER, "Profile Switching", Ts::new(Fam::Reg, 18.0, WHITE).ls(0.2));
-        info(ui.painter(), pos2(t.right() + 20.0, by), WHITE);
+        let t = text(ui, pos2(win.left() + 59.0, by), Align2::LEFT_CENTER, "Profile Switching", Ts::new(Fam::Reg, 18.0, pal().text).ls(0.2));
+        info(ui.painter(), pos2(t.right() + 20.0, by), pal().text);
         hit(ui, Rect::from_center_size(pos2(t.right() + 20.0, by), vec2(18.0, 18.0)), "ps-info", egui::Sense::hover())
             .on_hover_text("Switch profiles automatically when a game or app with its own profile is in front.");
         if checkbox(ui, pos2(win.left() + 60.0, by + 42.0), "Enable profile switching", cfg.profile_switching, true, "ps-enable").clicked() {
             self.edit(|c| c.profile_switching = !c.profile_switching);
         }
-        text(ui, pos2(win.left() + 59.0, by + 93.0), Align2::LEFT_CENTER, "Select persistent profile", Ts::new(Fam::Bold, 12.0, WHITE).ls(0.3));
+        text(ui, pos2(win.left() + 59.0, by + 93.0), Align2::LEFT_CENTER, "Select persistent profile", Ts::new(Fam::Bold, 12.0, pal().text).ls(0.3));
         let dd = Rect::from_min_size(pos2(win.left() + 59.0, by + 105.0), vec2(270.0, 48.0));
         let label = match cfg.persistent {
             Some((a, p)) => (cfg.apps[a].name.clone(), cfg.apps[a].profiles[p].name.clone()),
@@ -78,31 +78,31 @@ impl GhubApp {
 
     fn app_grid(&mut self, ui: &mut Ui, main: Rect) {
         let cfg = self.cfg();
-        text(ui, pos2(main.left() - 1.0, main.top() + 49.0), Align2::LEFT_CENTER, "All Games & Apps", Ts::new(Fam::Bold, 24.0, WHITE).ls(0.0));
+        text(ui, pos2(main.left() - 1.0, main.top() + 49.0), Align2::LEFT_CENTER, "All Games & Apps", Ts::new(Fam::Bold, 24.0, pal().text).ls(0.0));
         para(
             ui,
             pos2(main.left() - 1.0, main.top() + 65.0),
             545.0,
             "Select a game or app to manage its profiles and macros. Disabling a game or app prevents its profiles from becoming active. Removing it deletes its profiles and macros from GHUB-X.",
-            Ts::new(Fam::Reg, 13.0, LABEL).ls(0.4),
+            Ts::new(Fam::Reg, 13.0, pal().label).ls(0.4),
         );
         let sb = Rect::from_min_size(pos2(main.left(), main.top() + 150.0), vec2(249.0, 48.0));
-        ui.painter().rect_stroke(sb, CornerRadius::same(6), Stroke::new(1.0, Color32::from_rgb(0x4a, 0x4a, 0x4c)), StrokeKind::Inside);
-        search(ui.painter(), pos2(sb.left() + 30.0, sb.center().y), Stroke::new(1.8, WHITE));
+        ui.painter().rect_stroke(sb, CornerRadius::same(6), Stroke::new(1.0, pal().n(0x4a)), StrokeKind::Inside);
+        search(ui.painter(), pos2(sb.left() + 30.0, sb.center().y), Stroke::new(1.8, pal().text));
         let te = egui::TextEdit::singleline(&mut self.prof.search)
-            .hint_text(egui::RichText::new("Search").color(LABEL).font(Ts::new(Fam::Reg, 15.0, LABEL).font()))
+            .hint_text(egui::RichText::new("Search").color(pal().label).font(Ts::new(Fam::Reg, 15.0, pal().label).font()))
             .frame(egui::Frame::NONE)
-            .font(Ts::new(Fam::Reg, 15.0, WHITE).font())
-            .text_color(WHITE);
+            .font(Ts::new(Fam::Reg, 15.0, pal().text).font())
+            .text_color(pal().text);
         let mut child = ui.new_child(UiBuilder::new().max_rect(sb));
         child.put(Rect::from_min_max(pos2(sb.left() + 52.0, sb.top() + 13.0), pos2(sb.right() - 10.0, sb.bottom() - 10.0)), te);
         let ab = Rect::from_min_size(pos2(sb.right() + 16.0, sb.top()), vec2(213.0, 48.0));
         let add = click(ui, ab, "add-app");
-        ui.painter().rect_filled(ab, CornerRadius::same(6), if add.hovered() { Color32::from_rgb(0x3a, 0xa8, 0xff) } else { PRIMARY });
+        ui.painter().rect_filled(ab, CornerRadius::same(6), if add.hovered() { pal().primary_hover } else { pal().primary });
         let pc = pos2(ab.left() + 32.0, ab.center().y);
-        ui.painter().line_segment([pc - vec2(7.0, 0.0), pc + vec2(7.0, 0.0)], Stroke::new(2.0, WHITE));
-        ui.painter().line_segment([pc - vec2(0.0, 7.0), pc + vec2(0.0, 7.0)], Stroke::new(2.0, WHITE));
-        text(ui, pos2(ab.left() + 53.0, ab.center().y), Align2::LEFT_CENTER, "ADD GAMES & APPS", Ts::new(Fam::Bold, 14.0, WHITE).ls(0.2));
+        ui.painter().line_segment([pc - vec2(7.0, 0.0), pc + vec2(7.0, 0.0)], Stroke::new(2.0, pal().on_primary));
+        ui.painter().line_segment([pc - vec2(0.0, 7.0), pc + vec2(0.0, 7.0)], Stroke::new(2.0, pal().on_primary));
+        text(ui, pos2(ab.left() + 53.0, ab.center().y), Align2::LEFT_CENTER, "ADD GAMES & APPS", Ts::new(Fam::Bold, 14.0, pal().on_primary).ls(0.2));
         if add.clicked() {
             self.prof.adding = Some(self.prof.adding.take().map(|_| None).unwrap_or(Some(String::new()))).flatten();
         }
@@ -130,21 +130,21 @@ impl GhubApp {
             let tile = Rect::from_min_size(pos2(x, y), vec2(192.0, 361.0));
             let r = click(ui, tile, ("tile", i));
             let current = cfg.current_app == i;
-            let fill = if current { Color32::from_rgb(0x0c, 0x1a, 0x28) } else if r.hovered() { SURFACE_HI } else { SURFACE };
+            let fill = if current { pal().primary_tint_lo } else if r.hovered() { pal().surface_hi } else { pal().surface };
             ui.painter().rect_filled(tile, CornerRadius::same(10), fill);
             if current {
-                ui.painter().rect_stroke(tile, CornerRadius::same(10), Stroke::new(1.5, PRIMARY), StrokeKind::Inside);
+                ui.painter().rect_stroke(tile, CornerRadius::same(10), Stroke::new(1.5, pal().primary), StrokeKind::Inside);
             }
             let img = Rect::from_min_size(tile.min + vec2(13.0, 13.0), vec2(166.0, 219.0));
             self.app_art(ui, img, a, i);
-            text(ui, pos2(tile.left() + 13.0, tile.top() + 257.0), Align2::LEFT_CENTER, &a.name, Ts::new(Fam::Bold, 15.0, if a.enabled { WHITE } else { MUTED }).ls(0.2));
+            text(ui, pos2(tile.left() + 13.0, tile.top() + 257.0), Align2::LEFT_CENTER, &a.name, Ts::new(Fam::Bold, 15.0, if a.enabled { pal().text } else { pal().muted }).ls(0.2));
             let sub = match &a.exe {
                 Some(e) => e.clone(),
                 None => "Default for every app".into(),
             };
-            text(ui, pos2(tile.left() + 13.0, tile.top() + 279.0), Align2::LEFT_CENTER, &sub, Ts::new(Fam::Reg, 11.0, MUTED).ls(0.3));
-            profile_icon(ui.painter(), pos2(tile.left() + 26.0, tile.top() + 306.0), PRIMARY);
-            text(ui, pos2(tile.left() + 44.0, tile.top() + 306.0), Align2::LEFT_CENTER, &format!("{}", a.profiles.len()), Ts::new(Fam::Bold, 12.0, PRIMARY));
+            text(ui, pos2(tile.left() + 13.0, tile.top() + 279.0), Align2::LEFT_CENTER, &sub, Ts::new(Fam::Reg, 11.0, pal().muted).ls(0.3));
+            profile_icon(ui.painter(), pos2(tile.left() + 26.0, tile.top() + 306.0), pal().primary);
+            text(ui, pos2(tile.left() + 44.0, tile.top() + 306.0), Align2::LEFT_CENTER, &format!("{}", a.profiles.len()), Ts::new(Fam::Bold, 12.0, pal().primary));
             if r.clicked() {
                 open = Some(i);
             }
@@ -188,24 +188,24 @@ impl GhubApp {
     fn add_app_form(&mut self, ui: &mut Ui, origin: egui::Pos2, width: f32) -> f32 {
         let w = width.min(560.0);
         let r = Rect::from_min_size(origin, vec2(w, 112.0));
-        ui.painter().rect_filled(r, CornerRadius::same(10), SURFACE);
-        text(ui, r.left_top() + vec2(16.0, 20.0), Align2::LEFT_CENTER, "ADD A GAME OR APP", Ts::new(Fam::Bold, 12.0, WHITE));
+        ui.painter().rect_filled(r, CornerRadius::same(10), pal().surface);
+        text(ui, r.left_top() + vec2(16.0, 20.0), Align2::LEFT_CENTER, "ADD A GAME OR APP", Ts::new(Fam::Bold, 12.0, pal().text));
         let mut s = self.prof.adding.clone().unwrap_or_default();
         let fr = Rect::from_min_size(r.left_top() + vec2(16.0, 36.0), vec2(w - 200.0, 28.0));
         let te = egui::TextEdit::singleline(&mut s)
-            .hint_text(egui::RichText::new("Executable name, e.g. cs2.exe").color(LABEL))
+            .hint_text(egui::RichText::new("Executable name, e.g. cs2.exe").color(pal().label))
             .frame(egui::Frame::NONE)
-            .font(Ts::new(Fam::Reg, 13.0, WHITE).font())
-            .text_color(WHITE);
+            .font(Ts::new(Fam::Reg, 13.0, pal().text).font())
+            .text_color(pal().text);
         let mut child = ui.new_child(UiBuilder::new().max_rect(fr));
         child.put(fr.shrink2(vec2(2.0, 4.0)), te);
-        ui.painter().line_segment([pos2(fr.left(), fr.bottom()), pos2(fr.right(), fr.bottom())], Stroke::new(1.0, OUTLINE_HI));
+        ui.painter().line_segment([pos2(fr.left(), fr.bottom()), pos2(fr.right(), fr.bottom())], Stroke::new(1.0, pal().outline_hi));
         let add = blue_button(ui, Rect::from_min_size(pos2(r.right() - 172.0, fr.top()), vec2(76.0, 28.0)), "ADD", "app-add-ok").clicked();
         let cancel = dark_button(ui, Rect::from_min_size(pos2(r.right() - 88.0, fr.top()), vec2(72.0, 28.0)), "CANCEL", "app-add-cancel", true).clicked();
         // recently focused apps as suggestions
         let mut x = r.left() + 16.0;
         for (i, exe) in self.seen_exes.clone().iter().take(5).enumerate() {
-            let g = galley(ui, exe, Ts::new(Fam::Reg, 11.0, WHITE).ls(0.2), f32::INFINITY);
+            let g = galley(ui, exe, Ts::new(Fam::Reg, 11.0, pal().text).ls(0.2), f32::INFINITY);
             let cr = Rect::from_min_size(pos2(x, r.bottom() - 34.0), vec2(g.size().x + 18.0, 22.0));
             if cr.right() > r.right() - 16.0 {
                 break;
@@ -242,30 +242,30 @@ impl GhubApp {
         let app = cfg.apps[ai].clone();
         let back = click(ui, Rect::from_min_size(pos2(main.left() - 4.0, main.top() + 22.0), vec2(180.0, 24.0)), "detail-back");
         let bc = pos2(main.left() + 4.0, main.top() + 34.0);
-        ui.painter().add(Shape::line(vec![bc + vec2(2.5, -5.0), bc + vec2(-2.5, 0.0), bc + vec2(2.5, 5.0)], Stroke::new(1.6, if back.hovered() { PRIMARY } else { WHITE })));
-        text(ui, pos2(main.left() + 16.0, main.top() + 34.0), Align2::LEFT_CENTER, "ALL GAMES & APPS", Ts::new(Fam::Bold, 12.0, if back.hovered() { PRIMARY } else { WHITE }));
+        ui.painter().add(Shape::line(vec![bc + vec2(2.5, -5.0), bc + vec2(-2.5, 0.0), bc + vec2(2.5, 5.0)], Stroke::new(1.6, if back.hovered() { pal().primary } else { pal().text })));
+        text(ui, pos2(main.left() + 16.0, main.top() + 34.0), Align2::LEFT_CENTER, "ALL GAMES & APPS", Ts::new(Fam::Bold, 12.0, if back.hovered() { pal().primary } else { pal().text }));
         if back.clicked() {
             self.prof.detail = None;
             self.prof.renaming = None;
         }
-        text(ui, pos2(main.left(), main.top() + 76.0), Align2::LEFT_CENTER, &app.name, Ts::new(Fam::Bold, 24.0, WHITE).ls(0.0));
+        text(ui, pos2(main.left(), main.top() + 76.0), Align2::LEFT_CENTER, &app.name, Ts::new(Fam::Bold, 24.0, pal().text).ls(0.0));
         let sub = app.exe.clone().unwrap_or_else(|| "Used whenever no other app's profile is active".into());
-        text(ui, pos2(main.left(), main.top() + 102.0), Align2::LEFT_CENTER, &sub, Ts::new(Fam::Reg, 12.0, MUTED).ls(0.4));
+        text(ui, pos2(main.left(), main.top() + 102.0), Align2::LEFT_CENTER, &sub, Ts::new(Fam::Reg, 12.0, pal().muted).ls(0.4));
         if app.exe.is_some() {
-            text(ui, pos2(main.right() - 50.0, main.top() + 76.0), Align2::RIGHT_CENTER, "ENABLED", Ts::new(Fam::Bold, 12.0, WHITE));
-            if switch(ui, pos2(main.right() - 18.0, main.top() + 76.0), app.enabled, PRIMARY, "app-enabled").clicked() {
+            text(ui, pos2(main.right() - 50.0, main.top() + 76.0), Align2::RIGHT_CENTER, "ENABLED", Ts::new(Fam::Bold, 12.0, pal().text));
+            if switch(ui, pos2(main.right() - 18.0, main.top() + 76.0), app.enabled, pal().primary, "app-enabled").clicked() {
                 self.edit(|c| c.apps[ai].enabled = !c.apps[ai].enabled);
             }
         }
         let mut y = main.top() + 140.0;
-        text(ui, pos2(main.left(), y), Align2::LEFT_CENTER, "PROFILES", T_SECTION);
+        text(ui, pos2(main.left(), y), Align2::LEFT_CENTER, "PROFILES", t_section());
         y += 20.0;
         let mut act: Option<(usize, u8)> = None; // 0 activate, 1 rename start, 2 duplicate, 3 delete
         let mut rename_commit: Option<(usize, String)> = None;
         for (pi, p) in app.profiles.iter().enumerate() {
             let row = Rect::from_min_size(pos2(main.left(), y), vec2(main.width(), 48.0));
             let r = hit(ui, row, ("prow", pi), egui::Sense::hover());
-            ui.painter().rect_filled(row, CornerRadius::same(8), if r.hovered() { SURFACE_HI } else { SURFACE });
+            ui.painter().rect_filled(row, CornerRadius::same(8), if r.hovered() { pal().surface_hi } else { pal().surface });
             if radio(ui, pos2(row.left() + 22.0, row.center().y), app.active_profile == pi, ("pact", pi)).clicked() {
                 act = Some((pi, 0));
             }
@@ -273,20 +273,20 @@ impl GhubApp {
             if renaming {
                 let mut s = self.prof.renaming.as_ref().map(|r| r.1.clone()).unwrap_or_default();
                 let fr = Rect::from_min_size(pos2(row.left() + 44.0, row.center().y - 12.0), vec2(220.0, 24.0));
-                let te = egui::TextEdit::singleline(&mut s).frame(egui::Frame::NONE).font(Ts::new(Fam::Reg, 14.0, WHITE).font()).text_color(WHITE);
+                let te = egui::TextEdit::singleline(&mut s).frame(egui::Frame::NONE).font(Ts::new(Fam::Reg, 14.0, pal().text).font()).text_color(pal().text);
                 let mut child = ui.new_child(UiBuilder::new().max_rect(fr));
                 let resp = child.put(fr, te);
                 resp.request_focus();
-                ui.painter().line_segment([fr.left_bottom(), fr.right_bottom()], Stroke::new(1.0, PRIMARY));
+                ui.painter().line_segment([fr.left_bottom(), fr.right_bottom()], Stroke::new(1.0, pal().primary));
                 if ui.ctx().input(|i| i.key_pressed(egui::Key::Enter)) || resp.lost_focus() {
                     rename_commit = Some((pi, s));
                 } else {
                     self.prof.renaming = Some((pi, s));
                 }
             } else {
-                let tr = text(ui, pos2(row.left() + 44.0, row.center().y), Align2::LEFT_CENTER, &p.name, Ts::new(Fam::Reg, 14.0, WHITE).ls(0.3));
+                let tr = text(ui, pos2(row.left() + 44.0, row.center().y), Align2::LEFT_CENTER, &p.name, Ts::new(Fam::Reg, 14.0, pal().text).ls(0.3));
                 if cfg.persistent == Some((ai, pi)) {
-                    text(ui, pos2(tr.right() + 12.0, row.center().y), Align2::LEFT_CENTER, "PERSISTENT", Ts::new(Fam::Bold, 10.0, AMBER));
+                    text(ui, pos2(tr.right() + 12.0, row.center().y), Align2::LEFT_CENTER, "PERSISTENT", Ts::new(Fam::Bold, 10.0, pal().amber));
                 }
             }
             let mut bx = row.right() - 16.0;
@@ -294,10 +294,10 @@ impl GhubApp {
                 if k == 3 && app.profiles.len() <= 1 {
                     continue;
                 }
-                let g = galley(ui, label, Ts::new(Fam::Bold, 11.0, WHITE), f32::INFINITY);
+                let g = galley(ui, label, Ts::new(Fam::Bold, 11.0, pal().text), f32::INFINITY);
                 let br = Rect::from_min_size(pos2(bx - g.size().x - 12.0, row.center().y - 12.0), vec2(g.size().x + 12.0, 24.0));
                 let b = click(ui, br, ("pbtn", pi, k));
-                let c = if !r.hovered() && !b.hovered() { Color32::from_white_alpha(70) } else if b.hovered() { if k == 3 { ERROR } else { PRIMARY } } else { WHITE };
+                let c = if !r.hovered() && !b.hovered() { pal().ink(70) } else if b.hovered() { if k == 3 { pal().error } else { pal().primary } } else { pal().text };
                 text(ui, br.center(), Align2::CENTER_CENTER, label, Ts::new(Fam::Bold, 11.0, c));
                 if b.clicked() {
                     act = Some((pi, k));
@@ -359,12 +359,12 @@ impl GhubApp {
 /// G HUB dark dropdown ("Desktop - Default").
 pub(crate) fn dropdown(ui: &Ui, r: Rect, first: &str, second: &str, id: &str) -> egui::Response {
     let resp = click(ui, r, id);
-    ui.painter().rect_filled(r, CornerRadius::same(8), if resp.hovered() { SURFACE_HI } else { Color32::from_rgb(0x1c, 0x1c, 0x1f) });
-    let a = text(ui, pos2(r.left() + 17.0, r.center().y), Align2::LEFT_CENTER, first, Ts::new(Fam::Reg, 16.0, WHITE).ls(0.6));
+    ui.painter().rect_filled(r, CornerRadius::same(8), if resp.hovered() { pal().surface_hi } else { pal().n(0x1c) });
+    let a = text(ui, pos2(r.left() + 17.0, r.center().y), Align2::LEFT_CENTER, first, Ts::new(Fam::Reg, 16.0, pal().text).ls(0.6));
     if !second.is_empty() {
-        let d = text(ui, pos2(a.right() + 6.0, r.center().y), Align2::LEFT_CENTER, "-", Ts::new(Fam::Reg, 16.0, WHITE));
-        text(ui, pos2(d.right() + 6.0, r.center().y), Align2::LEFT_CENTER, second, Ts::new(Fam::Bold, 16.0, WHITE).ls(0.6));
+        let d = text(ui, pos2(a.right() + 6.0, r.center().y), Align2::LEFT_CENTER, "-", Ts::new(Fam::Reg, 16.0, pal().text));
+        text(ui, pos2(d.right() + 6.0, r.center().y), Align2::LEFT_CENTER, second, Ts::new(Fam::Bold, 16.0, pal().text).ls(0.6));
     }
-    chevron(ui.painter(), pos2(r.right() - 29.0, r.center().y), 5.0, false, Stroke::new(1.6, WHITE));
+    chevron(ui.painter(), pos2(r.right() - 29.0, r.center().y), 5.0, false, Stroke::new(1.6, pal().text));
     resp
 }

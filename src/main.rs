@@ -16,10 +16,14 @@ use std::sync::{Arc, Mutex};
 
 fn main() -> eframe::Result<()> {
     let args: Vec<String> = std::env::args().collect();
-    let shot = args
+    let flag = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1).cloned());
+    let mut shot = args
         .iter()
         .position(|a| a == "--shot")
         .and_then(|i| Some(Shot::new(args.get(i + 1)?.clone(), args.get(i + 2)?.into())));
+    if let Some(s) = &mut shot {
+        s.switch_to = flag("--switch-to");
+    }
     let minimized = args.iter().any(|a| a == "--minimized") && shot.is_none();
     if shot.is_none() && !ghubx::win::single_instance() {
         return Ok(());
@@ -42,6 +46,15 @@ fn main() -> eframe::Result<()> {
     };
     if shot.is_some() {
         config.general.take_control = false;
+        if let Some(t) = flag("--theme") {
+            config.appearance.theme = t;
+        }
+        if let Some(n) = flag("--accent").and_then(|h| u32::from_str_radix(h.trim_start_matches('#'), 16).ok()) {
+            config.appearance.accent = Some([(n >> 16) as u8, (n >> 8) as u8, n as u8]);
+        }
+        if args.iter().any(|a| a == "--follow-lighting") {
+            config.appearance.follow_lighting = true;
+        }
     }
     let cfg = Arc::new(Mutex::new(config));
 

@@ -1,4 +1,4 @@
-//! G HUB's dark "DLS" design tokens (from app.min.css + computed styles),
+//! G HUB's "DLS" design tokens live in `palette.rs`; this file has
 //! text helpers with letter-spacing, painter icons and the small widgets
 //! G HUB uses (pills, toggles, checkboxes, radios, sliders, tabs).
 
@@ -6,28 +6,8 @@ use egui::text::{LayoutJob, TextFormat};
 use egui::{Align2, Color32, CornerRadius, FontFamily, FontId, Galley, Pos2, Rect, Response, Sense, Shape, Stroke, StrokeKind, Ui, Vec2, pos2, vec2};
 use std::sync::Arc;
 
-pub const BG: Color32 = Color32::BLACK;
-pub const SURFACE: Color32 = Color32::from_rgb(0x21, 0x22, 0x25);
-pub const SURFACE_HI: Color32 = Color32::from_rgb(0x2a, 0x2b, 0x30);
-pub const BUTTON: Color32 = Color32::from_rgb(0x39, 0x39, 0x39);
-pub const PRIMARY: Color32 = Color32::from_rgb(0x11, 0x96, 0xff);
-pub const PRIMARY_DIM: Color32 = Color32::from_rgb(0x12, 0x68, 0xcb);
-pub const AMBER: Color32 = Color32::from_rgb(0xff, 0xbf, 0x00);
-pub const GSHIFT: Color32 = Color32::from_rgb(0xff, 0x00, 0x3e);
-pub const ERROR: Color32 = Color32::from_rgb(0xf5, 0x41, 0x55);
-pub const WHITE: Color32 = Color32::WHITE;
-pub const HIGH: Color32 = Color32::from_rgba_premultiplied(230, 230, 230, 230);
-pub const MEDIUM: Color32 = Color32::from_rgba_premultiplied(153, 153, 153, 153);
-pub const LABEL: Color32 = Color32::from_rgb(0xaa, 0xaa, 0xaa);
-pub const MUTED: Color32 = Color32::from_rgb(0x88, 0x88, 0x88);
-pub const DISABLED: Color32 = Color32::from_rgb(0x6a, 0x6a, 0x6a);
-pub const NAV: Color32 = Color32::from_rgb(206, 211, 222);
-pub const OUTLINE: Color32 = Color32::from_rgba_premultiplied(26, 26, 26, 26);
-pub const OUTLINE_HI: Color32 = Color32::from_rgba_premultiplied(77, 77, 77, 77);
-pub const DIVIDER: Color32 = Color32::from_rgb(0x2b, 0x30, 0x3b);
-pub const ROW_LINE: Color32 = Color32::from_rgb(0x40, 0x41, 0x42);
-pub const LEADER: Color32 = Color32::from_rgb(0x3d, 0x3d, 0x3d);
-pub const TRACK: Color32 = Color32::from_rgb(0x5a, 0x5b, 0x5e);
+pub use super::palette::*;
+
 
 /// Font roles. Brown Pro / Brown Logitech Pan when G HUB is installed.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -81,17 +61,17 @@ impl Ts {
 }
 
 // Common styles measured from G HUB's computed styles.
-pub const T_DEVICE: Ts = Ts::new(Fam::Bold, 34.0, WHITE).ls(0.0);
-pub const T_PANEL_TITLE: Ts = Ts::new(Fam::Reg, 24.0, WHITE);
-pub const T_TAB: Ts = Ts::new(Fam::Reg, 14.0, WHITE);
-pub const T_SECTION: Ts = Ts::new(Fam::Reg, 14.0, LABEL);
-pub const T_SMALL_LABEL: Ts = Ts::new(Fam::Reg, 12.0, LABEL);
-pub const T_BODY: Ts = Ts::new(Fam::Reg, 12.0, HIGH);
-pub const T_BODY_BOLD: Ts = Ts::new(Fam::Bold, 12.0, WHITE);
-pub const T_LIST: Ts = Ts::new(Fam::Light, 12.0, MUTED);
-pub const T_CALLOUT: Ts = Ts::new(Fam::Reg, 14.0, WHITE);
-pub const T_NAV: Ts = Ts::new(Fam::Pan, 14.0, NAV).ls(-0.42);
-pub const T_BUTTON: Ts = Ts::new(Fam::Reg, 12.0, WHITE);
+pub fn t_device() -> Ts { Ts::new(Fam::Bold, 34.0, pal().text).ls(0.0) }
+pub fn t_panel_title() -> Ts { Ts::new(Fam::Reg, 24.0, pal().text) }
+pub fn t_tab() -> Ts { Ts::new(Fam::Reg, 14.0, pal().text) }
+pub fn t_section() -> Ts { Ts::new(Fam::Reg, 14.0, pal().label) }
+pub fn t_small_label() -> Ts { Ts::new(Fam::Reg, 12.0, pal().label) }
+pub fn t_body() -> Ts { Ts::new(Fam::Reg, 12.0, pal().text_high) }
+pub fn t_body_bold() -> Ts { Ts::new(Fam::Bold, 12.0, pal().text) }
+pub fn t_list() -> Ts { Ts::new(Fam::Light, 12.0, pal().muted) }
+pub fn t_callout() -> Ts { Ts::new(Fam::Reg, 14.0, pal().text) }
+pub fn t_nav() -> Ts { Ts::new(Fam::Pan, 14.0, pal().nav).ls(-0.42) }
+pub fn t_button() -> Ts { Ts::new(Fam::Reg, 12.0, pal().text) }
 
 pub fn galley(ui: &Ui, text: &str, ts: Ts, wrap: f32) -> Arc<Galley> {
     let mut job = LayoutJob::single_section(
@@ -127,7 +107,7 @@ pub fn rich(ui: &Ui, pos: Pos2, width: f32, runs: &[(&str, Ts)]) -> Rect {
     job.wrap.max_width = width;
     let g = ui.painter().layout_job(job);
     let r = Rect::from_min_size(pos, g.size());
-    ui.painter().galley(pos, g, WHITE);
+    ui.painter().galley(pos, g, pal().text);
     r
 }
 
@@ -144,24 +124,24 @@ pub fn click(ui: &Ui, rect: Rect, id: impl std::hash::Hash + std::fmt::Debug) ->
 pub fn dark_button(ui: &Ui, rect: Rect, label: &str, id: impl std::hash::Hash + std::fmt::Debug, enabled: bool) -> Response {
     let r = click(ui, rect, id);
     let fill = if !enabled {
-        Color32::from_rgb(0x2b, 0x2b, 0x2d)
+        pal().n(0x2b)
     } else if r.is_pointer_button_down_on() {
-        Color32::from_rgb(0x30, 0x30, 0x30)
+        pal().n(0x30)
     } else if r.hovered() {
-        Color32::from_rgb(0x46, 0x46, 0x46)
+        pal().n(0x46)
     } else {
-        BUTTON
+        pal().button
     };
     ui.painter().rect_filled(rect, CornerRadius::same(4), fill);
-    text(ui, rect.center(), Align2::CENTER_CENTER, label, T_BUTTON.color(if enabled { WHITE } else { DISABLED }));
+    text(ui, rect.center(), Align2::CENTER_CENTER, label, t_button().color(if enabled { pal().text } else { pal().disabled }));
     r
 }
 
 pub fn blue_button(ui: &Ui, rect: Rect, label: &str, id: impl std::hash::Hash + std::fmt::Debug) -> Response {
     let r = click(ui, rect, id);
-    let fill = if r.hovered() { Color32::from_rgb(0x3a, 0xa8, 0xff) } else { PRIMARY };
+    let fill = if r.hovered() { pal().primary_hover } else { pal().primary };
     ui.painter().rect_filled(rect, CornerRadius::same(4), fill);
-    text(ui, rect.center(), Align2::CENTER_CENTER, label, Ts::new(Fam::Bold, 12.0, WHITE));
+    text(ui, rect.center(), Align2::CENTER_CENTER, label, Ts::new(Fam::Bold, 12.0, pal().on_primary));
     r
 }
 
@@ -174,12 +154,12 @@ pub fn pill_sized(ui: &Ui, rect: Rect, label: &str, selected: bool, size: f32, i
     let r = click(ui, rect, id);
     let p = ui.painter();
     if selected {
-        p.rect_filled(rect, CornerRadius::same(100), WHITE);
+        p.rect_filled(rect, CornerRadius::same(100), pal().invert);
     } else {
-        let c = if r.hovered() { WHITE } else { HIGH };
+        let c = if r.hovered() { pal().text } else { pal().text_high };
         p.rect_stroke(rect, CornerRadius::same(100), Stroke::new(1.5, c), StrokeKind::Inside);
     }
-    text(ui, rect.center(), Align2::CENTER_CENTER, label, Ts::new(Fam::Bold, size, if selected { BG } else { WHITE }).ls(0.0));
+    text(ui, rect.center(), Align2::CENTER_CENTER, label, Ts::new(Fam::Bold, size, if selected { pal().bg } else { pal().text }).ls(0.0));
     r
 }
 
@@ -194,11 +174,11 @@ pub fn switch_sized(ui: &Ui, center: Pos2, on: bool, on_color: Color32, k: f32, 
     let t = ui.ctx().animate_bool_with_time(r.id, on, 0.12);
     let p = ui.painter();
     let track = Rect::from_center_size(center, vec2(34.0, 18.0) * k);
-    let off = Color32::from_rgb(0x5a, 0x5b, 0x5e);
+    let off = pal().track;
     let half = track.height() / 2.0;
     p.rect_filled(track, CornerRadius::same(half as u8), lerp_color(off, on_color, t));
     let knob_x = egui::lerp(track.left() + half..=track.right() - half, t);
-    p.circle_filled(pos2(knob_x, center.y), half - 2.0, if on || k <= 1.0 { WHITE } else { Color32::from_rgb(0x9a, 0x9a, 0x9a) });
+    p.circle_filled(pos2(knob_x, center.y), half - 2.0, if on && on_color == pal().primary { pal().on_primary } else if on || k <= 1.0 { Color32::WHITE } else { pal().n(0x9a) });
     r
 }
 
@@ -208,23 +188,23 @@ pub fn onoff(ui: &Ui, center: Pos2, on: bool, id: impl std::hash::Hash + std::fm
     let r = click(ui, rect, id);
     let p = ui.painter();
     if on {
-        p.rect_filled(rect, CornerRadius::same(100), PRIMARY);
+        p.rect_filled(rect, CornerRadius::same(100), pal().primary);
     } else {
-        p.rect_stroke(rect, CornerRadius::same(100), Stroke::new(1.5, WHITE), StrokeKind::Inside);
+        p.rect_stroke(rect, CornerRadius::same(100), Stroke::new(1.5, pal().text), StrokeKind::Inside);
     }
-    text(ui, rect.center(), Align2::CENTER_CENTER, if on { "ON" } else { "OFF" }, Ts::new(Fam::Bold, 12.0, WHITE).ls(0.0));
+    text(ui, rect.center(), Align2::CENTER_CENTER, if on { "ON" } else { "OFF" }, Ts::new(Fam::Bold, 12.0, if on { pal().on_primary } else { pal().text }).ls(0.0));
     r
 }
 
 pub fn checkbox(ui: &Ui, pos: Pos2, label: &str, on: bool, enabled: bool, id: impl std::hash::Hash + std::fmt::Debug) -> Response {
     let box_r = Rect::from_min_size(pos, vec2(14.0, 14.0));
-    let lr = text(ui, pos2(pos.x + 24.0, pos.y + 7.0), Align2::LEFT_CENTER, label, Ts::new(Fam::Bold, 12.0, if enabled { WHITE } else { DISABLED }));
+    let lr = text(ui, pos2(pos.x + 24.0, pos.y + 7.0), Align2::LEFT_CENTER, label, Ts::new(Fam::Bold, 12.0, if enabled { pal().text } else { pal().disabled }));
     let r = click(ui, box_r.union(lr).expand(3.0), id);
     let p = ui.painter();
-    let c = if enabled { WHITE } else { DISABLED };
+    let c = if enabled { pal().text } else { pal().disabled };
     if on {
-        p.rect_filled(box_r, CornerRadius::same(2), if enabled { Color32::from_rgb(0x9a, 0x9a, 0x9a) } else { DISABLED });
-        check(p, box_r.center(), 4.5, Stroke::new(1.8, BG));
+        p.rect_filled(box_r, CornerRadius::same(2), if enabled { pal().n(0x9a) } else { pal().disabled });
+        check(p, box_r.center(), 4.5, Stroke::new(1.8, pal().bg));
     } else {
         p.rect_stroke(box_r, CornerRadius::same(2), Stroke::new(1.5, c), StrokeKind::Inside);
     }
@@ -234,9 +214,9 @@ pub fn checkbox(ui: &Ui, pos: Pos2, label: &str, on: bool, enabled: bool, id: im
 pub fn radio(ui: &Ui, center: Pos2, on: bool, id: impl std::hash::Hash + std::fmt::Debug) -> Response {
     let r = click(ui, Rect::from_center_size(center, vec2(18.0, 18.0)), id);
     if on {
-        ui.painter().circle_filled(center, 5.0, WHITE);
+        ui.painter().circle_filled(center, 5.0, pal().text);
     } else {
-        let c = if r.hovered() { WHITE } else { Color32::from_rgb(0x85, 0x85, 0x85) };
+        let c = if r.hovered() { pal().text } else { pal().n(0x85) };
         ui.painter().circle_stroke(center, 4.5, Stroke::new(1.5, c));
     }
     r
@@ -249,13 +229,13 @@ pub fn tabs(ui: &Ui, origin: Pos2, items: &[&str], selected: usize, gap: f32, id
     let mut out = None;
     for (i, s) in items.iter().enumerate() {
         let sel = i == selected;
-        let g = galley(ui, s, T_TAB, f32::INFINITY);
+        let g = galley(ui, s, t_tab(), f32::INFINITY);
         let rect = Rect::from_min_size(pos2(x, origin.y), vec2(g.size().x, 22.0));
         let r = click(ui, rect.expand2(vec2(4.0, 2.0)), (id, i));
-        let c = if sel || r.hovered() { WHITE } else { MEDIUM };
-        ui.painter().galley(pos2(x, origin.y + 2.0), galley(ui, s, T_TAB.color(c), f32::INFINITY), c);
+        let c = if sel || r.hovered() { pal().text } else { pal().text_medium };
+        ui.painter().galley(pos2(x, origin.y + 2.0), galley(ui, s, t_tab().color(c), f32::INFINITY), c);
         if sel {
-            ui.painter().line_segment([pos2(rect.left(), rect.bottom()), pos2(rect.right() - 1.0, rect.bottom())], Stroke::new(1.0, WHITE));
+            ui.painter().line_segment([pos2(rect.left(), rect.bottom()), pos2(rect.right() - 1.0, rect.bottom())], Stroke::new(1.0, pal().text));
         }
         if r.clicked() {
             out = Some(i);
@@ -284,9 +264,9 @@ pub fn slider(ui: &Ui, rect: Rect, value: &mut f32, range: std::ops::RangeInclus
     let y = rect.center().y;
     let x = rect.left() + t * rect.width();
     let p = ui.painter();
-    p.line_segment([pos2(rect.left(), y), pos2(rect.right(), y)], Stroke::new(2.0, TRACK));
-    p.line_segment([pos2(rect.left(), y), pos2(x, y)], Stroke::new(2.0, Color32::from_rgb(0xd0, 0xd0, 0xd0)));
-    let knob = if r.hovered() || r.dragged() { WHITE } else { Color32::from_rgb(0xe6, 0xe6, 0xe6) };
+    p.line_segment([pos2(rect.left(), y), pos2(rect.right(), y)], Stroke::new(2.0, pal().track));
+    p.line_segment([pos2(rect.left(), y), pos2(x, y)], Stroke::new(2.0, pal().n(0xd0)));
+    let knob = if r.hovered() || r.dragged() { pal().text } else { pal().n(0xe6) };
     p.circle_filled(pos2(x, y), 6.0, knob);
     changed
 }
@@ -388,7 +368,7 @@ pub fn profile_icon(p: &egui::Painter, c: Pos2, color: Color32) {
     p.line_segment([m.left_top() + vec2(3.0, 4.0), m.left_top() + vec2(9.0, 4.0)], st);
     p.line_segment([m.left_top() + vec2(3.0, 7.5), m.left_top() + vec2(7.0, 7.5)], st);
     let lk = Rect::from_center_size(c + vec2(6.5, 4.5), vec2(8.0, 6.0));
-    p.rect_filled(lk.expand(1.5), CornerRadius::same(1), SURFACE);
+    p.rect_filled(lk.expand(1.5), CornerRadius::same(1), pal().surface);
     p.rect_filled(lk, CornerRadius::same(1), color);
     p.add(Shape::line(arc(lk.center_top(), 2.4, std::f32::consts::PI, std::f32::consts::TAU, 8), Stroke::new(1.4, color)));
 }
@@ -468,8 +448,8 @@ pub fn keycap(ui: &Ui, rect: Rect, label: &str, ts: Ts) {
 }
 
 pub fn macro_badge(ui: &Ui, rect: Rect) {
-    ui.painter().rect_filled(rect, CornerRadius::same(2), Color32::from_rgb(0x6e, 0x6e, 0x6e));
-    text(ui, rect.center() + vec2(0.0, 0.5), Align2::CENTER_CENTER, "M", Ts::new(Fam::Bold, 10.0, BG).ls(0.0));
+    ui.painter().rect_filled(rect, CornerRadius::same(2), pal().n(0x6e));
+    text(ui, rect.center() + vec2(0.0, 0.5), Align2::CENTER_CENTER, "M", Ts::new(Fam::Bold, 10.0, pal().bg).ls(0.0));
 }
 
 pub fn soft_shadow(ui: &Ui, rect: Rect, r: u8) {
