@@ -36,6 +36,8 @@ pub struct MacroEditor {
     pub name: String,
     pub kind: MacroKind,
     pub steps: Vec<MacroStep>,
+    /// The macro this editor was opened from (hold, release and the rest survive an edit).
+    orig: Macro,
     pub recording: bool,
     pub record_delays: bool,
     last: Option<Instant>,
@@ -52,7 +54,7 @@ pub struct MacroEditor {
 
 impl MacroEditor {
     pub fn new() -> Self {
-        Self { id: None, name: String::new(), kind: MacroKind::NoRepeat, steps: vec![], recording: false,
+        Self { id: None, name: String::new(), kind: MacroKind::NoRepeat, steps: vec![], orig: Macro::default(), recording: false,
             record_delays: true,
             last: None,
             mods: Default::default(),
@@ -67,7 +69,7 @@ impl MacroEditor {
         }
     }
     pub fn from(m: &Macro) -> Self {
-        Self { id: Some(m.id.clone()), name: m.name.clone(), kind: m.kind, steps: m.steps.clone(), ..Self::new() }
+        Self { id: Some(m.id.clone()), name: m.name.clone(), kind: m.kind, steps: m.steps.clone(), orig: m.clone(), ..Self::new() }
     }
     pub fn set_delay(&mut self, i: usize, ms: u32) {
         if let Some(s) = self.steps.get_mut(i) {
@@ -87,8 +89,8 @@ impl MacroEditor {
 
     pub fn add_key(&mut self, vk: u16) {
         let first = if self.steps.is_empty() { 0 } else { 50 };
-        self.steps.push(MacroStep { vk, down: true, delay_ms: first });
-        self.steps.push(MacroStep { vk, down: false, delay_ms: 50 });
+        self.steps.push(MacroStep::key(vk, true, first));
+        self.steps.push(MacroStep::key(vk, false, 50));
     }
 
     /// `btn` 0..=4 = left, right, middle, back, forward.
@@ -99,7 +101,7 @@ impl MacroEditor {
     }
 
     pub fn add_delay(&mut self) {
-        self.steps.push(MacroStep { vk: 0, down: false, delay_ms: 50 });
+        self.steps.push(MacroStep::pause(50));
     }
 
     /// Type text as key steps; `map` gives a character's VK and whether Shift is
@@ -111,7 +113,7 @@ impl MacroEditor {
                 skipped += 1;
                 continue;
             };
-            let mut step = |vk: u16, down: bool| self.steps.push(MacroStep { vk, down, delay_ms: 10 });
+            let mut step = |vk: u16, down: bool| self.steps.push(MacroStep::key(vk, down, 10));
             if shift {
                 step(0xA0, true);
             }
@@ -131,7 +133,7 @@ impl MacroEditor {
             _ => 0,
         };
         self.last = Some(Instant::now());
-        self.steps.push(MacroStep { vk, down, delay_ms: delay });
+        self.steps.push(MacroStep::key(vk, down, delay));
     }
 }
 
@@ -981,11 +983,13 @@ impl GhubApp {
                         edit_delay = Some((i, s.delay_ms.to_string()));
                     }
                 }
-                if s.vk == 0 {
+                if s.is_pause() {
                     text(ui, pos2(r.left() + 84.0, r.center().y), Align2::LEFT_CENTER, "Delay", Ts::new(Fam::Reg, 12.0, pal().muted).ls(0.4));
                 } else {
-                    chevron(ui.painter(), pos2(r.left() + 70.0, r.center().y), 4.0, !s.down, Stroke::new(1.5, if s.down { pal().primary } else { pal().muted }));
-                    text(ui, pos2(r.left() + 84.0, r.center().y), Align2::LEFT_CENTER, &catalog::vk_name(s.vk), Ts::new(Fam::Reg, 12.0, pal().text).ls(0.4));
+                    if s.act.is_none() {
+                        chevron(ui.painter(), pos2(r.left() + 70.0, r.center().y), 4.0, !s.down, Stroke::new(1.5, if s.down { pal().primary } else { pal().muted }));
+                    }
+                    text(ui, pos2(r.left() + 84.0, r.center().y), Align2::LEFT_CENTER, &catalog::step_name(s), Ts::new(Fam::Reg, 12.0, pal().text).ls(0.4));
                 }
                 if hover {
                     let xr = Rect::from_center_size(pos2(r.right() - 12.0, r.center().y), vec2(20.0, 20.0));
@@ -1031,7 +1035,7 @@ impl GhubApp {
             ui.ctx().request_repaint();
             if t.elapsed().as_secs_f32() >= 3.0 {
                 ed.test_at = None;
-                let _ = self.eng.send(EngineMsg::TestMacro(ed.steps.clone()));
+                let _ = self.eng.send(EngineMsg::TestMacro(Box::new(Macro { kind: ed.kind, steps: ed.steps.clone(), ..ed.orig.clone() })));
             }
         }
         let cancel = dark_button(ui, Rect::from_min_size(pos2(x0 + 2.0 * (bw + 8.0), by), vec2(bw, 32.0)), "CANCEL", "macro-cancel", true).clicked();
@@ -1044,7 +1048,7 @@ impl GhubApp {
             let ed = self.asg.editor.take().unwrap();
             let name = if ed.name.trim().is_empty() { "Macro".to_string() } else { ed.name.trim().to_string() };
             let id = ed.id.clone().unwrap_or_else(new_id);
-            let m = Macro { id: id.clone(), name: name.clone(), kind: ed.kind, steps: ed.steps };
+            let m = Macro { id: id.clone(), name: name.clone(), kind: ed.kind, steps: ed.steps, std_delay: None, ..ed.orig };
             self.edit(|c| {
                 let ca = c.current_app;
                 let ms = &mut c.apps[ca].macros;
@@ -1118,7 +1122,7 @@ mod tests {
     use super::*;
 
     fn step(vk: u16, down: bool, delay_ms: u32) -> MacroStep {
-        MacroStep { vk, down, delay_ms }
+        MacroStep::key(vk, down, delay_ms)
     }
 
     #[test]

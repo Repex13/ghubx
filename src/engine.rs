@@ -21,6 +21,10 @@ pub trait Input: Send + Sync {
     fn mouse_move(&self, dx: i32, dy: i32);
     fn wheel(&self, delta: i32);
     fn hwheel(&self, delta: i32);
+    /// Type this text.
+    fn text(&self, s: &str);
+    /// Open a file, folder, URL or program.
+    fn launch(&self, path: &str);
 }
 
 pub struct RealInput;
@@ -40,6 +44,12 @@ impl Input for RealInput {
     }
     fn hwheel(&self, delta: i32) {
         win::hwheel(delta);
+    }
+    fn text(&self, s: &str) {
+        win::type_text(s);
+    }
+    fn launch(&self, path: &str) {
+        win::launch(path);
     }
 }
 
@@ -113,7 +123,9 @@ pub enum EngineMsg {
     /// Inject a test turn of exactly this many counts.
     TestPerfect180 { counts: i32 },
     /// Play these macro steps once (macro editor TEST button).
-    TestMacro(Vec<MacroStep>),
+    TestMacro(Box<Macro>),
+    /// Run this assignment once, as a press followed at once by a release (macro steps).
+    Tap(Assignment),
     /// Pick the active on-board slot (only while not in host control).
     OnboardSlot(u8),
     /// Ask the device thread to read the on-board profiles.
@@ -181,6 +193,7 @@ pub struct Engine {
     pub(crate) persist: bool,
     pub(crate) flash_until: Option<Instant>,
     pub(crate) input: Arc<dyn Input>,
+    loopback: Option<Sender<EngineMsg>>,
 }
 
 impl Engine {
@@ -207,7 +220,18 @@ impl Engine {
             persist: true,
             flash_until: None,
             input: Arc::new(RealInput),
+            loopback: None,
         }
+    }
+
+    /// Channel back into this engine, for macro steps that run a SYSTEM command.
+    pub fn with_loopback(mut self, tx: Sender<EngineMsg>) -> Self {
+        self.loopback = Some(tx);
+        self
+    }
+
+    fn player(&self) -> Player {
+        Player { input: self.input.clone(), engine: self.loopback.clone() }
     }
 
     pub fn with_host_lighting(mut self, h: crate::fx::Handle) -> Self {
@@ -287,7 +311,8 @@ impl Engine {
                             let _ = self.dev.send(DevCmd::SetStartupEffect(on));
                         }
                     }
-                    Ok(EngineMsg::TestMacro(steps)) => self.test_macro(steps),
+                    Ok(EngineMsg::TestMacro(m)) => self.test_macro(*m),
+                    Ok(EngineMsg::Tap(a)) => self.tap(a),
                     Ok(EngineMsg::TestPerfect180 { counts }) => {
                         let e = self.cfg.lock().unwrap().extras.clone();
                         let input = self.input.clone();
@@ -329,9 +354,24 @@ impl Engine {
         }
     }
 
-    fn test_macro(&self, steps: Vec<MacroStep>) {
-        let input = self.input.clone();
-        std::thread::spawn(move || play(&*input, &steps, None));
+    fn test_macro(&self, m: Macro) {
+        if observer() {
+            self.log("Macro test is off in dev mode".into());
+            return;
+        }
+        let p = self.player();
+        std::thread::spawn(move || play_once(&p, &m));
+    }
+
+    /// A macro step ran an assignment: press and release it at once.
+    fn tap(&mut self, a: Assignment) {
+        if !step_allowed(&a) {
+            return;
+        }
+        let Some((p, macros, extras)) = self.profile() else { return };
+        let turn = turn_for(&p, &extras);
+        let stop = self.start(&a, false, &macros, &extras, &turn);
+        self.finish(Held { a, passthrough: false, stop });
     }
 
     fn on_write_onboard(&mut self, sectors: Vec<(u16, [u8; 256])>, active: Option<u8>) {
@@ -573,12 +613,19 @@ impl Engine {
         let a = if base == Assignment::System(SystemFn::GShift) || !self.st.gshift { base } else { p.effective(slot, true) };
         let passthrough = self.applied.as_ref().is_some_and(|ap| ap.map[slot] != 0) && a == native(slot);
         let turn = turn_for(&p, &extras);
+        if self.held[slot].is_some() {
+            self.release(slot);
+        }
         let stop = self.start(&a, passthrough, &macros, &extras, &turn);
         self.held[slot] = Some(Held { a, passthrough, stop });
     }
 
     fn release(&mut self, slot: usize) {
         let Some(h) = self.held[slot].take() else { return };
+        self.finish(h);
+    }
+
+    fn finish(&mut self, h: Held) {
         if let Some(s) = &h.stop {
             s.store(true, Ordering::Relaxed);
         }
@@ -677,15 +724,22 @@ impl Engine {
                 let m = macros.iter().find(|m| &m.id == id)?.clone();
                 match m.kind {
                     MacroKind::NoRepeat => {
-                        let input = self.input.clone();
-                        std::thread::spawn(move || play(&*input, &m.steps, None));
+                        let p = self.player();
+                        std::thread::spawn(move || play(&p, &m.steps, None));
                         None
                     }
                     MacroKind::RepeatWhileHolding => {
                         let stop = Arc::new(AtomicBool::new(false));
                         let s = stop.clone();
-                        let input = self.input.clone();
-                        std::thread::spawn(move || play(&*input, &m.steps, Some(&s)));
+                        let p = self.player();
+                        std::thread::spawn(move || play(&p, &m.steps, Some(&s)));
+                        Some(stop)
+                    }
+                    MacroKind::Sequence => {
+                        let stop = Arc::new(AtomicBool::new(false));
+                        let s = stop.clone();
+                        let p = self.player();
+                        std::thread::spawn(move || play_sequence(&p, &m, &s));
                         Some(stop)
                     }
                     MacroKind::Toggle => {
@@ -694,15 +748,15 @@ impl Engine {
                         } else {
                             let stop = Arc::new(AtomicBool::new(false));
                             self.toggles.insert(m.id.clone(), stop.clone());
-                            let input = self.input.clone();
-                            std::thread::spawn(move || play(&*input, &m.steps, Some(&stop)));
+                            let p = self.player();
+                            std::thread::spawn(move || play(&p, &m.steps, Some(&stop)));
                         }
                         None
                     }
                 }
             }
             Assignment::Launch { path, .. } => {
-                let _ = std::process::Command::new("cmd").args(["/C", "start", "", path]).spawn();
+                self.input.launch(path);
                 None
             }
             Assignment::Perfect180 { left } => {
@@ -840,27 +894,130 @@ fn click_button(m: MouseFn) -> Option<u8> {
     })
 }
 
-/// Play macro steps once, or loop until `stop` is set. Keys still held when
-/// stopped are released.
-fn play(input: &dyn Input, steps: &[MacroStep], stop: Option<&AtomicBool>) {
-    let mut down: Vec<u16> = Vec::new();
-    loop {
+/// What a macro thread needs: the input sink and a way back into the engine.
+#[derive(Clone)]
+struct Player {
+    input: Arc<dyn Input>,
+    engine: Option<Sender<EngineMsg>>,
+}
+
+impl Player {
+    /// One pass over `steps`; returns the milliseconds slept. Keys left down are tracked in `down`.
+    fn pass(&self, steps: &[MacroStep], down: &mut Vec<u16>) -> u32 {
         let mut slept = 0;
         for s in steps {
             if s.delay_ms > 0 {
                 std::thread::sleep(Duration::from_millis(s.delay_ms as u64));
                 slept += s.delay_ms;
             }
-            if s.vk == 0 {
-                continue; // delay-only step
-            }
-            input.key(s.vk, s.down);
-            if s.down {
-                down.push(s.vk);
-            } else {
-                down.retain(|&v| v != s.vk);
+            if let Some(a) = &s.act {
+                self.act(a);
+            } else if s.vk != 0 {
+                self.input.key(s.vk, s.down);
+                if s.down {
+                    down.push(s.vk);
+                } else {
+                    down.retain(|&v| v != s.vk);
+                }
             }
         }
+        slept
+    }
+
+    fn act(&self, a: &StepAct) {
+        let a = match a {
+            StepAct::Text(t) => return self.input.text(t),
+            StepAct::Do(a) => a,
+        };
+        if !step_allowed(a) {
+            return;
+        }
+        match a {
+            Assignment::Key(k) | Assignment::Shortcut { combo: k, .. } => {
+                for vk in mod_vks(k.mods) {
+                    self.input.key(vk, true);
+                }
+                self.input.key(k.vk, true);
+                self.input.key(k.vk, false);
+                for vk in mod_vks(k.mods).into_iter().rev() {
+                    self.input.key(vk, false);
+                }
+            }
+            Assignment::Mouse(MouseFn::DoubleClick) => {
+                for _ in 0..2 {
+                    self.input.mouse(0, true);
+                    self.input.mouse(0, false);
+                    std::thread::sleep(Duration::from_millis(30));
+                }
+            }
+            Assignment::Mouse(MouseFn::WheelUp) => self.input.wheel(120),
+            Assignment::Mouse(MouseFn::WheelDown) => self.input.wheel(-120),
+            Assignment::Mouse(MouseFn::WheelLeft) => self.input.hwheel(-120),
+            Assignment::Mouse(MouseFn::WheelRight) => self.input.hwheel(120),
+            Assignment::Mouse(m) => {
+                if let Some(b) = click_button(*m) {
+                    self.input.mouse(b, true);
+                    self.input.mouse(b, false);
+                }
+            }
+            Assignment::Launch { path, .. } => self.input.launch(path),
+            other => {
+                if let Some(tx) = &self.engine {
+                    let _ = tx.send(EngineMsg::Tap(other.clone()));
+                }
+            }
+        }
+    }
+}
+
+fn release_all_down(p: &Player, down: Vec<u16>) {
+    for vk in down.into_iter().rev() {
+        p.input.key(vk, false);
+    }
+}
+
+/// SEQUENCE: ON PRESS once, WHILE HOLDING repeated until `stop`, ON RELEASE once. Keys left down by a
+/// section stay down for the next one; the end releases what is still down.
+fn play_sequence(p: &Player, m: &Macro, stop: &AtomicBool) {
+    let mut down = Vec::new();
+    p.pass(&m.steps, &mut down);
+    if m.hold.is_empty() {
+        while !stop.load(Ordering::Relaxed) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    } else {
+        if let Some(d) = m.std_delay
+            && !m.steps.is_empty()
+            && !stop.load(Ordering::Relaxed)
+        {
+            std::thread::sleep(Duration::from_millis(d as u64));
+        }
+        while !stop.load(Ordering::Relaxed) {
+            if p.pass(&m.hold, &mut down) == 0 {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+    }
+    p.pass(&m.release, &mut down);
+    release_all_down(p, down);
+}
+
+/// The editor's TEST: press, one pass of hold, release.
+fn play_once(p: &Player, m: &Macro) {
+    let mut down = Vec::new();
+    p.pass(&m.steps, &mut down);
+    if m.kind == MacroKind::Sequence {
+        p.pass(&m.hold, &mut down);
+        p.pass(&m.release, &mut down);
+    }
+    release_all_down(p, down);
+}
+
+/// NoRepeat / RepeatWhileHolding / Toggle: loop `steps` until `stop` (one pass without it).
+fn play(p: &Player, steps: &[MacroStep], stop: Option<&AtomicBool>) {
+    let mut down: Vec<u16> = Vec::new();
+    loop {
+        let slept = p.pass(steps, &mut down);
         match stop {
             Some(f) if !f.load(Ordering::Relaxed) => {
                 if slept == 0 {
@@ -871,7 +1028,7 @@ fn play(input: &dyn Input, steps: &[MacroStep], stop: Option<&AtomicBool>) {
         }
     }
     for vk in down {
-        input.key(vk, false);
+        p.input.key(vk, false);
     }
 }
 
@@ -908,6 +1065,8 @@ mod tests {
         Move(i32, i32),
         Wheel(i32),
         HWheel(i32),
+        Text(String),
+        Launch(String),
     }
 
     #[derive(Default)]
@@ -940,6 +1099,12 @@ mod tests {
         fn hwheel(&self, delta: i32) {
             self.push(Ev::HWheel(delta));
         }
+        fn text(&self, s: &str) {
+            self.push(Ev::Text(s.into()));
+        }
+        fn launch(&self, path: &str) {
+            self.push(Ev::Launch(path.into()));
+        }
     }
 
     struct Rig {
@@ -947,6 +1112,7 @@ mod tests {
         e: Engine,
         dev_rx: Receiver<DevCmd>,
         osd: Arc<Mutex<Vec<OsdKind>>>,
+        lb_rx: Receiver<EngineMsg>,
         cfg: Arc<Mutex<Config>>,
         _ui_rx: Receiver<UiEvent>,
         _guard: MutexGuard<'static, ()>,
@@ -974,14 +1140,25 @@ mod tests {
         e.persist = false;
         let rec = Arc::new(Rec::default());
         e.input = rec.clone();
+        let (lb_tx, lb_rx) = unbounded();
+        e.loopback = Some(lb_tx);
         e.st.connected = true;
         e.st.ghub_running = false;
-        Rig { rec, e, dev_rx, osd, cfg, _ui_rx: ui_rx, _guard: guard }
+        Rig { rec, e, dev_rx, osd, lb_rx, cfg, _ui_rx: ui_rx, _guard: guard }
     }
 
     impl Rig {
         fn cmds(&self) -> Vec<DevCmd> {
             self.dev_rx.try_iter().collect()
+        }
+
+        /// Feed queued macro `Tap`s into the engine, as its run loop does.
+        fn feed_taps(&mut self) {
+            while let Ok(m) = self.lb_rx.try_recv() {
+                if let EngineMsg::Tap(a) = m {
+                    self.e.tap(a);
+                }
+            }
         }
 
         fn take_control(&mut self) {
@@ -1004,7 +1181,7 @@ mod tests {
     }
 
     fn macro_of(id: &str, kind: MacroKind, steps: &[(u16, bool, u32)]) -> Macro {
-        Macro { id: id.into(), name: id.into(), kind, steps: steps.iter().map(|&(vk, down, delay_ms)| MacroStep { vk, down, delay_ms }).collect() }
+        Macro { id: id.into(), name: id.into(), kind, steps: steps.iter().map(|&(vk, down, delay_ms)| MacroStep::key(vk, down, delay_ms)).collect(), ..Default::default() }
     }
 
     fn moves(r: &Rig) -> Vec<(i32, i32)> {
@@ -1174,7 +1351,7 @@ mod tests {
     fn test_macro_plays_once_through_the_sink() {
         let mut r = rig(|_| {});
         r.take_control();
-        r.e.test_macro(vec![MacroStep { vk: 0x41, down: true, delay_ms: 0 }, MacroStep { vk: 0x41, down: false, delay_ms: 30 }]);
+        r.e.test_macro(macro_of("t", MacroKind::NoRepeat, &[(0x41, true, 0), (0x41, false, 30)]));
         pause(150);
         assert_eq!(r.rec.events(), vec![Ev::Key(0x41, true), Ev::Key(0x41, false)]);
     }
@@ -1345,6 +1522,160 @@ mod tests {
         assert!(!r.e.poll_wdl());
         *state.lock().unwrap() = None;
         assert!(!r.e.poll_wdl());
+    }
+
+    fn seq_macro(press: &[MacroStep], hold: &[MacroStep], release: &[MacroStep]) -> Macro {
+        Macro { id: "seq".into(), name: "seq".into(), kind: MacroKind::Sequence, steps: press.to_vec(), hold: hold.to_vec(), release: release.to_vec(), ..Default::default() }
+    }
+
+    fn seq_rig(m: Macro) -> Rig {
+        rig(move |c| {
+            base(c, 3, Assignment::Macro("seq".into()));
+            c.apps[0].macros.push(m);
+        })
+    }
+
+    fn k(vk: u16, down: bool, d: u32) -> MacroStep {
+        MacroStep::key(vk, down, d)
+    }
+
+    fn pairs(ev: &[Ev], vk: u16) -> usize {
+        ev.iter().filter(|e| **e == Ev::Key(vk, true)).count()
+    }
+
+    #[test]
+    fn sequence_plays_press_hold_release_in_order() {
+        let mut r = seq_rig(seq_macro(&[k(0x41, true, 0), k(0x41, false, 0)], &[k(0x42, true, 0), k(0x42, false, 0), MacroStep::pause(20)], &[k(0x43, true, 0), k(0x43, false, 0)]));
+        r.take_control();
+        r.e.on_mask(1 << 3);
+        pause(150);
+        assert!(r.rec.events().len() >= 6);
+        r.e.on_mask(0);
+        pause(100);
+        let ev = r.rec.events();
+        assert_eq!(ev[..2], [Ev::Key(0x41, true), Ev::Key(0x41, false)]);
+        assert!(pairs(&ev, 0x42) >= 2, "{ev:?}");
+        assert_eq!(ev[ev.len() - 2..], [Ev::Key(0x43, true), Ev::Key(0x43, false)]);
+        assert_eq!(pairs(&ev, 0x41) + pairs(&ev, 0x43), 2);
+        pause(60);
+        assert_eq!(r.rec.events().len(), ev.len());
+    }
+
+    #[test]
+    fn sequence_released_during_press_skips_the_hold() {
+        let mut r = seq_rig(seq_macro(&[k(0x41, true, 0), k(0x41, false, 80)], &[k(0x42, true, 0), k(0x42, false, 0), MacroStep::pause(20)], &[k(0x43, true, 0), k(0x43, false, 0)]));
+        r.take_control();
+        r.press(3);
+        pause(250);
+        assert_eq!(r.rec.events(), vec![Ev::Key(0x41, true), Ev::Key(0x41, false), Ev::Key(0x43, true), Ev::Key(0x43, false)]);
+    }
+
+    #[test]
+    fn sequence_keeps_keys_down_until_the_release_section() {
+        let mut r = seq_rig(seq_macro(&[k(0x57, true, 0)], &[], &[k(0x57, false, 0)]));
+        r.take_control();
+        r.e.on_mask(1 << 3);
+        pause(100);
+        assert_eq!(r.rec.events(), vec![Ev::Key(0x57, true)]);
+        r.e.on_mask(0);
+        pause(80);
+        assert_eq!(r.rec.events(), vec![Ev::Key(0x57, true), Ev::Key(0x57, false)]);
+    }
+
+    #[test]
+    fn sequence_releases_leftover_keys_at_the_end() {
+        let mut r = seq_rig(seq_macro(&[k(0x57, true, 0)], &[], &[]));
+        r.take_control();
+        r.e.on_mask(1 << 3);
+        pause(60);
+        r.e.on_mask(0);
+        pause(80);
+        assert_eq!(r.rec.events(), vec![Ev::Key(0x57, true), Ev::Key(0x57, false)]);
+    }
+
+    #[test]
+    fn control_loss_ends_a_held_sequence_through_its_release_section() {
+        let mut r = seq_rig(seq_macro(&[k(0x41, true, 0), k(0x41, false, 0)], &[k(0x42, true, 0), k(0x42, false, 0), MacroStep::pause(20)], &[k(0x43, true, 0), k(0x43, false, 0)]));
+        r.take_control();
+        r.e.on_mask(1 << 3);
+        pause(80);
+        r.e.on_control_lost();
+        pause(100);
+        let ev = r.rec.events();
+        assert_eq!(ev[ev.len() - 2..], [Ev::Key(0x43, true), Ev::Key(0x43, false)]);
+    }
+
+    #[test]
+    fn macro_steps_type_text_run_shortcuts_clicks_and_launches() {
+        let steps = vec![
+            MacroStep::text("hi", 0),
+            MacroStep::run(Assignment::Shortcut { name: "Copy".into(), combo: KeyCombo { vk: 0x43, mods: MOD_CTRL } }, 0),
+            MacroStep::run(Assignment::Mouse(MouseFn::Primary), 0),
+            MacroStep::run(Assignment::Launch { name: "x".into(), path: "C:\\x.exe".into() }, 0),
+        ];
+        let mut r = rig(move |c| {
+            base(c, 3, Assignment::Macro("m".into()));
+            base(c, 4, Assignment::Launch { name: "y".into(), path: "C:\\y.exe".into() });
+            c.apps[0].macros.push(Macro { id: "m".into(), name: "m".into(), steps, ..Default::default() });
+        });
+        r.take_control();
+        r.press(3);
+        pause(80);
+        assert_eq!(r.rec.events(), vec![
+            Ev::Text("hi".into()),
+            Ev::Key(0xA2, true),
+            Ev::Key(0x43, true),
+            Ev::Key(0x43, false),
+            Ev::Key(0xA2, false),
+            Ev::Mouse(0, true),
+            Ev::Mouse(0, false),
+            Ev::Launch("C:\\x.exe".into()),
+        ]);
+        r.press(4);
+        assert_eq!(r.rec.events().last(), Some(&Ev::Launch("C:\\y.exe".into())));
+    }
+
+    #[test]
+    fn macro_step_system_command_goes_through_the_engine() {
+        let mut r = rig(|c| {
+            base(c, 3, Assignment::Macro("m".into()));
+            c.apps[0].macros.push(Macro { id: "m".into(), name: "m".into(), steps: vec![MacroStep::run(Assignment::System(SystemFn::DpiUp), 0)], ..Default::default() });
+        });
+        r.take_control();
+        r.cmds();
+        r.press(3);
+        pause(80);
+        r.feed_taps();
+        assert_eq!(r.cfg.lock().unwrap().apps[0].profiles[0].dpi.active, 1000);
+        assert!(r.cmds().iter().any(|c| matches!(c, DevCmd::SetDpi(1000))));
+    }
+
+    #[test]
+    fn macro_steps_never_run_what_needs_a_held_button() {
+        let steps = [Assignment::Macro("m".into()), Assignment::System(SystemFn::GShift), Assignment::Default].map(|a| MacroStep::run(a, 0)).to_vec();
+        let mut r = rig(move |c| {
+            base(c, 3, Assignment::Macro("m".into()));
+            c.apps[0].macros.push(Macro { id: "m".into(), name: "m".into(), steps, ..Default::default() });
+        });
+        r.take_control();
+        r.press(3);
+        pause(80);
+        assert!(r.lb_rx.try_recv().is_err());
+        assert!(r.rec.events().is_empty());
+    }
+
+    #[test]
+    fn test_macro_plays_a_sequence_and_stays_silent_in_observer_mode() {
+        let m = seq_macro(&[k(0x41, true, 0), k(0x41, false, 0)], &[k(0x42, true, 0), k(0x42, false, 0)], &[k(0x43, true, 0), k(0x43, false, 0)]);
+        let r = rig(|_| {});
+        r.e.test_macro(m.clone());
+        pause(80);
+        let want: Vec<Ev> = [0x41, 0x42, 0x43].iter().flat_map(|&v| [Ev::Key(v, true), Ev::Key(v, false)]).collect();
+        assert_eq!(r.rec.events(), want);
+        set_observer(true);
+        r.e.test_macro(m);
+        pause(80);
+        assert_eq!(r.rec.events().len(), want.len());
     }
 
     #[test]

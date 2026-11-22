@@ -73,6 +73,17 @@ pub fn label(a: &Assignment, slot: usize, macros: &[Macro]) -> (String, LabelSty
     }
 }
 
+/// Row text of a macro step in the editor.
+pub fn step_name(s: &MacroStep) -> String {
+    match &s.act {
+        Some(StepAct::Text(t)) => t.clone(),
+        Some(StepAct::Do(Assignment::Launch { name, .. })) => format!("Launch {name}"),
+        Some(StepAct::Do(a)) => label(a, 0, &[]).0,
+        None if s.vk == 0 => "Delay".into(),
+        None => vk_name(s.vk),
+    }
+}
+
 pub fn vk_name(vk: u16) -> String {
     let s = match vk {
         0x00 => "Delay",

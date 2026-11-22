@@ -109,6 +109,7 @@ fn main() -> eframe::Result<()> {
         if let Some(h) = fx.clone() {
             engine = engine.with_host_lighting(h);
         }
+        engine = engine.with_loopback(eng_tx.clone());
         std::thread::Builder::new().name("engine".into()).spawn(move || engine.run(eng_rx)).expect("spawn engine thread");
     }
 

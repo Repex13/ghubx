@@ -150,45 +150,133 @@ fn keystroke(m: &Value) -> Option<KeyCombo> {
     Some(KeyCombo { vk, mods })
 }
 
-/// G HUB SEQUENCE macro -> GHUB-X macro.
-fn sequence(card: &Value) -> Option<Macro> {
-    let seq = card.get("macro")?.get("sequence")?;
-    let default_delay = seq.get("defaultDelay").and_then(num).unwrap_or(50) as u32;
-    let pick = |k: &str| seq.get(k).and_then(|s| s.get("components")).and_then(|c| c.as_array()).filter(|a| !a.is_empty());
-    let (kind, comps) = pick("heldSequence")
-        .map(|c| (MacroKind::RepeatWhileHolding, c))
-        .or_else(|| pick("toggleSequence").map(|c| (MacroKind::Toggle, c)))
-        .or_else(|| pick("simpleSequence").or_else(|| pick("pressSequence")).map(|c| (MacroKind::NoRepeat, c)))?;
+/// One G HUB `components` list -> steps, and whether any delay carries an explicit duration.
+fn macro_steps(comps: &[Value], default_delay: u32) -> (Vec<MacroStep>, bool) {
     let mut steps = Vec::new();
     let mut pending = 0u32;
+    let mut explicit = false;
+    let name_of = |c: &Value| c.get("name").and_then(|n| n.as_str()).map(str::to_string);
     for c in comps {
         if let Some(d) = c.get("delay") {
-            pending += d.get("durationMs").or_else(|| d.get("duration")).and_then(num).map(|v| v as u32).unwrap_or(default_delay);
+            pending += match d.get("durationMs").or_else(|| d.get("duration")).and_then(num) {
+                Some(v) => {
+                    explicit = true;
+                    v as u32
+                }
+                None => default_delay,
+            };
             continue;
         }
         let (vk, down) = if let Some(k) = c.get("keyboard") {
-            (hid_to_vk(num(k.get("hidUsage")?)? as u32)?, k.get("isDown").and_then(|b| b.as_bool()).unwrap_or(false))
+            let Some(vk) = k.get("hidUsage").and_then(num).and_then(|u| hid_to_vk(u as u32)) else { continue };
+            (vk, k.get("isDown").and_then(|b| b.as_bool()).unwrap_or(false))
         } else if let Some(b) = c.get("mouse").and_then(|m| m.get("button")) {
-            let vk = match num(b.get("hidUsage")?)? {
-                1 => 0x01,
-                2 => 0x02,
-                3 => 0x04,
-                4 => 0x05,
-                5 => 0x06,
+            let vk = match b.get("hidUsage").and_then(num) {
+                Some(1) => 0x01,
+                Some(2) => 0x02,
+                Some(3) => 0x04,
+                Some(4) => 0x05,
+                Some(5) => 0x06,
                 _ => continue,
             };
             (vk, b.get("isDown").and_then(|b| b.as_bool()).unwrap_or(false))
         } else {
+            let step = if let Some(t) = c.get("textBlock").and_then(|t| t.get("text")).and_then(|t| t.as_str()) {
+                MacroStep::text(t, pending)
+            } else if let Some(w) = c.get("mouse").and_then(|m| m.get("wheel")) {
+                let pos = w.get("isPositive").and_then(|b| b.as_bool()).unwrap_or(false);
+                let f = match (w.get("hidUsage").and_then(num), pos) {
+                    (Some(6), true) => MouseFn::WheelUp,
+                    (Some(6), false) => MouseFn::WheelDown,
+                    (Some(7), true) => MouseFn::WheelRight,
+                    (Some(7), false) => MouseFn::WheelLeft,
+                    _ => continue,
+                };
+                MacroStep::run(Assignment::Mouse(f), pending)
+            } else if let Some(combo) = keystroke(c) {
+                MacroStep::run(Assignment::Shortcut { name: name_of(c).unwrap_or_else(|| "Keystroke".into()), combo }, pending)
+            } else if let Some(path) = c.get("app").and_then(|a| a.get("executablePath")).and_then(|p| p.as_str()) {
+                let stem = std::path::Path::new(path).file_stem().and_then(|s| s.to_str()).unwrap_or(path).to_string();
+                MacroStep::run(Assignment::Launch { name: name_of(c).unwrap_or(stem), path: path.to_string() }, pending)
+            } else {
+                continue;
+            };
+            steps.push(step);
+            pending = 0;
             continue;
         };
-        steps.push(MacroStep { vk, down, delay_ms: pending });
+        steps.push(MacroStep::key(vk, down, pending));
         pending = 0;
     }
     if pending > 0 {
-        // trailing gap matters for repeating macros; vk 0 = delay only
-        steps.push(MacroStep { vk: 0, down: false, delay_ms: pending });
+        // trailing gap matters for repeating macros
+        steps.push(MacroStep::pause(pending));
     }
-    Some(Macro { id: card.get("id")?.as_str()?.to_string(), name: card.get("name")?.as_str()?.to_string(), kind, steps })
+    (steps, explicit)
+}
+
+fn macro_color(m: &Value) -> Option<[u8; 3]> {
+    let c = m.get("color")?;
+    if let Some(h) = c.get("hex").and_then(|h| h.as_str()) {
+        let n = u32::from_str_radix(h.trim_start_matches('#'), 16).ok()?;
+        return Some([(n >> 16) as u8, (n >> 8) as u8, n as u8]);
+    }
+    Some([num(c.get("red")?)? as u8, num(c.get("green")?)? as u8, num(c.get("blue")?)? as u8])
+}
+
+/// G HUB SEQUENCE macro -> GHUB-X macro. The type comes from G HUB's own flags, in its order of precedence.
+fn sequence(card: &Value) -> Option<Macro> {
+    let mac = card.get("macro")?;
+    let seq = mac.get("sequence")?;
+    let default_delay = seq.get("defaultDelay").and_then(num).unwrap_or(50) as u32;
+    let flag = |k: &str| seq.get(k).and_then(|b| b.as_bool()).unwrap_or(false);
+    let comps = |k: &str| seq.get(k).and_then(|s| s.get("components")).and_then(|c| c.as_array()).filter(|a| !a.is_empty());
+    let kind = if flag("useRepeatActions") {
+        MacroKind::RepeatWhileHolding
+    } else if flag("useSimpleActions") {
+        MacroKind::NoRepeat
+    } else if flag("useToggleActions") {
+        MacroKind::Toggle
+    } else if comps("pressSequence").is_some() || comps("heldSequence").is_some() || comps("releaseSequence").is_some() {
+        MacroKind::Sequence
+    } else if comps("simpleSequence").is_some() {
+        MacroKind::NoRepeat
+    } else if comps("toggleSequence").is_some() {
+        MacroKind::Toggle
+    } else {
+        return None;
+    };
+    let parts: [&str; 3] = match kind {
+        MacroKind::RepeatWhileHolding => ["heldSequence", "", ""],
+        MacroKind::NoRepeat => ["simpleSequence", "", ""],
+        MacroKind::Toggle => ["toggleSequence", "", ""],
+        MacroKind::Sequence => ["pressSequence", "heldSequence", "releaseSequence"],
+    };
+    let mut lists = [Vec::new(), Vec::new(), Vec::new()];
+    let mut explicit = false;
+    for (list, key) in lists.iter_mut().zip(parts) {
+        if let Some(c) = comps(key) {
+            let (steps, e) = macro_steps(c, default_delay);
+            *list = steps;
+            explicit |= e;
+        }
+    }
+    if lists.iter().all(Vec::is_empty) {
+        return None;
+    }
+    let [steps, hold, release] = lists;
+    let std_delay = (flag("useDefaultDelay") || !explicit).then_some(default_delay);
+    Some(Macro {
+        id: card.get("id")?.as_str()?.to_string(),
+        name: card.get("name")?.as_str()?.to_string(),
+        kind,
+        steps,
+        hold,
+        release,
+        std_delay,
+        show_up_down: seq.get("showUpDown").and_then(|b| b.as_bool()).unwrap_or(true),
+        color: macro_color(mac),
+    })
 }
 
 fn lighting(card: &Value) -> Option<[Lighting; 2]> {
@@ -383,12 +471,12 @@ mod tests {
       "profiles/auto_switching/enabled": false,
       "cards": {"cards": [
         {"id": "jump-id", "applicationId": "app1", "name": "jump", "attribute": "MACRO_PLAYBACK",
-         "macro": {"type": "SEQUENCE", "sequence": {"defaultDelay": 50,
+         "macro": {"type": "SEQUENCE", "sequence": {"defaultDelay": 50, "showUpDown": true, "useRepeatActions": true,
            "heldSequence": {"components": [{"keyboard": {"displayName": "Space", "hidUsage": "44", "isDown": true}}, {"delay": {}},
                                            {"keyboard": {"displayName": "Space", "hidUsage": "44"}}, {"delay": {}}]},
            "pressSequence": {}, "releaseSequence": {}, "simpleSequence": {}, "toggleSequence": {}}}},
         {"id": "ping-id", "applicationId": "app1", "name": "ping", "attribute": "MACRO_PLAYBACK",
-         "macro": {"type": "SEQUENCE", "sequence": {"defaultDelay": 50, "heldSequence": {},
+         "macro": {"type": "SEQUENCE", "sequence": {"defaultDelay": 50, "useToggleActions": true, "heldSequence": {},
            "toggleSequence": {"components": [{"mouse": {"button": {"hidUsage": "3", "isDown": true}}}, {"delay": {}}, {"mouse": {"button": {"hidUsage": "3"}}}, {"delay": {}}]}}}},
         {"id": "task-id", "applicationId": "app1", "name": "Open Task Manager", "attribute": "MACRO_PLAYBACK",
          "macro": {"type": "KEYSTROKE", "keystroke": {"code": 41, "modifiers": [224, 225]}}},
@@ -433,12 +521,65 @@ mod tests {
         let jump = a.macros.iter().find(|m| m.name == "jump").unwrap();
         assert_eq!(jump.kind, MacroKind::RepeatWhileHolding);
         assert_eq!(jump.steps, vec![
-            MacroStep { vk: 0x20, down: true, delay_ms: 0 },
-            MacroStep { vk: 0x20, down: false, delay_ms: 50 },
-            MacroStep { vk: 0, down: false, delay_ms: 50 },
+            MacroStep::key(0x20, true, 0),
+            MacroStep::key(0x20, false, 50),
+            MacroStep::pause(50),
         ]);
         let ping = a.macros.iter().find(|m| m.name == "ping").unwrap();
         assert_eq!((ping.kind, ping.steps[0].vk), (MacroKind::Toggle, 0x04));
         assert_eq!(sum.macros, 2);
+    }
+
+    fn card(seq: &str, extra: &str) -> Value {
+        serde_json::from_str(&format!(r#"{{"id": "m", "name": "m", "macro": {{"type": "SEQUENCE", {extra} "sequence": {{{seq}}}}}}}"#)).unwrap()
+    }
+
+    const KEY_J: &str = r#"{"keyboard": {"hidUsage": "13", "isDown": true}}, {"delay": {}}, {"keyboard": {"hidUsage": "13"}}"#;
+    const KEY_K: &str = r#"{"keyboard": {"hidUsage": "14", "isDown": true}}, {"keyboard": {"hidUsage": "14"}}"#;
+
+    #[test]
+    fn macro_kind_follows_the_flags() {
+        let seq = |flags: &str| card(&format!(r#""defaultDelay": 40, {flags} "pressSequence": {{"components": [{KEY_J}]}}, "heldSequence": {{"components": [{KEY_K}]}}, "releaseSequence": {{"components": [{KEY_K}]}}, "simpleSequence": {{"components": [{KEY_J}]}}, "toggleSequence": {{"components": [{KEY_J}]}}"#), "");
+        assert_eq!(sequence(&seq(r#""useRepeatActions": true,"#)).unwrap().kind, MacroKind::RepeatWhileHolding);
+        assert_eq!(sequence(&seq(r#""useSimpleActions": true,"#)).unwrap().kind, MacroKind::NoRepeat);
+        assert_eq!(sequence(&seq(r#""useToggleActions": true,"#)).unwrap().kind, MacroKind::Toggle);
+        let m = sequence(&seq("")).unwrap();
+        assert_eq!(m.kind, MacroKind::Sequence);
+        assert_eq!((m.steps.len(), m.hold.len(), m.release.len()), (2, 2, 2));
+        assert_eq!(m.steps[0], MacroStep::key(0x0D + 0x3D, true, 0));
+        // older data without flags
+        let only = |k: &str| sequence(&card(&format!(r#""{k}": {{"components": [{KEY_J}]}}"#), "")).unwrap().kind;
+        assert_eq!(only("simpleSequence"), MacroKind::NoRepeat);
+        assert_eq!(only("toggleSequence"), MacroKind::Toggle);
+        assert_eq!(only("heldSequence"), MacroKind::Sequence);
+        let held_only = card(&format!(r#""useRepeatActions": true, "heldSequence": {{"components": [{KEY_J}]}}, "pressSequence": {{}}"#), "");
+        assert_eq!(sequence(&held_only).unwrap().kind, MacroKind::RepeatWhileHolding);
+        assert!(sequence(&card(r#""useRepeatActions": true, "heldSequence": {}"#, "")).is_none());
+    }
+
+    #[test]
+    fn macro_components_and_delays() {
+        let m = sequence(&card(
+            r#""defaultDelay": 40, "useSimpleActions": true, "simpleSequence": {"components": [
+                {"textBlock": {"text": "hi\n"}}, {"delay": {}},
+                {"mouse": {"wheel": {"hidUsage": 6, "isPositive": true}}}, {"delay": {}},
+                {"mouse": {"wheel": {"hidUsage": 7, "isPositive": false}}},
+                {"keystroke": {"code": 6, "modifiers": [224]}, "name": "Copy"},
+                {"app": {"executablePath": "C:\\Tools\\thing.exe"}}]}"#,
+            r##""color": {"hex": "#0A141E"},"##,
+        ))
+        .unwrap();
+        assert_eq!(m.std_delay, Some(40));
+        assert_eq!(m.color, Some([10, 20, 30]));
+        assert_eq!(m.steps[0], MacroStep::text("hi\n", 0));
+        assert_eq!(m.steps[1], MacroStep::run(Assignment::Mouse(MouseFn::WheelUp), 40));
+        assert_eq!(m.steps[2], MacroStep::run(Assignment::Mouse(MouseFn::WheelLeft), 40));
+        assert_eq!(m.steps[3], MacroStep::run(Assignment::Shortcut { name: "Copy".into(), combo: KeyCombo { vk: 0x43, mods: MOD_CTRL } }, 0));
+        assert_eq!(m.steps[4], MacroStep::run(Assignment::Launch { name: "thing".into(), path: r"C:\Tools\thing.exe".into() }, 0));
+        let explicit = sequence(&card(r#""defaultDelay": 40, "useSimpleActions": true, "simpleSequence": {"components": [{"keyboard": {"hidUsage": "13", "isDown": true}}, {"delay": {"durationMs": 120}}, {"keyboard": {"hidUsage": "13"}}]}"#, "")).unwrap();
+        assert_eq!(explicit.std_delay, None);
+        assert_eq!(explicit.steps[1].delay_ms, 120);
+        let rgb = sequence(&card(&format!(r#""useSimpleActions": true, "simpleSequence": {{"components": [{KEY_K}]}}"#), r#""color": {"red": 1, "green": 2, "blue": 3},"#)).unwrap();
+        assert_eq!(rgb.color, Some([1, 2, 3]));
     }
 }

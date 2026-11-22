@@ -55,6 +55,45 @@ pub fn key(vk: u16, down: bool) {
     }]);
 }
 
+/// Type text: one `SendInput` call per character (down + up for each UTF-16 unit); newline is
+/// Enter, tab is Tab, carriage returns are skipped.
+pub fn type_text(s: &str) {
+    for ch in s.chars() {
+        match ch {
+            '\r' => {}
+            '\n' | '\t' => {
+                let vk = if ch == '\n' { 0x0D } else { 0x09 };
+                key(vk, true);
+                key(vk, false);
+            }
+            _ => {
+                let mut units = [0u16; 2];
+                let mut inputs = Vec::new();
+                for &u in ch.encode_utf16(&mut units).iter() {
+                    for flags in [KEYEVENTF_UNICODE, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP] {
+                        inputs.push(INPUT {
+                            r#type: INPUT_KEYBOARD,
+                            Anonymous: INPUT_0 { ki: KEYBDINPUT { wVk: VIRTUAL_KEY(0), wScan: u, dwFlags: flags, time: 0, dwExtraInfo: INJECT_TAG } },
+                        });
+                    }
+                }
+                send(&inputs);
+            }
+        }
+    }
+}
+
+/// Open a file, folder, URL or program the way Explorer would (no shell parsing of the path),
+/// started in its own folder.
+pub fn launch(path: &str) {
+    use windows::core::HSTRING;
+    let dir = std::path::Path::new(path).parent().filter(|d| d.is_dir()).map(|d| HSTRING::from(d.as_os_str()));
+    let dir = dir.as_ref().map_or(PCWSTR::null(), |d| PCWSTR(d.as_ptr()));
+    unsafe {
+        ShellExecuteW(None, w!("open"), &HSTRING::from(path), None, dir, SW_SHOWNORMAL);
+    }
+}
+
 /// VK_LBUTTON.. VK_XBUTTON2 -> mouse button index 0..4.
 pub fn mouse_vk(vk: u16) -> Option<u8> {
     match vk {

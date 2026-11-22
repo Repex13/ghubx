@@ -98,15 +98,58 @@ pub enum MacroKind {
     NoRepeat,
     RepeatWhileHolding,
     Toggle,
+    /// ON PRESS (`steps`), WHILE HOLDING (`hold`), ON RELEASE (`release`).
+    Sequence,
+}
+
+/// What a step does when it is not a key event.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum StepAct {
+    /// Type this text.
+    Text(String),
+    /// Run an assignment once (press and release): SYSTEM commands and LAUNCH APPLICATION.
+    Do(Assignment),
 }
 
 /// One macro event. `vk` 0x01/0x02/0x04/0x05/0x06 are mouse buttons
 /// (VK_LBUTTON, VK_RBUTTON, VK_MBUTTON, VK_XBUTTON1, VK_XBUTTON2).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct MacroStep {
     pub vk: u16,
     pub down: bool,
+    /// Wait this long before the step.
     pub delay_ms: u32,
+    /// When set: `vk == 0` and `down == false`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub act: Option<StepAct>,
+}
+
+impl MacroStep {
+    pub fn key(vk: u16, down: bool, delay_ms: u32) -> Self {
+        Self { vk, down, delay_ms, act: None }
+    }
+
+    pub fn pause(delay_ms: u32) -> Self {
+        Self::key(0, false, delay_ms)
+    }
+
+    pub fn text(text: impl Into<String>, delay_ms: u32) -> Self {
+        Self { vk: 0, down: false, delay_ms, act: Some(StepAct::Text(text.into())) }
+    }
+
+    pub fn run(a: Assignment, delay_ms: u32) -> Self {
+        Self { vk: 0, down: false, delay_ms, act: Some(StepAct::Do(a)) }
+    }
+
+    pub fn is_pause(&self) -> bool {
+        self.vk == 0 && self.act.is_none()
+    }
+}
+
+/// Assignments a macro step may run: everything except Default, Disabled, Macro(_),
+/// System(DpiShift) and System(GShift) (those need a held button).
+pub fn step_allowed(a: &Assignment) -> bool {
+    !matches!(a, Assignment::Default | Assignment::Disabled | Assignment::Macro(_) | Assignment::System(SystemFn::DpiShift | SystemFn::GShift))
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -115,8 +158,73 @@ pub struct Macro {
     pub name: String,
     #[serde(default)]
     pub kind: MacroKind,
+    /// The macro (NoRepeat / Repeat / Toggle) or ON PRESS (Sequence).
     #[serde(default)]
     pub steps: Vec<MacroStep>,
+    /// Sequence: WHILE HOLDING.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hold: Vec<MacroStep>,
+    /// Sequence: ON RELEASE.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub release: Vec<MacroStep>,
+    /// USE STANDARD DELAYS: `Some(ms)` = every gap is this long, `None` = each step keeps its own delay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub std_delay: Option<u32>,
+    /// SHOW KEY DOWN/KEY UP in the editor.
+    #[serde(default = "yes")]
+    pub show_up_down: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<[u8; 3]>,
+}
+
+impl Default for Macro {
+    fn default() -> Self {
+        Self { id: String::new(), name: String::new(), kind: MacroKind::NoRepeat, steps: vec![], hold: vec![], release: vec![], std_delay: None, show_up_down: true, color: None }
+    }
+}
+
+impl Macro {
+    /// The standard delay in force: `std_delay`, or for macros saved before that field existed
+    /// the delay every step already uses.
+    pub fn standard_delay(&self) -> Option<u32> {
+        if self.std_delay.is_some() {
+            return self.std_delay;
+        }
+        let mut found: Option<u32> = None;
+        for list in [&self.steps, &self.hold, &self.release] {
+            for (i, s) in list.iter().enumerate() {
+                if i == 0 && !s.is_pause() && s.delay_ms == 0 {
+                    continue;
+                }
+                if s.is_pause() && i + 1 != list.len() {
+                    return None;
+                }
+                if *found.get_or_insert(s.delay_ms) != s.delay_ms {
+                    return None;
+                }
+            }
+        }
+        found.filter(|&d| d > 0)
+    }
+
+    /// Rewrite all lists for USE STANDARD DELAYS = `ms` and set `std_delay`.
+    pub fn apply_standard_delay(&mut self, ms: u32) {
+        let looping = match self.kind {
+            MacroKind::RepeatWhileHolding | MacroKind::Toggle => 1,
+            MacroKind::Sequence => 2,
+            MacroKind::NoRepeat => 0,
+        };
+        for (n, list) in [&mut self.steps, &mut self.hold, &mut self.release].into_iter().enumerate() {
+            list.retain(|s| !s.is_pause());
+            for (i, s) in list.iter_mut().enumerate() {
+                s.delay_ms = if i == 0 { 0 } else { ms };
+            }
+            if n + 1 == looping && !list.is_empty() {
+                list.push(MacroStep::pause(ms));
+            }
+        }
+        self.std_delay = Some(ms);
+    }
 }
 
 // ---------------------------------------------------------------- sensitivity
@@ -1313,7 +1421,7 @@ mod tests {
         a.profiles.push(Profile::new("Second"));
         a.profiles[1].dpi.active = 800;
         a.active_profile = 1;
-        a.macros.push(Macro { id: "m1".into(), name: "jump".into(), kind: MacroKind::Toggle, steps: vec![MacroStep { vk: 0x20, down: true, delay_ms: 5 }] });
+        a.macros.push(Macro { id: "m1".into(), name: "jump".into(), kind: MacroKind::Toggle, steps: vec![MacroStep::key(0x20, true, 5)], ..Default::default() });
         a.profiles[0].base[3] = Assignment::Macro("m1".into());
         a
     }
@@ -1405,8 +1513,8 @@ mod tests {
 
     fn ghub_default_profile() -> (Profile, Vec<Macro>) {
         let macros = vec![
-            Macro { id: "jump".into(), name: "jump".into(), kind: MacroKind::default(), steps: vec![] },
-            Macro { id: "cl".into(), name: "cl".into(), kind: MacroKind::default(), steps: vec![] },
+            Macro { id: "jump".into(), name: "jump".into(), ..Default::default() },
+            Macro { id: "cl".into(), name: "cl".into(), ..Default::default() },
         ];
         let mut p = Profile { name: "Default".into(), dpi: DpiTable { levels: vec![600, 1000, 1600], active: 600, default: 1600, shift: 600 }, rate_ms: 1, base: default_slots(), gshift: default_slots(), lighting: [Lighting::default(); 2], turn: None };
         p.base[3] = Assignment::Macro("jump".into());
@@ -1445,6 +1553,94 @@ mod tests {
         let mut mine = onboard_zone(&p.lighting[1]);
         mine[7] = rom2[0xD0 + 7];
         assert_eq!(mine, rom2[0xD0..0xDB]);
+    }
+
+    fn rich_macro() -> Macro {
+        let steps = vec![
+            MacroStep::key(0x41, true, 0),
+            MacroStep::pause(25),
+            MacroStep::text("h\u{e9}llo \"q\"\n", 5),
+            MacroStep::run(Assignment::Launch { name: "App".into(), path: "C:\\x\\y.exe".into() }, 0),
+            MacroStep::run(Assignment::System(SystemFn::DpiUp), 1),
+            MacroStep::run(Assignment::Mouse(MouseFn::WheelUp), 2),
+            MacroStep::run(Assignment::Shortcut { name: "Copy".into(), combo: KeyCombo { vk: 0x43, mods: MOD_CTRL } }, 3),
+            MacroStep::run(Assignment::ToggleScrollAccel, 4),
+        ];
+        Macro { id: "m".into(), name: "rich".into(), kind: MacroKind::Sequence, hold: steps.clone(), release: steps[..2].to_vec(), steps, std_delay: Some(35), show_up_down: false, color: Some([1, 2, 3]) }
+    }
+
+    #[test]
+    fn old_macro_files_still_load() {
+        let old = "id = \"m\"\nname = \"x\"\nkind = \"Toggle\"\n[[steps]]\nvk = 65\ndown = true\ndelay_ms = 0\n";
+        let m: Macro = toml::from_str(old).unwrap();
+        assert!(m.show_up_down && m.hold.is_empty() && m.std_delay.is_none() && m.color.is_none() && m.steps[0].act.is_none());
+        let seed: Config = toml::from_str(include_str!("../tools/ui_seed_config.toml")).unwrap();
+        let ms = &seed.apps[0].macros;
+        assert_eq!(ms.len(), 3);
+        assert!(ms.iter().all(|m| m.standard_delay() == Some(50)));
+    }
+
+    #[test]
+    fn macros_round_trip_through_toml_and_export() {
+        let mut c = Config::default();
+        c.apps[0].macros.push(rich_macro());
+        let back: Config = toml::from_str(&toml::to_string_pretty(&c).unwrap()).unwrap();
+        assert_eq!(back.apps[0].macros, c.apps[0].macros);
+        let text = export_app(&c.apps[0]);
+        let imported = import_app(&text).unwrap();
+        assert_eq!(imported.macros, c.apps[0].macros);
+        let plain = toml::to_string_pretty(&Macro { id: "p".into(), ..Default::default() }).unwrap();
+        assert!(!plain.contains("hold") && !plain.contains("release") && !plain.contains("std_delay") && !plain.contains("color"));
+    }
+
+    #[test]
+    fn standard_delay_rules() {
+        let k = MacroStep::key;
+        let mut m = Macro { std_delay: Some(70), ..Default::default() };
+        assert_eq!(m.standard_delay(), Some(70));
+        m.std_delay = None;
+        assert_eq!(m.standard_delay(), None);
+        m.steps = vec![k(1, true, 0), k(1, false, 50), MacroStep::pause(50)];
+        assert_eq!(m.standard_delay(), Some(50));
+        m.steps = vec![k(1, true, 0), k(1, false, 50), k(2, true, 80)];
+        assert_eq!(m.standard_delay(), None);
+        m.steps = vec![k(1, true, 0), MacroStep::pause(50), k(1, false, 50)];
+        assert_eq!(m.standard_delay(), None);
+        m.steps = vec![k(1, true, 0), k(1, false, 0)];
+        assert_eq!(m.standard_delay(), None);
+    }
+
+    #[test]
+    fn apply_standard_delay_per_kind() {
+        let base = |kind| Macro { kind, steps: vec![MacroStep::key(1, true, 7), MacroStep::pause(9), MacroStep::key(1, false, 3)], hold: vec![MacroStep::key(2, true, 4)], release: vec![MacroStep::key(3, true, 4), MacroStep::key(3, false, 5)], ..Default::default() };
+        let delays = |l: &[MacroStep]| l.iter().map(|s| (s.is_pause(), s.delay_ms)).collect::<Vec<_>>();
+        let mut m = base(MacroKind::NoRepeat);
+        m.apply_standard_delay(30);
+        assert_eq!(delays(&m.steps), [(false, 0), (false, 30)]);
+        assert_eq!(delays(&m.hold), [(false, 0)]);
+        assert_eq!(m.std_delay, Some(30));
+        let mut m = base(MacroKind::Toggle);
+        m.apply_standard_delay(30);
+        assert_eq!(delays(&m.steps), [(false, 0), (false, 30), (true, 30)]);
+        assert_eq!(delays(&m.release), [(false, 0), (false, 30)]);
+        let mut m = base(MacroKind::Sequence);
+        m.apply_standard_delay(30);
+        assert_eq!(delays(&m.steps), [(false, 0), (false, 30)]);
+        assert_eq!(delays(&m.hold), [(false, 0), (true, 30)]);
+        assert_eq!(delays(&m.release), [(false, 0), (false, 30)]);
+        let mut m = base(MacroKind::RepeatWhileHolding);
+        m.apply_standard_delay(30);
+        assert_eq!(delays(&m.steps), [(false, 0), (false, 30), (true, 30)]);
+    }
+
+    #[test]
+    fn step_allowed_rules() {
+        assert!(step_allowed(&Assignment::System(SystemFn::DpiUp)));
+        assert!(step_allowed(&Assignment::Launch { name: "a".into(), path: "b".into() }));
+        assert!(step_allowed(&Assignment::Perfect180 { left: true }));
+        for a in [Assignment::Default, Assignment::Disabled, Assignment::Macro("x".into()), Assignment::System(SystemFn::DpiShift), Assignment::System(SystemFn::GShift)] {
+            assert!(!step_allowed(&a), "{a:?}");
+        }
     }
 
     #[test]
