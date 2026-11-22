@@ -1,0 +1,624 @@
+//! Windows platform layer: input injection, foreground app, process
+//! control (G HUB), autostart, idle time and the wheel hook used for
+//! scroll acceleration.
+
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering};
+use std::sync::OnceLock;
+use std::time::Duration;
+use windows::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HWND, LPARAM, LRESULT, POINT, WPARAM};
+use windows::Win32::Graphics::Gdi::{CreateBitmap, DeleteObject};
+use windows::Win32::UI::Input::KeyboardAndMouse::*;
+use windows::Win32::UI::Shell::*;
+use windows::Win32::UI::WindowsAndMessaging::*;
+use windows::core::{PCWSTR, w};
+
+/// Marker in `dwExtraInfo` so our own hook ignores what we inject.
+pub const INJECT_TAG: usize = 0x6748_5558; // "gHUX"
+
+fn send(inputs: &[INPUT]) {
+    unsafe {
+        SendInput(inputs, std::mem::size_of::<INPUT>() as i32);
+    }
+}
+
+fn mouse_input(dx: i32, dy: i32, data: i32, flags: MOUSE_EVENT_FLAGS) -> INPUT {
+    INPUT {
+        r#type: INPUT_MOUSE,
+        Anonymous: INPUT_0 {
+            mi: MOUSEINPUT { dx, dy, mouseData: data as u32, dwFlags: flags, time: 0, dwExtraInfo: INJECT_TAG },
+        },
+    }
+}
+
+/// Key press/release. Uses hardware scan codes (DirectInput/raw-input games
+/// read those), falling back to the virtual key for keys without one.
+pub fn key(vk: u16, down: bool) {
+    if let Some(btn) = mouse_vk(vk) {
+        return mouse(btn, down);
+    }
+    let sc = unsafe { MapVirtualKeyW(vk as u32, MAPVK_VK_TO_VSC_EX) };
+    let mut flags = if down { KEYBD_EVENT_FLAGS(0) } else { KEYEVENTF_KEYUP };
+    let (w_vk, w_scan) = if sc & 0xFF != 0 {
+        flags |= KEYEVENTF_SCANCODE;
+        if sc & 0xFF00 == 0xE000 {
+            flags |= KEYEVENTF_EXTENDEDKEY;
+        }
+        (0, (sc & 0xFF) as u16)
+    } else {
+        (vk, 0)
+    };
+    send(&[INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT { wVk: VIRTUAL_KEY(w_vk), wScan: w_scan, dwFlags: flags, time: 0, dwExtraInfo: INJECT_TAG },
+        },
+    }]);
+}
+
+/// VK_LBUTTON.. VK_XBUTTON2 -> mouse button index 0..4.
+pub fn mouse_vk(vk: u16) -> Option<u8> {
+    match vk {
+        0x01 => Some(0),
+        0x02 => Some(1),
+        0x04 => Some(2),
+        0x05 => Some(3),
+        0x06 => Some(4),
+        _ => None,
+    }
+}
+
+/// Mouse button 0=left 1=right 2=middle 3=back 4=forward.
+pub fn mouse(btn: u8, down: bool) {
+    let (flags, data) = match (btn, down) {
+        (0, true) => (MOUSEEVENTF_LEFTDOWN, 0),
+        (0, false) => (MOUSEEVENTF_LEFTUP, 0),
+        (1, true) => (MOUSEEVENTF_RIGHTDOWN, 0),
+        (1, false) => (MOUSEEVENTF_RIGHTUP, 0),
+        (2, true) => (MOUSEEVENTF_MIDDLEDOWN, 0),
+        (2, false) => (MOUSEEVENTF_MIDDLEUP, 0),
+        (3, true) => (MOUSEEVENTF_XDOWN, 1),
+        (3, false) => (MOUSEEVENTF_XUP, 1),
+        (4, true) => (MOUSEEVENTF_XDOWN, 2),
+        (4, false) => (MOUSEEVENTF_XUP, 2),
+        _ => return,
+    };
+    send(&[mouse_input(0, 0, data, flags)]);
+}
+
+pub fn mouse_move(dx: i32, dy: i32) {
+    send(&[mouse_input(dx, dy, 0, MOUSEEVENTF_MOVE)]);
+}
+
+/// Vertical wheel; positive = up. 120 = one notch.
+pub fn wheel(delta: i32) {
+    send(&[mouse_input(0, 0, delta, MOUSEEVENTF_WHEEL)]);
+}
+
+/// Horizontal wheel; positive = right.
+pub fn hwheel(delta: i32) {
+    send(&[mouse_input(0, 0, delta, MOUSEEVENTF_HWHEEL)]);
+}
+
+/// Executable file name of the foreground window's process.
+pub fn foreground_exe() -> Option<String> {
+    use windows::Win32::System::Threading::{
+        OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
+    };
+    unsafe {
+        let hwnd = GetForegroundWindow();
+        if hwnd.0.is_null() {
+            return None;
+        }
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        if pid == 0 {
+            return None;
+        }
+        let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+        let mut buf = [0u16; 512];
+        let mut len = buf.len() as u32;
+        let ok = QueryFullProcessImageNameW(h, PROCESS_NAME_WIN32, windows::core::PWSTR(buf.as_mut_ptr()), &mut len);
+        let _ = CloseHandle(h);
+        ok.ok()?;
+        let path = String::from_utf16_lossy(&buf[..len as usize]);
+        path.rsplit('\\').next().map(str::to_string)
+    }
+}
+
+/// (pid, exe name) for every running process.
+pub fn processes() -> Vec<(u32, String)> {
+    use windows::Win32::System::Diagnostics::ToolHelp::*;
+    let mut out = Vec::new();
+    unsafe {
+        let Ok(snap) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) else { return out };
+        let mut e = PROCESSENTRY32W { dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32, ..Default::default() };
+        let mut ok = Process32FirstW(snap, &mut e).is_ok();
+        while ok {
+            let n = e.szExeFile.iter().position(|&c| c == 0).unwrap_or(e.szExeFile.len());
+            out.push((e.th32ProcessID, String::from_utf16_lossy(&e.szExeFile[..n])));
+            ok = Process32NextW(snap, &mut e).is_ok();
+        }
+        let _ = CloseHandle(snap);
+    }
+    out
+}
+
+/// G HUB's device service; while it runs, it owns the mouse.
+pub fn ghub_running() -> bool {
+    processes().iter().any(|(_, n)| n.eq_ignore_ascii_case("lghub_agent.exe"))
+}
+
+/// Close G HUB's user-session processes (tray first so it can't respawn the
+/// agent). The updater service is left alone. Returns how many were closed.
+pub fn close_ghub() -> usize {
+    use windows::Win32::System::Threading::{OpenProcess, PROCESS_TERMINATE, TerminateProcess};
+    let order = ["lghub_system_tray.exe", "lghub.exe", "lghub_agent.exe"];
+    let procs = processes();
+    let mut n = 0;
+    for name in order {
+        for (pid, _) in procs.iter().filter(|(_, p)| p.eq_ignore_ascii_case(name)) {
+            unsafe {
+                if let Ok(h) = OpenProcess(PROCESS_TERMINATE, false, *pid) {
+                    if TerminateProcess(h, 0).is_ok() {
+                        n += 1;
+                    }
+                    let _ = CloseHandle(h);
+                }
+            }
+        }
+    }
+    n
+}
+
+/// Start G HUB again (the tray app launches the agent).
+pub fn start_ghub() {
+    let tray = r"C:\Program Files\LGHUB\system_tray\lghub_system_tray.exe";
+    let exe = if std::path::Path::new(tray).exists() { tray } else { r"C:\Program Files\LGHUB\lghub.exe" };
+    let _ = std::process::Command::new(exe).spawn();
+}
+
+/// Milliseconds since the last keyboard/mouse input anywhere.
+pub fn idle_ms() -> u32 {
+    let mut li = LASTINPUTINFO { cbSize: std::mem::size_of::<LASTINPUTINFO>() as u32, dwTime: 0 };
+    unsafe {
+        if !GetLastInputInfo(&mut li).as_bool() {
+            return 0;
+        }
+        windows::Win32::System::SystemInformation::GetTickCount().wrapping_sub(li.dwTime)
+    }
+}
+
+const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
+
+/// Add/remove GHUB-X from the per-user Run key (`--minimized` starts it in the tray).
+pub fn set_autostart(on: bool, minimized: bool) -> bool {
+    use windows::Win32::System::Registry::*;
+    use windows::core::HSTRING;
+    unsafe {
+        if on {
+            let Ok(exe) = std::env::current_exe() else { return false };
+            let flag = if minimized { " --minimized" } else { "" };
+            let cmd: Vec<u16> = format!("\"{}\"{flag}", exe.display()).encode_utf16().chain([0]).collect();
+            RegSetKeyValueW(
+                HKEY_CURRENT_USER,
+                &HSTRING::from(RUN_KEY),
+                &HSTRING::from("GHUB-X"),
+                REG_SZ.0,
+                Some(cmd.as_ptr().cast()),
+                (cmd.len() * 2) as u32,
+            )
+            .is_ok()
+        } else {
+            let r = RegDeleteKeyValueW(HKEY_CURRENT_USER, &HSTRING::from(RUN_KEY), &HSTRING::from("GHUB-X"));
+            r.is_ok() || r == windows::Win32::Foundation::ERROR_FILE_NOT_FOUND
+        }
+    }
+}
+
+// ------------------------------------------------------------ tray / background
+
+pub const WM_TRAY: u32 = WM_APP + 1;
+pub const WM_TRAY_SHOW: u32 = WM_APP + 2;
+pub const WM_TRAY_QUIT: u32 = WM_APP + 3;
+const TRAY_CLASS: PCWSTR = w!("GHUBX_TRAY");
+const TRAY_ID: u32 = 1;
+const MENU_OPEN: usize = 1;
+const MENU_QUIT: usize = 2;
+const ICON_SIZE: usize = 32;
+
+static MAIN_HWND: AtomicIsize = AtomicIsize::new(0);
+static TRAY_HWND: AtomicIsize = AtomicIsize::new(0);
+static TRAY_ICON: AtomicIsize = AtomicIsize::new(0);
+static TASKBAR_CREATED: AtomicU32 = AtomicU32::new(0);
+static TRAY_READY: AtomicBool = AtomicBool::new(false);
+static HIDDEN: AtomicBool = AtomicBool::new(false);
+static BALLOON_SHOWN: AtomicBool = AtomicBool::new(false);
+static CALLBACKS: OnceLock<TrayCallbacks> = OnceLock::new();
+
+struct TrayCallbacks {
+    repaint: Box<dyn Fn() + Send + Sync>,
+    quit: Box<dyn Fn() + Send + Sync>,
+}
+
+/// Square RGBA app icon (tray 32, window 64): a #1196FF disc with a white X,
+/// drawn on a 32-unit grid and scaled to `size`.
+pub fn app_icon_rgba(size: usize) -> Vec<u8> {
+    const SS: usize = 4;
+    let k = size as f32 / 32.0;
+    let c = 16.0f32;
+    let seg = |px: f32, py: f32, (ax, ay): (f32, f32), (bx, by): (f32, f32)| {
+        let (dx, dy) = (bx - ax, by - ay);
+        let t = (((px - ax) * dx + (py - ay) * dy) / (dx * dx + dy * dy)).clamp(0.0, 1.0);
+        ((px - ax - t * dx).powi(2) + (py - ay - t * dy).powi(2)).sqrt()
+    };
+    let (a, b, d, e) = ((10.0, 10.0), (22.0, 22.0), (22.0, 10.0), (10.0, 22.0));
+    let mut out = vec![0u8; size * size * 4];
+    for y in 0..size {
+        for x in 0..size {
+            let (mut disc, mut cross) = (0.0f32, 0.0f32);
+            for sy in 0..SS {
+                for sx in 0..SS {
+                    let px = (x as f32 + (sx as f32 + 0.5) / SS as f32) / k;
+                    let py = (y as f32 + (sy as f32 + 0.5) / SS as f32) / k;
+                    if ((px - c).powi(2) + (py - c).powi(2)).sqrt() <= c - 0.5 {
+                        disc += 1.0;
+                        if seg(px, py, a, b) <= 1.0 || seg(px, py, d, e) <= 1.0 {
+                            cross += 1.0;
+                        }
+                    }
+                }
+            }
+            let alpha = disc / (SS * SS) as f32;
+            let white = if disc > 0.0 { cross / disc } else { 0.0 };
+            let mix = |base: f32| (base + (255.0 - base) * white).round() as u8;
+            let i = (y * size + x) * 4;
+            out[i..i + 4].copy_from_slice(&[mix(0x11 as f32), mix(0x96 as f32), 255, (alpha * 255.0).round() as u8]);
+        }
+    }
+    out
+}
+
+fn create_icon() -> Option<HICON> {
+    let rgba = app_icon_rgba(ICON_SIZE);
+    let mut bgra = Vec::with_capacity(rgba.len());
+    for p in rgba.as_chunks::<4>().0 {
+        let a = p[3] as u32;
+        let pm = |v: u8| (v as u32 * a / 255) as u8;
+        bgra.extend_from_slice(&[pm(p[2]), pm(p[1]), pm(p[0]), p[3]]);
+    }
+    let mask = [0u8; ICON_SIZE * ICON_SIZE / 8];
+    unsafe {
+        let color = CreateBitmap(ICON_SIZE as i32, ICON_SIZE as i32, 1, 32, Some(bgra.as_ptr().cast()));
+        let mono = CreateBitmap(ICON_SIZE as i32, ICON_SIZE as i32, 1, 1, Some(mask.as_ptr().cast()));
+        let info = ICONINFO { fIcon: true.into(), xHotspot: 0, yHotspot: 0, hbmMask: mono, hbmColor: color };
+        let icon = CreateIconIndirect(&info).ok();
+        let _ = DeleteObject(color.into());
+        let _ = DeleteObject(mono.into());
+        icon
+    }
+}
+
+fn copy_wide<const N: usize>(dst: &mut [u16; N], s: &str) {
+    for (d, c) in dst.iter_mut().zip(s.encode_utf16().take(N - 1)) {
+        *d = c;
+    }
+}
+
+fn tray_data(hwnd: HWND) -> NOTIFYICONDATAW {
+    NOTIFYICONDATAW { cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32, hWnd: hwnd, uID: TRAY_ID, ..Default::default() }
+}
+
+fn add_tray_icon(hwnd: HWND) {
+    let mut nid = tray_data(hwnd);
+    nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
+    nid.uCallbackMessage = WM_TRAY;
+    nid.hIcon = HICON(TRAY_ICON.load(Ordering::Relaxed) as *mut _);
+    copy_wide(&mut nid.szTip, "GHUB-X");
+    unsafe {
+        let _ = Shell_NotifyIconW(NIM_ADD, &nid);
+    }
+}
+
+/// Remove the tray icon (callable from any thread).
+pub fn remove_tray_icon() {
+    let h = TRAY_HWND.load(Ordering::Relaxed);
+    if h != 0 {
+        let nid = tray_data(HWND(h as *mut _));
+        unsafe {
+            let _ = Shell_NotifyIconW(NIM_DELETE, &nid);
+        }
+    }
+}
+
+fn tray_balloon(msg: &str) {
+    let h = TRAY_HWND.load(Ordering::Relaxed);
+    if h == 0 {
+        return;
+    }
+    let mut nid = tray_data(HWND(h as *mut _));
+    nid.uFlags = NIF_INFO;
+    nid.dwInfoFlags = NIIF_INFO;
+    copy_wide(&mut nid.szInfoTitle, "GHUB-X");
+    copy_wide(&mut nid.szInfo, msg);
+    unsafe {
+        let _ = Shell_NotifyIconW(NIM_MODIFY, &nid);
+    }
+}
+
+fn main_hwnd() -> Option<HWND> {
+    let h = MAIN_HWND.load(Ordering::Relaxed);
+    (h != 0).then_some(HWND(h as *mut _))
+}
+
+/// True once the tray window exists (a hidden main window is only reachable then).
+pub fn tray_ready() -> bool {
+    TRAY_READY.load(Ordering::Relaxed)
+}
+
+pub fn main_hidden() -> bool {
+    HIDDEN.load(Ordering::Relaxed)
+}
+
+/// Show and focus the main window (raw Win32: eframe runs no frames while it is hidden).
+pub fn show_main() {
+    let Some(h) = main_hwnd() else { return };
+    unsafe {
+        let _ = ShowWindow(h, SW_SHOW);
+        if IsIconic(h).as_bool() {
+            let _ = ShowWindow(h, SW_RESTORE);
+        }
+        let _ = SetForegroundWindow(h);
+    }
+    HIDDEN.store(false, Ordering::Relaxed);
+    if let Some(cb) = CALLBACKS.get() {
+        (cb.repaint)();
+    }
+}
+
+/// Hide the main window into the tray; the first hide per run shows a balloon.
+pub fn hide_main() {
+    let Some(h) = main_hwnd().filter(|_| tray_ready()) else { return };
+    unsafe {
+        let _ = ShowWindow(h, SW_HIDE);
+    }
+    HIDDEN.store(true, Ordering::Relaxed);
+    if !BALLOON_SHOWN.swap(true, Ordering::Relaxed) {
+        tray_balloon("GHUB-X is still running. Right-click the tray icon to quit.");
+    }
+}
+
+fn tray_quit() {
+    if let Some(cb) = CALLBACKS.get() {
+        (cb.quit)();
+    }
+}
+
+fn tray_menu(hwnd: HWND) {
+    unsafe {
+        let Ok(menu) = CreatePopupMenu() else { return };
+        let _ = AppendMenuW(menu, MF_STRING, MENU_OPEN, w!("Open GHUB-X"));
+        let _ = AppendMenuW(menu, MF_STRING, MENU_QUIT, w!("Quit GHUB-X"));
+        let mut pt = POINT::default();
+        let _ = GetCursorPos(&mut pt);
+        let _ = SetForegroundWindow(hwnd);
+        let cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_BOTTOMALIGN, pt.x, pt.y, Some(0), hwnd, None);
+        let _ = PostMessageW(Some(hwnd), WM_NULL, WPARAM(0), LPARAM(0));
+        let _ = DestroyMenu(menu);
+        match cmd.0 as usize {
+            MENU_OPEN => show_main(),
+            MENU_QUIT => tray_quit(),
+            _ => {}
+        }
+    }
+}
+
+unsafe extern "system" fn tray_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    match msg {
+        WM_TRAY => {
+            match (lp.0 as u32) & 0xFFFF {
+                WM_LBUTTONUP | WM_LBUTTONDBLCLK => show_main(),
+                WM_RBUTTONUP => tray_menu(hwnd),
+                _ => {}
+            }
+            LRESULT(0)
+        }
+        WM_TRAY_SHOW => {
+            show_main();
+            LRESULT(0)
+        }
+        WM_TRAY_QUIT => {
+            tray_quit();
+            LRESULT(0)
+        }
+        WM_ENDSESSION => {
+            if wp.0 != 0 {
+                tray_quit();
+            }
+            LRESULT(0)
+        }
+        m if m != 0 && m == TASKBAR_CREATED.load(Ordering::Relaxed) => {
+            add_tray_icon(hwnd);
+            LRESULT(0)
+        }
+        _ => unsafe { DefWindowProcW(hwnd, msg, wp, lp) },
+    }
+}
+
+/// Tray icon on its own thread with a message-only window. `repaint` wakes the
+/// UI after a show; `quit` runs the full shutdown and must not return.
+pub fn start_tray(
+    hwnd: isize,
+    start_hidden: bool,
+    repaint: impl Fn() + Send + Sync + 'static,
+    quit: impl Fn() + Send + Sync + 'static,
+) {
+    use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+    MAIN_HWND.store(hwnd, Ordering::Relaxed);
+    if CALLBACKS.set(TrayCallbacks { repaint: Box::new(repaint), quit: Box::new(quit) }).is_err() {
+        return;
+    }
+    let (ready_tx, ready_rx) = crossbeam_channel::bounded::<()>(1);
+    let spawned = std::thread::Builder::new().name("tray".into()).spawn(move || unsafe {
+        let Ok(module) = GetModuleHandleW(None) else { return };
+        let class = WNDCLASSW { lpfnWndProc: Some(tray_proc), hInstance: module.into(), lpszClassName: TRAY_CLASS, ..Default::default() };
+        RegisterClassW(&class);
+        let Ok(hwnd) = CreateWindowExW(
+            WS_EX_TOOLWINDOW,
+            TRAY_CLASS,
+            w!("GHUB-X tray"),
+            WS_POPUP,
+            0,
+            0,
+            0,
+            0,
+            None,
+            None,
+            Some(module.into()),
+            None,
+        ) else {
+            return;
+        };
+        TRAY_HWND.store(hwnd.0 as isize, Ordering::Relaxed);
+        TASKBAR_CREATED.store(RegisterWindowMessageW(w!("TaskbarCreated")), Ordering::Relaxed);
+        if let Some(icon) = create_icon() {
+            TRAY_ICON.store(icon.0 as isize, Ordering::Relaxed);
+        }
+        add_tray_icon(hwnd);
+        TRAY_READY.store(true, Ordering::Relaxed);
+        let _ = ready_tx.send(());
+        let mut m = MSG::default();
+        while GetMessageW(&mut m, None, 0, 0).as_bool() {
+            let _ = TranslateMessage(&m);
+            DispatchMessageW(&m);
+        }
+    });
+    if spawned.is_ok() {
+        let _ = ready_rx.recv_timeout(Duration::from_secs(2));
+    }
+    if start_hidden {
+        HIDDEN.store(tray_ready(), Ordering::Relaxed);
+        std::thread::spawn(|| {
+            // eframe shows the window after its first frame; hide it again right
+            // then, and bring it from its off-screen start position to the centre.
+            for _ in 0..10_000 {
+                if let Some(h) = main_hwnd() {
+                    unsafe {
+                        if IsWindowVisible(h).as_bool() {
+                            if tray_ready() {
+                                let _ = ShowWindow(h, SW_HIDE);
+                            }
+                            center_on_work_area(h);
+                            return;
+                        }
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        });
+    }
+}
+
+fn center_on_work_area(h: HWND) {
+    use windows::Win32::Foundation::RECT;
+    unsafe {
+        let mut work = RECT::default();
+        let mut win = RECT::default();
+        if SystemParametersInfoW(SPI_GETWORKAREA, 0, Some((&mut work as *mut RECT).cast()), SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0)).is_err()
+            || GetWindowRect(h, &mut win).is_err()
+        {
+            return;
+        }
+        let x = work.left + ((work.right - work.left) - (win.right - win.left)) / 2;
+        let y = work.top + ((work.bottom - work.top) - (win.bottom - win.top)) / 2;
+        let _ = SetWindowPos(h, None, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+}
+
+/// Take the single-instance mutex. A second instance wakes the first one's
+/// window and returns false.
+pub fn single_instance() -> bool {
+    use windows::Win32::System::Threading::CreateMutexW;
+    unsafe {
+        let Ok(_mutex) = CreateMutexW(None, true, w!("Local\\GHUBX-single-instance")) else { return true };
+        if GetLastError() != ERROR_ALREADY_EXISTS {
+            return true;
+        }
+        for _ in 0..30 {
+            if let Ok(h) = FindWindowW(TRAY_CLASS, PCWSTR::null()) {
+                let _ = AllowSetForegroundWindow(ASFW_ANY);
+                let _ = PostMessageW(Some(h), WM_TRAY_SHOW, WPARAM(0), LPARAM(0));
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        false
+    }
+}
+
+// ------------------------------------------------------------ scroll acceleration
+
+static ACCEL_ON: AtomicBool = AtomicBool::new(false);
+/// Boost * 100 (extra notches per notch at full speed).
+static ACCEL_BOOST: AtomicU32 = AtomicU32::new(300);
+static WHEEL_TX: OnceLock<crossbeam_channel::Sender<(i32, u32)>> = OnceLock::new();
+
+pub fn set_scroll_accel(on: bool, boost: f32) {
+    ACCEL_ON.store(on, Ordering::Relaxed);
+    ACCEL_BOOST.store((boost.clamp(0.0, 10.0) * 100.0) as u32, Ordering::Relaxed);
+}
+
+unsafe extern "system" fn wheel_hook(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    if code >= 0 && wp.0 as u32 == WM_MOUSEWHEEL && ACCEL_ON.load(Ordering::Relaxed) {
+        let info = unsafe { &*(lp.0 as *const MSLLHOOKSTRUCT) };
+        if info.flags & LLMHF_INJECTED == 0 && info.dwExtraInfo != INJECT_TAG {
+            let delta = (info.mouseData >> 16) as u16 as i16 as i32;
+            if let Some(tx) = WHEEL_TX.get() {
+                let _ = tx.try_send((delta, info.time));
+            }
+        }
+    }
+    unsafe { CallNextHookEx(None, code, wp, lp) }
+}
+
+/// Install the low-level wheel hook (once). Fast flicks get extra notches:
+/// boost scales with how far the notch rate exceeds ~12 notches/s.
+pub fn start_scroll_hook() {
+    if WHEEL_TX.get().is_some() {
+        return;
+    }
+    let (tx, rx) = crossbeam_channel::bounded::<(i32, u32)>(256);
+    if WHEEL_TX.set(tx).is_err() {
+        return;
+    }
+    std::thread::Builder::new()
+        .name("wheel-accel".into())
+        .spawn(move || {
+            let mut last_t = 0u32;
+            let mut speed = 0f32; // notches per second, smoothed
+            let mut carry = 0f32;
+            for (delta, t) in rx {
+                let dt = t.wrapping_sub(last_t).max(1) as f32;
+                last_t = t;
+                let inst = 1000.0 / dt;
+                speed = if dt > 250.0 { 0.0 } else { speed * 0.6 + inst * 0.4 };
+                let boost = ACCEL_BOOST.load(Ordering::Relaxed) as f32 / 100.0;
+                let factor = ((speed - 12.0) / 28.0).clamp(0.0, 1.0) * boost;
+                carry += factor * delta.signum() as f32;
+                let extra = carry.trunc() as i32;
+                carry -= extra as f32;
+                if extra != 0 {
+                    wheel(extra * 120);
+                }
+            }
+        })
+        .ok();
+    std::thread::Builder::new()
+        .name("wheel-hook".into())
+        .spawn(|| unsafe {
+            let Ok(hook) = SetWindowsHookExW(WH_MOUSE_LL, Some(wheel_hook), None, 0) else { return };
+            let mut msg = MSG::default();
+            while GetMessageW(&mut msg, None, 0, 0).as_bool() {}
+            let _ = UnhookWindowsHookEx(hook);
+        })
+        .ok();
+}
