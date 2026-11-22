@@ -128,11 +128,13 @@ fn audio_level_rules() {
 struct Fake {
     screens: Arc<AtomicUsize>,
     releases: Arc<AtomicUsize>,
+    areas: Arc<Mutex<Vec<ScreenArea>>>,
 }
 
 impl Source for Fake {
-    fn screen(&mut self, _: ScreenArea) -> Option<[u8; 3]> {
+    fn screen(&mut self, area: ScreenArea) -> Option<[u8; 3]> {
         self.screens.fetch_add(1, Ordering::SeqCst);
+        self.areas.lock().unwrap().push(area);
         Some([200, 10, 10])
     }
 
@@ -145,12 +147,13 @@ impl Source for Fake {
     }
 }
 
-fn rig() -> (Handle, Mailbox, Arc<AtomicUsize>, Arc<AtomicUsize>) {
+#[allow(clippy::type_complexity)]
+fn rig() -> (Handle, Mailbox, Arc<AtomicUsize>, Arc<AtomicUsize>, Arc<Mutex<Vec<ScreenArea>>>) {
     let mb = Mailbox::default();
-    let (screens, releases) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
-    let src = Fake { screens: screens.clone(), releases: releases.clone() };
+    let (screens, releases, areas) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)), Arc::new(Mutex::new(Vec::new())));
+    let src = Fake { screens: screens.clone(), releases: releases.clone(), areas: areas.clone() };
     let timing = Timing { tick: Duration::from_millis(10), capture: Duration::from_millis(10), keepalive: Duration::from_millis(200) };
-    (Handle::spawn_with(mb.clone(), move || Box::new(src), timing), mb, screens, releases)
+    (Handle::spawn_with(mb.clone(), move || Box::new(src), timing), mb, screens, releases, areas)
 }
 
 fn wait_for<T>(timeout_ms: u64, mut f: impl FnMut() -> Option<T>) -> Option<T> {
@@ -170,7 +173,7 @@ fn plain_screen() -> Lighting {
 
 #[test]
 fn handle_delivers_and_keeps_alive() {
-    let (h, mb, _, _) = rig();
+    let (h, mb, _, _, _) = rig();
     h.set_device([None, Some(plain_screen())]);
     let got = wait_for(500, || {
         let t = mb.take();
@@ -183,7 +186,7 @@ fn handle_delivers_and_keeps_alive() {
 
 #[test]
 fn removing_a_zone_empties_the_mailbox() {
-    let (h, mb, _, releases) = rig();
+    let (h, mb, _, releases, _) = rig();
     h.set_device([None, Some(plain_screen())]);
     assert!(wait_for(500, || mb.take()[1]).is_some());
     let before = releases.load(Ordering::SeqCst);
@@ -196,7 +199,7 @@ fn removing_a_zone_empties_the_mailbox() {
 
 #[test]
 fn previews_are_per_zone_and_expire() {
-    let (h, mb, _, _) = rig();
+    let (h, mb, _, _, _) = rig();
     let l = plain_screen();
     let start = Instant::now();
     let mut seen = false;
@@ -219,7 +222,7 @@ fn previews_are_per_zone_and_expire() {
 
 #[test]
 fn one_capture_per_area() {
-    let (h, _mb, screens, _) = rig();
+    let (h, _mb, screens, _, _) = rig();
     h.set_device([Some(plain_screen()), Some(plain_screen())]);
     std::thread::sleep(Duration::from_millis(60));
     h.set_device([None, None]);
@@ -228,4 +231,31 @@ fn one_capture_per_area() {
     assert!(n >= 1);
     let ticks_upper_bound = 60 / 10 + 3;
     assert!(n <= ticks_upper_bound, "{n} captures for two zones on one area");
+}
+
+#[test]
+fn rect_areas_are_captured_and_cached_separately() {
+    let (h, _mb, screens, _, areas) = rig();
+    let (a, b) = (ScreenArea::Rect([100, 200, 500, 800]), ScreenArea::Rect([50, 60, 300, 400]));
+    let zone = |area| screen_light(HostFx { area, smoothing: 0, ..Default::default() });
+    // two zones on two different own rectangles: each is asked for, once per capture
+    h.set_device([Some(zone(a)), Some(zone(b))]);
+    std::thread::sleep(Duration::from_millis(60));
+    h.set_device([None, None]);
+    std::thread::sleep(Duration::from_millis(60));
+    let got = areas.lock().unwrap().clone();
+    assert!(got.contains(&a) && got.contains(&b), "{got:?}");
+    let n = screens.load(Ordering::SeqCst);
+    let ticks = 60 / 10 + 3;
+    assert!(n >= 2 && n <= ticks * 2, "{n} captures for two zones on two areas");
+    // the same rectangle on both zones: the cache keeps them at one capture per tick
+    screens.store(0, Ordering::SeqCst);
+    areas.lock().unwrap().clear();
+    h.set_device([Some(zone(a)), Some(zone(a))]);
+    std::thread::sleep(Duration::from_millis(60));
+    h.set_device([None, None]);
+    std::thread::sleep(Duration::from_millis(60));
+    let n = screens.load(Ordering::SeqCst);
+    assert!(n >= 1 && n <= ticks, "{n} captures for two zones on one rectangle");
+    assert!(areas.lock().unwrap().iter().all(|s| *s == a));
 }

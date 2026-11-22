@@ -398,6 +398,50 @@ pub enum ScreenArea {
     BottomLeft,
     Bottom,
     BottomRight,
+    /// An own rectangle: x0, y0, x1, y1 in thousandths of the primary screen.
+    Rect([u16; 4]),
+}
+
+/// A named own sample (a free rectangle for SCREEN SAMPLER, made in the sample editor).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Sample {
+    pub name: String,
+    /// x0, y0, x1, y1 in thousandths of the primary screen.
+    pub rect: [u16; 4],
+}
+
+/// At most this many own samples (G HUB's Edit Samples limit).
+pub const SAMPLE_MAX: usize = 16;
+/// The rectangle a new sample gets when nothing uses it (the centre of a 3 x 3 grid).
+pub const SAMPLE_DEFAULT: [u16; 4] = [333, 333, 667, 667];
+
+/// The nine positions of the 3 x 3 grid new samples use, row-major (index 4 is [`SAMPLE_DEFAULT`]).
+fn sample_grid(i: usize) -> [u16; 4] {
+    let (x, y) = ((i % 3) as u16 * 333, (i / 3) as u16 * 333);
+    [x, y, x + 334, y + 334]
+}
+
+/// Orders the corners of `r`, keeps everything inside 0..=1000 and makes each side
+/// at least 40 (4 % of the screen), moving the far edge (or the near edge at the border).
+pub fn clamp_sample(r: [u16; 4]) -> [u16; 4] {
+    const MIN: u16 = 40;
+    let (mut x0, mut y0) = (r[0].min(r[2]).min(1000), r[1].min(r[3]).min(1000));
+    let (mut x1, mut y1) = (r[0].max(r[2]).min(1000), r[1].max(r[3]).min(1000));
+    if x1 - x0 < MIN {
+        x1 = x0 + MIN;
+        if x1 > 1000 {
+            x1 = 1000;
+            x0 = 1000 - MIN;
+        }
+    }
+    if y1 - y0 < MIN {
+        y1 = y0 + MIN;
+        if y1 > 1000 {
+            y1 = 1000;
+            y0 = 1000 - MIN;
+        }
+    }
+    [x0, y0, x1, y1]
 }
 
 impl ScreenArea {
@@ -415,6 +459,9 @@ impl ScreenArea {
 
     /// (x0, y0, x1, y1) as fractions of the primary screen.
     pub fn rect(self) -> (f32, f32, f32, f32) {
+        if let ScreenArea::Rect(r) = self {
+            return (r[0] as f32 / 1000.0, r[1] as f32 / 1000.0, r[2] as f32 / 1000.0, r[3] as f32 / 1000.0);
+        }
         let Some(i) = Self::GRID.iter().position(|a| *a == self) else {
             return (0.0, 0.0, 1.0, 1.0);
         };
@@ -434,6 +481,7 @@ impl ScreenArea {
             ScreenArea::BottomLeft => "BOTTOM LEFT",
             ScreenArea::Bottom => "BOTTOM CENTER",
             ScreenArea::BottomRight => "BOTTOM RIGHT",
+            ScreenArea::Rect(_) => "CUSTOM",
         }
     }
 }
@@ -968,6 +1016,9 @@ pub struct Config {
     /// The user's own OBS actions with a target (scene, source, mixer...).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub obs_actions: Vec<ObsAction>,
+    /// The user's own SCREEN SAMPLER rectangles (made in the sample editor).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub samples: Vec<Sample>,
 }
 
 impl Default for Config {
@@ -981,6 +1032,7 @@ impl Default for Config {
             extras: Extras::default(),
             appearance: Appearance::default(),
             obs_actions: Vec::new(),
+            samples: Vec::new(),
         }
     }
 }
@@ -1044,6 +1096,10 @@ impl Config {
         {
             self.persistent = None;
         }
+        self.samples.truncate(SAMPLE_MAX);
+        for i in 0..self.samples.len() {
+            self.set_sample_rect(i, self.samples[i].rect);
+        }
     }
 
     pub fn current(&self) -> (&AppEntry, &Profile) {
@@ -1098,6 +1154,84 @@ impl Config {
 
     pub fn macro_by_id(&self, app: usize, id: &str) -> Option<&Macro> {
         self.apps.get(app)?.macros.iter().find(|m| m.id == id)
+    }
+
+    /// Every lighting zone of every profile of every app.
+    fn zones_mut(&mut self) -> impl Iterator<Item = &mut Lighting> {
+        self.apps.iter_mut().flat_map(|a| a.profiles.iter_mut()).flat_map(|p| p.lighting.iter_mut())
+    }
+
+    /// The name of the sample with exactly that rectangle (`None` for the fixed areas).
+    pub fn sample_name(&self, area: ScreenArea) -> Option<&str> {
+        let ScreenArea::Rect(r) = area else { return None };
+        self.samples.iter().find(|s| s.rect == r).map(|s| s.name.as_str())
+    }
+
+    /// Append "Custom sample N" (the lowest N not in use) with [`SAMPLE_DEFAULT`], or
+    /// the first free position on the 3 x 3 grid of that size when a sample already
+    /// has it. `None` at [`SAMPLE_MAX`].
+    pub fn add_sample(&mut self) -> Option<usize> {
+        if self.samples.len() >= SAMPLE_MAX {
+            return None;
+        }
+        let used = |r: [u16; 4]| self.samples.iter().any(|s| s.rect == r);
+        let rect = if !used(SAMPLE_DEFAULT) { SAMPLE_DEFAULT } else { (0..9).map(sample_grid).find(|&r| !used(r)).unwrap_or(SAMPLE_DEFAULT) };
+        let mut n = 1;
+        while self.samples.iter().any(|s| s.name == format!("Custom sample {n}")) {
+            n += 1;
+        }
+        self.samples.push(Sample { name: format!("Custom sample {n}"), rect });
+        Some(self.samples.len() - 1)
+    }
+
+    /// Set a sample's rectangle (clamped with [`clamp_sample`]); every zone whose
+    /// area is the OLD rectangle switches to the new one.
+    pub fn set_sample_rect(&mut self, i: usize, rect: [u16; 4]) {
+        let Some(s) = self.samples.get_mut(i) else { return };
+        let (old, new) = (s.rect, clamp_sample(rect));
+        if old == new {
+            return;
+        }
+        s.rect = new;
+        for l in self.zones_mut() {
+            if l.host.area == ScreenArea::Rect(old) {
+                l.host.area = ScreenArea::Rect(new);
+            }
+        }
+    }
+
+    /// Rename a sample: trimmed to 24 characters; a blank name keeps the old one.
+    pub fn rename_sample(&mut self, i: usize, name: &str) {
+        let name: String = name.trim().chars().take(24).collect();
+        if name.is_empty() {
+            return;
+        }
+        if let Some(s) = self.samples.get_mut(i) {
+            s.name = name;
+        }
+    }
+
+    /// Remove a sample; zones that used its rectangle go back to `ScreenArea::Full`.
+    pub fn remove_sample(&mut self, i: usize) {
+        if i >= self.samples.len() {
+            return;
+        }
+        let old = self.samples.remove(i).rect;
+        for l in self.zones_mut() {
+            if l.host.area == ScreenArea::Rect(old) {
+                l.host.area = ScreenArea::Full;
+            }
+        }
+    }
+
+    /// Remove all samples; zones that used one of them go back to `ScreenArea::Full`.
+    pub fn clear_samples(&mut self) {
+        let rects: Vec<[u16; 4]> = self.samples.drain(..).map(|s| s.rect).collect();
+        for l in self.zones_mut() {
+            if matches!(l.host.area, ScreenArea::Rect(r) if rects.contains(&r)) {
+                l.host.area = ScreenArea::Full;
+            }
+        }
     }
 
     pub fn path() -> std::path::PathBuf {
@@ -1605,6 +1739,108 @@ mod tests {
         assert!(!plain.contains("host"), "default host written out");
         let back: Config = toml::from_str(&plain).unwrap();
         assert_eq!(back.apps[0].profiles[0].lighting[0].host, HostFx::default());
+    }
+
+    #[test]
+    fn own_samples_round_trip_and_old_configs_load() {
+        let mut c = Config::default();
+        c.apps[0].profiles[0].lighting[1] = Lighting { effect: Effect::Screen, host: HostFx { area: ScreenArea::Rect([100, 200, 500, 800]), ..Default::default() }, ..Default::default() };
+        c.samples = vec![
+            Sample { name: "Custom sample 1".into(), rect: [100, 200, 500, 800] },
+            Sample { name: "Strip".into(), rect: [0, 400, 1000, 600] },
+        ];
+        let text = toml::to_string_pretty(&c).unwrap();
+        let back: Config = toml::from_str(&text).unwrap();
+        assert_eq!(back.samples, c.samples);
+        assert_eq!(back.apps[0].profiles[0].lighting[1].host.area, ScreenArea::Rect([100, 200, 500, 800]));
+        // a config without `samples` loads; the old areas still serialise as strings
+        let plain = toml::to_string_pretty(&Config::default()).unwrap();
+        assert!(!plain.contains("samples"));
+        let old: Config = toml::from_str(&plain).unwrap();
+        assert!(old.samples.is_empty());
+        let areas = toml::to_string_pretty(&HostFx { area: ScreenArea::Center, ..Default::default() }).unwrap();
+        assert!(areas.contains("Center"), "{areas}");
+    }
+
+    #[test]
+    fn clamp_sample_orders_bounds_and_enforces_minimum() {
+        // swapped corners
+        assert_eq!(clamp_sample([800, 600, 200, 100]), [200, 100, 800, 600]);
+        // out of range
+        assert_eq!(clamp_sample([1500, 0, 1600, 500]), [960, 0, 1000, 500]);
+        // too small in the middle: the far edge moves
+        assert_eq!(clamp_sample([400, 400, 410, 405]), [400, 400, 440, 440]);
+        // too small at the right / bottom border: the near edge moves
+        assert_eq!(clamp_sample([990, 985, 995, 990]), [960, 960, 1000, 1000]);
+        // a degenerate point becomes a 40x40 square
+        assert_eq!(clamp_sample([500, 500, 500, 500]), [500, 500, 540, 540]);
+        assert_eq!(clamp_sample([1000, 1000, 1000, 1000]), [960, 960, 1000, 1000]);
+        assert_eq!(ScreenArea::Rect([100, 200, 500, 800]).rect(), (0.1, 0.2, 0.5, 0.8));
+    }
+
+    fn screen_zone(area: ScreenArea) -> Lighting {
+        Lighting { effect: Effect::Screen, host: HostFx { area, ..Default::default() }, ..Default::default() }
+    }
+
+    #[test]
+    fn add_sample_names_and_positions() {
+        let mut c = Config::default();
+        let i = c.add_sample().unwrap();
+        assert_eq!((c.samples[i].name.as_str(), c.samples[i].rect), ("Custom sample 1", [333, 333, 667, 667]));
+        // the centre is taken: the second lands on the first free grid position
+        let j = c.add_sample().unwrap();
+        assert_eq!((c.samples[j].name.as_str(), c.samples[j].rect), ("Custom sample 2", [0, 0, 334, 334]));
+        // removing the first frees its name and the default place
+        c.remove_sample(i);
+        let k = c.add_sample().unwrap();
+        assert_eq!((c.samples[k].name.as_str(), c.samples[k].rect), ("Custom sample 1", [333, 333, 667, 667]));
+        // fill up to the maximum, then the next one is refused
+        while c.samples.len() < SAMPLE_MAX {
+            assert!(c.add_sample().is_some());
+        }
+        assert!(c.add_sample().is_none());
+        assert_eq!(c.samples.len(), SAMPLE_MAX);
+    }
+
+    #[test]
+    fn set_remove_clear_samples_retarget_zones() {
+        let mut c = Config::default();
+        let r = [100, 200, 500, 800];
+        c.samples.push(Sample { name: "One".into(), rect: r });
+        c.apps.push(AppEntry::desktop());
+        // two profiles in two apps use the sample's rectangle
+        c.apps[0].profiles[0].lighting[0] = screen_zone(ScreenArea::Rect(r));
+        c.apps[1].profiles[0].lighting[1] = screen_zone(ScreenArea::Rect(r));
+        // others keep their own areas
+        c.apps[0].profiles[0].lighting[1] = screen_zone(ScreenArea::Center);
+        c.apps[1].profiles[0].lighting[0] = screen_zone(ScreenArea::Rect([1, 2, 3, 4]));
+        c.set_sample_rect(0, [120, 210, 560, 850]);
+        assert_eq!(c.samples[0].rect, [120, 210, 560, 850]);
+        assert_eq!(c.apps[0].profiles[0].lighting[0].host.area, ScreenArea::Rect([120, 210, 560, 850]));
+        assert_eq!(c.apps[1].profiles[0].lighting[1].host.area, ScreenArea::Rect([120, 210, 560, 850]));
+        assert_eq!(c.apps[0].profiles[0].lighting[1].host.area, ScreenArea::Center);
+        assert_eq!(c.apps[1].profiles[0].lighting[0].host.area, ScreenArea::Rect([1, 2, 3, 4]));
+        assert_eq!(c.sample_name(ScreenArea::Rect([120, 210, 560, 850])), Some("One"));
+        assert_eq!(c.sample_name(ScreenArea::Center), None);
+        // rename rules
+        c.rename_sample(0, "   My Area   ");
+        assert_eq!(c.samples[0].name, "My Area");
+        c.rename_sample(0, "   ");
+        assert_eq!(c.samples[0].name, "My Area");
+        c.rename_sample(0, &"x".repeat(40));
+        assert_eq!(c.samples[0].name.chars().count(), 24);
+        // removing sends the zones back to Full
+        c.remove_sample(0);
+        assert!(c.samples.is_empty());
+        assert_eq!(c.apps[0].profiles[0].lighting[0].host.area, ScreenArea::Full);
+        assert_eq!(c.apps[1].profiles[0].lighting[1].host.area, ScreenArea::Full);
+        assert_eq!(c.apps[1].profiles[0].lighting[0].host.area, ScreenArea::Rect([1, 2, 3, 4]));
+        // clear_samples does the same for all
+        c.samples = vec![Sample { name: "a".into(), rect: [10, 10, 60, 60] }, Sample { name: "b".into(), rect: [70, 70, 120, 120] }];
+        c.apps[0].profiles[0].lighting[0] = screen_zone(ScreenArea::Rect([70, 70, 120, 120]));
+        c.clear_samples();
+        assert!(c.samples.is_empty());
+        assert_eq!(c.apps[0].profiles[0].lighting[0].host.area, ScreenArea::Full);
     }
 
     fn fixture(b: &[u8]) -> [u8; 256] {

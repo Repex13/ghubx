@@ -13,6 +13,7 @@ mod sens;
 mod macros;
 mod macros_model;
 mod onboard;
+mod samples;
 mod settings;
 mod themes;
 pub mod theme;
@@ -166,6 +167,7 @@ pub struct GhubApp {
     pub(crate) slot_details: Option<usize>,
     pub(crate) slot_pending: Option<onboard::SlotAction>,
     pub(crate) theme_edit: Option<themes::ThemeEditor>,
+    pub(crate) sample_edit: Option<samples::SampleEditor>,
     pub(crate) theme_page: usize,
     theme_io: Option<themes::ThemeIoRx>,
     script: Option<crate::script::Runner>,
@@ -247,6 +249,7 @@ impl GhubApp {
             slot_details: None,
             slot_pending: None,
             theme_edit: None,
+            sample_edit: None,
             theme_page: 0,
             theme_io: None,
             script: None,
@@ -266,7 +269,7 @@ impl GhubApp {
             "home" | "dropdown" => Route::Home,
             "assign" | "assign2" | "gshift" | "macro" | "macroname" | "macrotype" | "macroseq" | "macroedit" | "macrorec" | "macromenu" | "macrocustom" | "macrofold" | "macroconfirm" | "macroaction" | "select" | "keys" | "actions" | "obsactions" | "obsnew" | "p180warn" | "gamecmds" | "p180game" => Route::Device(DevTab::Assignments),
             "sens" => Route::Device(DevTab::Sensitivity),
-            "light" | "fixed" | "wdl" | "effectmenu" | "screenfx" | "audiofx" | "audiofxadv" => Route::Device(DevTab::Lighting),
+            "light" | "fixed" | "wdl" | "effectmenu" | "screenfx" | "screenfxmine" | "sampleedit" | "audiofx" | "audiofxadv" => Route::Device(DevTab::Lighting),
             "devset" | "onboard" | "slotmenu" | "slotconfirm" | "slotdetails" => Route::DeviceSettings,
             "profiles" | "appdetail" | "addgame" => Route::Profiles,
             "settings" | "sleep" => Route::Settings(0),
@@ -330,6 +333,22 @@ impl GhubApp {
             self.light.set_advanced(page == "audiofxadv");
             if page == "effectmenu" {
                 self.overlay = Some(Overlay::Effect(Rect::from_min_size(pos2(88.0, 289.0), vec2(70.0, 26.0))));
+            }
+        }
+        if matches!(page, "screenfxmine" | "sampleedit") {
+            use crate::profile::{Effect, HostFx, Lighting, Sample, ScreenArea};
+            let mut c = self.cfg.lock().unwrap();
+            // three own samples; the second is the one the zone samples (selected in the editor)
+            c.samples = vec![
+                Sample { name: "Middle band".into(), rect: [40, 350, 960, 650] },
+                Sample { name: "Centre block".into(), rect: [333, 333, 667, 667] },
+                Sample { name: "Game corner".into(), rect: [700, 550, 980, 960] },
+            ];
+            c.current_profile_mut().lighting[1] = Lighting { effect: Effect::Screen, host: HostFx { area: ScreenArea::Rect([333, 333, 667, 667]), boost: 50, smoothing: 40, ..Default::default() }, ..Default::default() };
+            drop(c);
+            self.light.zone = 1;
+            if page == "sampleedit" {
+                self.sample_edit = Some(samples::SampleEditor::new(Some(1)));
             }
         }
         if page == "wdl" {
@@ -1065,6 +1084,7 @@ impl eframe::App for GhubApp {
         let win = ui.max_rect();
         ui.painter().rect_filled(win, CornerRadius::ZERO, pal().bg);
         match self.route {
+            _ if self.sample_edit.is_some() => self.samples_overlay(ui, win),
             _ if self.asg.editor.is_some() => self.macro_overlay(ui, win),
             Route::Home => {
                 self.top_nav(ui, win);

@@ -36,6 +36,7 @@ pub struct LightState {
     audio_target: usize,
     advanced: bool,
     picker: PickerState,
+    samples_scroll: f32,
 }
 
 impl LightState {
@@ -240,6 +241,16 @@ impl GhubApp {
         let th = pal();
         para(ui, pos2(x0, y), 278.0, "Choose an area of your screen below, your device lighting will update to match the area.", Ts::new(Fam::Reg, 11.0, th.label));
         text(ui, pos2(x0, y + 46.0), Align2::LEFT_TOP, "SAMPLE", Ts::new(Fam::Reg, 12.0, th.label));
+        // EDIT on the SAMPLE header line, right-aligned: opens the full-window sample editor
+        let eg = galley(ui, "EDIT", Ts::new(Fam::Bold, 12.0, th.text), f32::INFINITY);
+        let er = Rect::from_center_size(pos2(panel.right() - 16.0 - eg.size().x / 2.0, y + 52.0), eg.size());
+        let rr = click(ui, er.expand(4.0), "samples-edit");
+        let col = if rr.hovered() { th.primary } else { th.text };
+        ui.painter().galley(er.min, galley(ui, "EDIT", Ts::new(Fam::Bold, 12.0, col), f32::INFINITY), col);
+        if rr.clicked() {
+            let sel = self.cfg().samples.iter().position(|s| ScreenArea::Rect(s.rect) == l.host.area);
+            self.sample_edit = Some(super::samples::SampleEditor::new(sel));
+        }
         let scr = Rect::from_min_size(pos2(x0, y + 64.0), vec2(96.0, 54.0));
         let full = l.host.area == ScreenArea::Full;
         let inner = scr.shrink(1.0);
@@ -272,16 +283,47 @@ impl GhubApp {
         if pill(ui, Rect::from_min_size(pos2(x0 + 112.0, y + 64.0), vec2(100.0, 22.0)), "FULL SCREEN", full, "area-full").clicked() {
             new_l.host.area = ScreenArea::Full;
         }
-        text(ui, pos2(x0 + 112.0, y + 98.0), Align2::LEFT_TOP, l.host.area.label(), Ts::new(Fam::Reg, 12.0, th.text));
+        let cfg = self.cfg();
+        let name = cfg.sample_name(l.host.area).map(|s| s.to_uppercase());
+        text(ui, pos2(x0 + 112.0, y + 98.0), Align2::LEFT_TOP, name.as_deref().unwrap_or(l.host.area.label()), Ts::new(Fam::Reg, 12.0, th.text));
+        // the user's own samples as rows under the grid (in use: primary bar + text colour)
+        let list_h = cfg.samples.len().min(4) as f32 * 24.0;
+        if !cfg.samples.is_empty() {
+            let lr = Rect::from_min_size(pos2(x0, y + 126.0), vec2(278.0, list_h));
+            let max_scroll = (cfg.samples.len() as f32 * 24.0 - list_h).max(0.0);
+            if ui.rect_contains_pointer(lr) {
+                self.light.samples_scroll -= ui.input(|i| i.smooth_scroll_delta.y);
+            }
+            self.light.samples_scroll = self.light.samples_scroll.clamp(0.0, max_scroll);
+            let scroll = self.light.samples_scroll;
+            let mut sub = ui.new_child(egui::UiBuilder::new().max_rect(lr));
+            sub.set_clip_rect(lr.intersect(ui.clip_rect()));
+            for (i, s) in cfg.samples.iter().enumerate() {
+                let rr = Rect::from_min_size(pos2(lr.left(), lr.top() + i as f32 * 24.0 - scroll), vec2(lr.width(), 24.0));
+                if rr.bottom() <= lr.top() || rr.top() >= lr.bottom() {
+                    continue;
+                }
+                let in_use = l.host.area == ScreenArea::Rect(s.rect);
+                let r = click(&sub, rr, ("sample-row", i));
+                if in_use {
+                    sub.painter().rect_filled(Rect::from_min_size(rr.min, vec2(3.0, rr.height())), CornerRadius::ZERO, th.primary);
+                }
+                text(&sub, pos2(rr.left() + 12.0, rr.center().y), Align2::LEFT_CENTER, &s.name.to_uppercase(), Ts::new(Fam::Reg, 12.0, if in_use { th.text } else { th.muted }));
+                sub.painter().line_segment([rr.left_bottom(), rr.right_bottom()], Stroke::new(1.0, th.row_line));
+                if r.clicked() {
+                    new_l.host.area = ScreenArea::Rect(s.rect);
+                }
+            }
+        }
         let mut v = l.host.boost as f32;
-        if host_slider(ui, panel, x0, y + 128.0, "COLOR BOOST", &mut v, 0.0..=100.0, ("boost", zone), true) {
+        if host_slider(ui, panel, x0, y + 128.0 + list_h, "COLOR BOOST", &mut v, 0.0..=100.0, ("boost", zone), true) {
             new_l.host.boost = v.round() as u8;
         }
         let mut v = l.host.smoothing as f32;
-        if host_slider(ui, panel, x0, y + 174.0, "SMOOTHING", &mut v, 0.0..=100.0, ("smooth", zone), true) {
+        if host_slider(ui, panel, x0, y + 174.0 + list_h, "SMOOTHING", &mut v, 0.0..=100.0, ("smooth", zone), true) {
             new_l.host.smoothing = v.round() as u8;
         }
-        y + 220.0
+        y + 220.0 + list_h
     }
 
     /// AUDIO VISUALIZER controls; returns the y where the next block starts.

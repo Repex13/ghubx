@@ -555,6 +555,68 @@ def lighting_audio_visualizer():
     must(l1["effect"] == "Audio" and h["color2"] == [16, 16, 48] and h["bass_only"] is True and h["auto_sens"] is False, l1)
 
 
+def sampler_seed_config() -> str:
+    """Seed with one own sample; the LOGO zone's SCREEN SAMPLER uses its rectangle."""
+    text = seed_config()
+    i = text.rfind('[[apps.profiles.lighting]]')
+    head, tail = text[:i], text[i:]
+    tail = tail.replace('effect = "Cycle"', 'effect = "Screen"', 1)
+    tail = tail.replace('brightness = 100', 'brightness = 100\n\n[apps.profiles.lighting.host]\narea = { Rect = [333, 333, 667, 667] }', 1)
+    return head + tail + '\n[[samples]]\nname = "Custom sample 1"\nrect = [333, 333, 667, 667]\n'
+
+
+EDIT_SAMPLES = "click 357 390"  # EDIT on the SAMPLE header line -> "Edit Samples"
+
+
+@scenario
+def sampler_add_sample():
+    res = run_script("sampler_add_sample", LIGHT_LOGO_EFFECT_MENU + [
+        "click 110 418",  # menu: SCREEN SAMPLER
+        SETTLE, EDIT_SAMPLES,
+        SETTLE, "shot {shots}/editor.png",
+        "click 149 650",  # ADD NEW SAMPLE
+        SETTLE, "click 39 58",  # back arrow
+        SETTLE, "click 200 476",  # the new sample's row
+        SETTLE])
+    ok_run(res)
+    l1 = prof(res.cfg)["lighting"][1]
+    must(l1["effect"] == "Screen" and l1["host"]["area"] == {"Rect": [333, 333, 667, 667]}, l1)
+    must(res.cfg["samples"] == [{"name": "Custom sample 1", "rect": [333, 333, 667, 667]}], res.cfg.get("samples"))
+
+
+@scenario
+def sampler_move_and_resize():
+    res = run_script("sampler_move_and_resize", LIGHT_LOGO_EFFECT_MENU[:7] + [
+        # the zone is already on SCREEN SAMPLER with the sample's rectangle (seed)
+        EDIT_SAMPLES,
+        SETTLE, "drag 512 394 612 394",  # drag the sample by its middle 100 px right
+        SETTLE, "drag 745 470 795 519",  # drag its bottom-right handle
+        SETTLE, "shot {shots}/editor.png",
+        "click 39 58",  # back arrow
+        SETTLE], config=sampler_seed_config())
+    ok_run(res)
+    r = res.cfg["samples"][0]["rect"]
+    area = prof(res.cfg)["lighting"][1]["host"]["area"]
+    must(400 < r[0] <= 500 and r[1] == 333, f"moved right: {r}")
+    must(820 <= r[2] <= 890 and 740 <= r[3] <= 820, f"resized: {r}")
+    must(all(0 <= v <= 1000 for v in r), r)
+    must(area == {"Rect": r}, f"zone area {area} vs sample {r}")
+
+
+@scenario
+def sampler_delete():
+    res = run_script("sampler_delete", LIGHT_LOGO_EFFECT_MENU[:7] + [
+        EDIT_SAMPLES,
+        SETTLE, "click 512 394",  # select the sample
+        SETTLE, "key Delete",
+        SETTLE, "click 39 58",  # back arrow
+        SETTLE], config=sampler_seed_config())
+    ok_run(res)
+    must("samples" not in res.cfg, res.cfg.get("samples"))
+    l1 = prof(res.cfg)["lighting"][1]
+    must(l1["effect"] == "Screen" and l1.get("host", {}).get("area", "Full") == "Full", l1)
+
+
 @scenario
 def wdl_switch():
     open_light = ["wait 1500", HOME_TILE, SETTLE, RAIL_LIGHT, SETTLE]

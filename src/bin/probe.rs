@@ -43,6 +43,7 @@ fn main() {
         Some("obs-status") => std::process::exit(obs_status_cmd()),
         Some("obs") => std::process::exit(obs_cmd(&std::env::args().skip(2).collect::<Vec<_>>())),
         Some("fx-screen-check") => std::process::exit(fx_screen_check()),
+        Some("fx-sample") => std::process::exit(fx_sample(&std::env::args().skip(2).collect::<Vec<_>>())),
         Some("fx-audio") => std::process::exit(fx_audio(std::env::args().nth(2).and_then(|a| a.parse().ok()).unwrap_or(5.0))),
         Some("export-theme") => std::process::exit(export_theme_cmd(&std::env::args().skip(2).collect::<Vec<_>>())),
         Some("import-theme") => std::process::exit(import_theme_cmd(&std::env::args().skip(2).collect::<Vec<_>>())),
@@ -484,6 +485,61 @@ fn fx_screen_check() -> i32 {
         let (df, dc) = (diff(sf, ef), diff(sc, ec));
         println!("round {round}  full {} vs {} (max diff {df})  center {} vs {} (max diff {dc})", hex(sf), hex(ef), hex(sc), hex(ec));
         best = best.min(df.max(dc));
+        std::thread::sleep(std::time::Duration::from_millis(300));
+    }
+    println!("best max diff: {best}");
+    i32::from(best > 6)
+}
+
+/// Linear-light average of a rectangle of a `screen_picture` (RGBA bytes), same math as `exact_screen`.
+fn pic_average(px: &[u8], w: u32, h: u32, area: ghubx::profile::ScreenArea) -> Option<[u8; 3]> {
+    let lut: Vec<f32> = (0..=255u16).map(|v| ((v as f32) / 255.0).powf(2.2)).collect();
+    let (x0, y0, x1, y1) = area.rect();
+    let (sx, sy) = ((x0 * w as f32) as usize, (y0 * h as f32) as usize);
+    let (cw, ch) = ((((x1 - x0) * w as f32) as usize).max(1), (((y1 - y0) * h as f32) as usize).max(1));
+    let mut sum = [0.0f64; 3];
+    let mut n = 0u64;
+    for y in sy..(sy + ch).min(h as usize) {
+        for x in sx..(sx + cw).min(w as usize) {
+            let p = &px[(y * w as usize + x) * 4..][..4];
+            sum[0] += lut[p[0] as usize] as f64;
+            sum[1] += lut[p[1] as usize] as f64;
+            sum[2] += lut[p[2] as usize] as f64;
+            n += 1;
+        }
+    }
+    (n > 0).then(|| {
+        sum.map(|s| {
+            let l = (s / n as f64) as f32;
+            let c = if l <= 0.0031308 { l * 12.92 } else { 1.055 * l.powf(1.0 / 2.4) - 0.055 };
+            (c * 255.0).round().clamp(0.0, 255.0) as u8
+        })
+    })
+}
+
+fn fx_sample(args: &[String]) -> i32 {
+    use ghubx::profile::ScreenArea;
+    let nums: Vec<u16> = args.iter().filter_map(|a| a.parse().ok()).collect();
+    let [x0, y0, x1, y1] = nums[..] else {
+        eprintln!("usage: probe fx-sample <x0> <y0> <x1> <y1> (thousandths of the screen)");
+        return 64;
+    };
+    let area = ScreenArea::Rect([x0, y0, x1, y1]);
+    let mut src = ghubx::fx::win_source();
+    let hex = |c: [u8; 3]| format!("#{:02X}{:02X}{:02X}", c[0], c[1], c[2]);
+    let diff = |a: [u8; 3], b: [u8; 3]| (0..3).map(|i| (a[i] as i32 - b[i] as i32).abs()).max().unwrap_or(0);
+    let mut best = i32::MAX;
+    for round in 1..=3 {
+        let (s, e) = (src.screen(area), ghubx::fx::exact_screen(area));
+        let pic = ghubx::fx::screen_picture(640, 640).and_then(|(px, w, h)| pic_average(&px, w, h, area));
+        let (Some(s), Some(e)) = (s, e) else {
+            eprintln!("round {round}: capture failed");
+            return 1;
+        };
+        let d = diff(s, e);
+        let p = pic.map_or("no picture".into(), hex);
+        println!("round {round}  rect [{x0} {y0} {x1} {y1}]  {} vs exact {} (max diff {d})  picture {p}", hex(s), hex(e));
+        best = best.min(d);
         std::thread::sleep(std::time::Duration::from_millis(300));
     }
     println!("best max diff: {best}");

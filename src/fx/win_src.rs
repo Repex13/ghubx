@@ -5,8 +5,8 @@ use crate::profile::ScreenArea;
 use std::time::{Duration, Instant};
 use windows::Win32::Foundation::HWND;
 use windows::Win32::Graphics::Gdi::{
-    BITMAPINFO, BITMAPINFOHEADER, BI_RGB, COLORONCOLOR, CreateCompatibleBitmap, CreateCompatibleDC, DIB_RGB_COLORS, DeleteDC, DeleteObject, GetDC, GetDIBits, HBITMAP, HDC, HGDIOBJ, ReleaseDC,
-    SRCCOPY, BitBlt, SelectObject, SetStretchBltMode, StretchBlt,
+    BITMAPINFO, BITMAPINFOHEADER, BI_RGB, COLORONCOLOR, CreateCompatibleBitmap, CreateCompatibleDC, DIB_RGB_COLORS, DeleteDC, DeleteObject, GetDC, GetDIBits, HALFTONE, HBITMAP, HDC, HGDIOBJ,
+    ReleaseDC, SRCCOPY, BitBlt, SelectObject, SetBrushOrgEx, SetStretchBltMode, StretchBlt,
 };
 use windows::Win32::Media::Audio::Endpoints::IAudioMeterInformation;
 use windows::Win32::Media::Audio::{
@@ -298,6 +298,55 @@ pub fn exact_screen(area: ScreenArea) -> Option<[u8; 3]> {
             let c = if l <= 0.0031308 { l * 12.92 } else { 1.055 * l.powf(1.0 / 2.4) - 0.055 };
             (c * 255.0).round().clamp(0.0, 255.0) as u8
         }))
+    }
+}
+
+/// The primary screen scaled to fit `max_w` x `max_h` (aspect kept, HALFTONE
+/// stretch), as RGBA bytes. Read-only: the sample editor's background and a probe.
+pub fn screen_picture(max_w: u32, max_h: u32) -> Option<(Vec<u8>, u32, u32)> {
+    unsafe {
+        let (sw, sh) = (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN));
+        if sw <= 0 || sh <= 0 || max_w == 0 || max_h == 0 {
+            return None;
+        }
+        let k = (max_w as f32 / sw as f32).min(max_h as f32 / sh as f32).min(1.0);
+        let (w, h) = ((sw as f32 * k).round().max(1.0) as i32, (sh as f32 * k).round().max(1.0) as i32);
+        let screen = GetDC(None);
+        if screen.is_invalid() {
+            return None;
+        }
+        let mem = CreateCompatibleDC(Some(screen));
+        let bmp = CreateCompatibleBitmap(screen, w, h);
+        if mem.is_invalid() || bmp.is_invalid() {
+            if !bmp.is_invalid() {
+                let _ = DeleteObject(bmp.into());
+            }
+            if !mem.is_invalid() {
+                let _ = DeleteDC(mem);
+            }
+            ReleaseDC(None, screen);
+            return None;
+        }
+        let old = SelectObject(mem, bmp.into());
+        SetStretchBltMode(mem, HALFTONE);
+        let _ = SetBrushOrgEx(mem, 0, 0, None);
+        let ok = StretchBlt(mem, 0, 0, w, h, Some(screen), 0, 0, sw, sh, SRCCOPY).as_bool();
+        // the bitmap is selected into `mem`; GetDIBits needs it deselected on some drivers
+        SelectObject(mem, old);
+        let mut bi = BITMAPINFO { bmiHeader: BITMAPINFOHEADER { biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32, biWidth: w, biHeight: -h, biPlanes: 1, biBitCount: 32, biCompression: BI_RGB.0, ..Default::default() }, ..Default::default() };
+        let mut px = vec![0u8; (w * h * 4) as usize];
+        let lines = if ok { GetDIBits(mem, bmp, 0, h as u32, Some(px.as_mut_ptr() as *mut _), &mut bi, DIB_RGB_COLORS) } else { 0 };
+        let _ = DeleteObject(bmp.into());
+        let _ = DeleteDC(mem);
+        ReleaseDC(None, screen);
+        if lines == 0 {
+            return None;
+        }
+        // BGRA -> RGBA
+        for p in px.as_chunks_mut::<4>().0 {
+            p.swap(0, 2);
+        }
+        Some((px, w as u32, h as u32))
     }
 }
 
