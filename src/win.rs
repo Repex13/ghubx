@@ -924,6 +924,99 @@ pub fn open_wdl_settings() {
     }
 }
 
+// ---------------------------------------------------------------- HTTP (WinINet)
+
+/// GET `url` through WinINet (HTTP and HTTPS; redirects are followed). The
+/// session's User-Agent is `ghubx/<version>` (GitHub refuses requests without
+/// one) and `accept` becomes the `Accept` header. The body is capped at 64 MB;
+/// connect timeout 5 s, send/receive 10 s.
+pub fn http_get(url: &str, accept: &str) -> Result<Vec<u8>, String> {
+    use windows::Win32::Networking::WinInet::*;
+    use windows::core::HSTRING;
+    const MAX_BODY: usize = 64 * 1024 * 1024;
+    unsafe {
+        let agent = HSTRING::from(format!("ghubx/{}", env!("CARGO_PKG_VERSION")));
+        let h = InternetOpenW(&agent, INTERNET_OPEN_TYPE_PRECONFIG.0, PCWSTR::null(), PCWSTR::null(), 0);
+        if h.is_null() {
+            return Err(format!("InternetOpenW failed: {}", std::io::Error::last_os_error()));
+        }
+        for (opt, ms) in [(INTERNET_OPTION_CONNECT_TIMEOUT, 5_000u32), (INTERNET_OPTION_SEND_TIMEOUT, 10_000), (INTERNET_OPTION_RECEIVE_TIMEOUT, 10_000)] {
+            let _ = InternetSetOptionW(Some(h.cast_const()), opt, Some((&ms as *const u32).cast()), 4);
+        }
+        let headers: Vec<u16> = format!("Accept: {accept}\r\n").encode_utf16().collect();
+        let url_w = HSTRING::from(url);
+        let req = InternetOpenUrlW(h, &url_w, Some(headers.as_slice()), INTERNET_FLAG_RELOAD | INTERNET_FLAG_NO_CACHE_WRITE | INTERNET_FLAG_PRAGMA_NOCACHE, None);
+        let out = if req.is_null() {
+            Err(format!("can't open {url}: {}", std::io::Error::last_os_error()))
+        } else {
+            let r = (|| {
+                let mut code = 0u32;
+                let mut len = std::mem::size_of_val(&code) as u32;
+                HttpQueryInfoW(req, HTTP_QUERY_STATUS_CODE | HTTP_QUERY_FLAG_NUMBER, Some((&mut code as *mut u32).cast()), &mut len, None)
+                    .map_err(|e| format!("HTTP status query failed: {e}"))?;
+                if code != 200 {
+                    return Err(format!("{url}: HTTP {code}"));
+                }
+                let mut body = Vec::new();
+                loop {
+                    let mut buf = [0u8; 16 * 1024];
+                    let mut n = 0u32;
+                    InternetReadFile(req, buf.as_mut_ptr().cast(), buf.len() as u32, &mut n).map_err(|e| format!("read failed: {e}"))?;
+                    if n == 0 {
+                        break;
+                    }
+                    body.extend_from_slice(&buf[..n as usize]);
+                    if body.len() > MAX_BODY {
+                        return Err("download is too large".to_string());
+                    }
+                }
+                Ok(body)
+            })();
+            let _ = InternetCloseHandle(req);
+            r
+        };
+        let _ = InternetCloseHandle(h);
+        out
+    }
+}
+
+/// Ask the tray window to run the normal quit (config save, engine Quit, icon
+/// removal). Worker threads use this when the main loop may not pump frames —
+/// e.g. the updater applying a new exe while the window sits hidden in the tray.
+pub fn post_tray_quit() {
+    let h = TRAY_HWND.load(Ordering::Relaxed);
+    if h != 0 {
+        unsafe {
+            let _ = PostMessageW(Some(HWND(h as *mut _)), WM_TRAY_QUIT, WPARAM(0), LPARAM(0));
+        }
+    }
+}
+
+/// `--from-update`: take the single-instance mutex once the previous version's
+/// process has let it go. Unlike `single_instance` this never wakes an older
+/// instance (it is already exiting); it just polls for up to 20 s.
+pub fn take_instance_after_update() -> bool {
+    use windows::Win32::System::Threading::CreateMutexW;
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    unsafe {
+        loop {
+            let Ok(m) = CreateMutexW(None, true, if is_dev() { w!("Local\\GHUBX-single-instance-dev") } else { w!("Local\\GHUBX-single-instance") }) else {
+                return true;
+            };
+            if GetLastError() != ERROR_ALREADY_EXISTS {
+                // Held for the process lifetime, like `single_instance`.
+                return true;
+            }
+            // Do not keep the mutex alive: the old process must be able to drop it.
+            let _ = CloseHandle(m);
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

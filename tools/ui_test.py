@@ -75,7 +75,7 @@ class Result:
         self.cfg, self.rc, self.shots, self.out = cfg, rc, shots, out
 
 
-def run_script(name: str, lines: list[str], config: str | None = None, timeout=60, during=None) -> Result:
+def run_script(name: str, lines: list[str], config: str | None = None, timeout=60, during=None, env=None) -> Result:
     d = RUN / name
     if d.exists():
         shutil.rmtree(d)
@@ -86,7 +86,7 @@ def run_script(name: str, lines: list[str], config: str | None = None, timeout=6
     shots.mkdir()
     body = [ln.replace("{shots}", str(shots).replace("\\", "/")) for ln in lines]
     (d / "script.txt").write_text("\n".join(body + ["quit"]) + "\n", encoding="utf-8")
-    env = dict(os.environ, GHUBX_CONFIG_DIR=str(d / "cfg"))
+    env = dict(os.environ, GHUBX_CONFIG_DIR=str(d / "cfg"), **(env or {}))
     p = subprocess.Popen([str(EXE), "--dev", "--script", str(d / "script.txt")], env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     hook = during(p) if during else None
     try:
@@ -842,6 +842,26 @@ def theme_custom_edit_delete():
     ok_run(res)
     ap = res.cfg["appearance"]
     must(not ap.get("custom") and ap["theme"] == "ghub-dark", ap)
+
+
+BELL = "click 964 59"  # header bell -> notification feed
+
+
+@scenario
+def notify_bell():
+    res = run_script("notify_bell", ["wait 1500", BELL, SETTLE,
+                                     "shot {shots}/open.png",
+                                     "click 910 101",  # MARK ALL READ
+                                     SETTLE, BELL, SETTLE,  # bell again closes the panel
+                                     "move 512 400", SETTLE,  # unhover the bell
+                                     "shot {shots}/read.png"],
+                     env={"GHUBX_SEED_NOTES": "1"})
+    ok_run(res)
+    panel = pixel(res, "open.png", (760, 100))
+    must(panel != (0, 0, 0), f"panel didn't open: {panel}")
+    dot = pixel(res, "open.png", (972, 50))
+    gone = pixel(res, "read.png", (972, 50))
+    must(gone == (0, 0, 0) and dot != gone, f"unread dot: open {dot} after {gone}")
 
 
 def main():

@@ -53,6 +53,8 @@ pub enum Overlay {
     Slot { slot: usize, pos: Pos2 },
     Dpi { dpi: u16, pos: Pos2 },
     Persistent(Rect),
+    /// Bell dropdown; holds the bell's anchor rect.
+    Notes(Rect),
 }
 
 /// `--shot <page> <out.png>`: render one page, save a screenshot, exit.
@@ -164,6 +166,17 @@ pub struct GhubApp {
     pub(crate) obs: crate::obs::Handle,
     /// Lua worker handle for the script editor's CONSOLE pane (fixed in dev/shot).
     pub(crate) lua: crate::lua::Handle,
+    /// Session notification feed behind the header bell; the update worker
+    /// pushes into a clone of it.
+    pub(crate) feed: crate::notify::Feed,
+    /// Update worker (`Handle::fixed` in observer/test modes).
+    pub(crate) update: crate::update::Handle,
+    /// The first `Status` event is a baseline, not a transition worth noting.
+    status_seen: bool,
+    /// Scroll offset inside the bell dropdown.
+    notes_scroll: f32,
+    /// The updater swapped the exe and spawned the new build; quitting now.
+    applying: bool,
     /// Full-window Lua editor opened from an app detail's SCRIPTING block.
     pub(crate) script_editor: Option<lua_editor::ScriptEditor>,
     pub(crate) slot_saved_msg: Option<String>,
@@ -193,6 +206,8 @@ impl GhubApp {
         fx: Option<crate::fx::Handle>,
         obs: crate::obs::Handle,
         lua: crate::lua::Handle,
+        feed: crate::notify::Feed,
+        update: crate::update::Handle,
     ) -> Self {
         let stash = Stash::default();
         if shot.is_none() {
@@ -250,6 +265,11 @@ impl GhubApp {
             fx,
             obs,
             lua,
+            feed,
+            update,
+            status_seen: false,
+            notes_scroll: 0.0,
+            applying: false,
             script_editor: None,
             slot_saved_msg: None,
             wdl_cache: None,
@@ -417,6 +437,24 @@ impl GhubApp {
         if page == "dropdown" {
             self.overlay = Some(Overlay::Profiles(Rect::from_min_size(pos2(670.0, 38.0), vec2(208.0, 42.0))));
         }
+        if page == "notify" {
+            self.seed_notes();
+            self.overlay = Some(Overlay::Notes(Rect::from_center_size(pos2(964.0, 59.0), vec2(36.0, 36.0))));
+        }
+    }
+
+    /// Deterministic feed for the `notify` shot page and `GHUBX_SEED_NOTES=1`
+    /// scripted runs (debug/test only — the live feed is event-driven).
+    pub(crate) fn seed_notes(&mut self) {
+        use crate::notify::NoteKind;
+        // push oldest first so the update note sits on top
+        for (text, kind) in [
+            ("G HUB closed", NoteKind::Info),
+            ("GHUB-X controls the mouse", NoteKind::Info),
+            ("Update available: v9.9.9", NoteKind::Update),
+        ] {
+            self.feed.push(text, kind);
+        }
     }
 
     /// Mutate the shared config, persist (debounced) and notify the engine.
@@ -521,6 +559,9 @@ impl GhubApp {
 
     /// Show a message once the window is up (e.g. after the first-run import).
     pub fn set_script(&mut self, r: crate::script::Runner) {
+        if std::env::var_os("GHUBX_SEED_NOTES").is_some() {
+            self.seed_notes();
+        }
         self.script = Some(r);
     }
 
@@ -572,6 +613,7 @@ impl GhubApp {
                         self.seen_exes.insert(0, fg.clone());
                         self.seen_exes.truncate(12);
                     }
+                    self.notify_status(&s);
                     self.status = s;
                 }
                 UiEvent::Log(l) => {
@@ -586,6 +628,32 @@ impl GhubApp {
             self.tex.front = art.front.map(|i| ctx.load_texture("front", i, assets::TEX_OPTS));
             self.tex.side = art.side.map(|i| ctx.load_texture("side", i, assets::TEX_OPTS));
             self.art_rx = None;
+        }
+    }
+
+    /// Feed entries for the engine transitions `Status` events carry. The
+    /// first event is the startup baseline — only later diffs become notes.
+    /// Scripted and shot runs push nothing (the feed stays deterministic).
+    fn notify_status(&mut self, s: &Status) {
+        use crate::notify::NoteKind;
+        if self.shot.is_some() || self.script.is_some() {
+            return;
+        }
+        if !self.status_seen {
+            self.status_seen = true;
+            return;
+        }
+        let old = &self.status;
+        if s.ghub_running != old.ghub_running {
+            self.feed.push(if s.ghub_running { "G HUB started — GHUB-X is watching" } else { "G HUB closed" }, NoteKind::Info);
+        }
+        if s.controlled != old.controlled {
+            self.feed.push(if s.controlled { "GHUB-X controls the mouse" } else { "Mouse back on its on-board profile" }, NoteKind::Info);
+        }
+        if s.active != old.active
+            && let Some(name) = self.cfg.lock().unwrap().profile_at(s.active).map(|p| p.name.clone())
+        {
+            self.feed.push(format!("Profile: {name}"), NoteKind::Info);
         }
     }
 
@@ -770,6 +838,29 @@ impl GhubApp {
         if g.on_hover_text("General Settings").clicked() {
             self.route = Route::Settings(0);
         }
+        // Notification bell. Shot renders skip it (except the `notify` page,
+        // which exists to show it) so the header keeps its baseline pixels.
+        if self.shot.as_ref().is_none_or(|s| s.page == "notify") {
+            let bell_c = pos2(win.right() - 60.0, win.top() + 59.0);
+            let bell_r = Rect::from_center_size(bell_c, vec2(36.0, 36.0));
+            let br = click(ui, bell_r, "bell");
+            let open = matches!(self.overlay, Some(Overlay::Notes(_)));
+            if open || br.hovered() {
+                ui.painter().circle_filled(bell_c, 17.0, if open { pal().primary } else { pal().surface_hi });
+            }
+            bell(ui.painter(), bell_c, 19.0, Stroke::new(1.6, if open { pal().on_primary } else { pal().text }));
+            if self.feed.unread() > 0 {
+                ui.painter().circle_filled(bell_c + vec2(7.5, -8.5), 3.6, pal().amber);
+            }
+            if br.on_hover_text("Notifications").clicked() {
+                if open {
+                    self.overlay = None;
+                } else {
+                    self.notes_scroll = 0.0;
+                    self.open_overlay(ui.ctx(), Overlay::Notes(bell_r));
+                }
+            }
+        }
     }
 
     /// "Desktop: Default" capsule; opens the profile menu.
@@ -834,11 +925,16 @@ impl GhubApp {
 
     fn draw_overlay(&mut self, ctx: &egui::Context) {
         let Some(kind) = &self.overlay else { return };
+        if let Overlay::Notes(anchor) = *kind {
+            self.draw_notes_panel(ctx, anchor);
+            return;
+        }
         let (anchor, size) = match kind {
             Overlay::Profiles(r) => (r.left_bottom() + vec2(0.0, 4.0), vec2(r.width().max(240.0), 0.0)),
             Overlay::Effect(r) => (r.left_bottom() + vec2(0.0, 2.0), vec2(240.0, 0.0)),
             Overlay::Slot { pos, .. } | Overlay::Dpi { pos, .. } => (*pos, vec2(200.0, 0.0)),
             Overlay::Persistent(r) => (r.left_bottom() + vec2(0.0, 4.0), vec2(r.width(), 0.0)),
+            Overlay::Notes(r) => (r.left_bottom() + vec2(0.0, 4.0), vec2(360.0, 0.0)), // handled above
         };
         let mut chosen: Option<usize> = None;
         let items = self.overlay_items();
@@ -957,7 +1053,7 @@ impl GhubApp {
                 }
                 v
             }
-            None => vec![],
+            Some(Overlay::Notes(_)) | None => vec![],
         }
     }
 
@@ -1016,8 +1112,90 @@ impl GhubApp {
                 let v = pairs.get(i).copied().flatten();
                 self.edit(|c| c.persistent = v);
             }
+            Overlay::Notes(_) => {}
         }
         let _ = ctx;
+    }
+
+    /// Bell dropdown: the notification feed. 360 px wide, header +
+    /// "MARK ALL READ", up to 8 rows of dot + two lines + "Nm ago"; scrolls
+    /// past that. Closes on outside click, Escape or the bell again — the
+    /// same dismissal rule as the other dropdowns.
+    fn draw_notes_panel(&mut self, ctx: &egui::Context, anchor: Rect) {
+        use crate::notify::{NoteKind, ago};
+        const W: f32 = 360.0;
+        const ROW: f32 = 46.0;
+        const HEAD: f32 = 40.0;
+        let notes = self.feed.notes();
+        let body = if notes.is_empty() { 72.0 } else { notes.len().min(8) as f32 * ROW };
+        let h = HEAD + body + 6.0;
+        let mut mark_read = false;
+        let resp = egui::Area::new(egui::Id::unique("ghubx-notes"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(pos2(anchor.right() - W, anchor.bottom() + 4.0))
+            .constrain(true)
+            .show(ctx, |ui| {
+                let (rect, _) = ui.allocate_exact_size(vec2(W, h), Sense::hover());
+                soft_shadow(ui, rect, 6);
+                let th = pal();
+                ui.painter().rect_filled(rect, CornerRadius::same(6), if th.dark { th.surface_hi } else { th.surface });
+                if !th.dark {
+                    ui.painter().rect_stroke(rect, CornerRadius::same(6), Stroke::new(1.0, th.outline_hi), StrokeKind::Inside);
+                }
+                text(ui, pos2(rect.left() + 16.0, rect.top() + HEAD / 2.0), Align2::LEFT_CENTER, "NOTIFICATIONS", Ts::new(Fam::Bold, 11.0, pal().label).ls(1.0));
+                let mar = Rect::from_min_max(pos2(rect.right() - 136.0, rect.top()), pos2(rect.right() - 12.0, rect.top() + HEAD));
+                let mr = click(ui, mar, "notes-mark-all");
+                let mc = if self.feed.unread() == 0 { pal().muted } else if mr.hovered() { pal().text } else { pal().primary };
+                text(ui, mar.center(), Align2::CENTER_CENTER, "MARK ALL READ", Ts::new(Fam::Bold, 10.0, mc).ls(0.6));
+                if mr.clicked() {
+                    mark_read = true;
+                }
+                ui.painter().line_segment([pos2(rect.left(), rect.top() + HEAD), pos2(rect.right(), rect.top() + HEAD)], Stroke::new(1.0, pal().divider));
+                if notes.is_empty() {
+                    text(ui, rect.center() + vec2(0.0, HEAD / 2.0), Align2::CENTER_CENTER, "No notifications", Ts::new(Fam::Reg, 13.0, pal().muted));
+                } else {
+                    let view = Rect::from_min_max(pos2(rect.left(), rect.top() + HEAD + 2.0), pos2(rect.right(), rect.bottom() - 4.0));
+                    let content = notes.len() as f32 * ROW;
+                    let max_scroll = (content - view.height()).max(0.0);
+                    if max_scroll > 0.0 {
+                        let dy = ctx.input(|i| if i.pointer.hover_pos().is_some_and(|p| view.contains(p)) { i.smooth_scroll_delta.y } else { 0.0 });
+                        if dy != 0.0 {
+                            self.notes_scroll = (self.notes_scroll + dy).clamp(0.0, max_scroll);
+                        }
+                    }
+                    let p = ui.painter().with_clip_rect(view);
+                    for (i, n) in notes.iter().enumerate() {
+                        let top = view.top() + i as f32 * ROW - self.notes_scroll;
+                        let rr = Rect::from_min_size(pos2(view.left(), top), vec2(view.width(), ROW));
+                        if rr.bottom() < view.top() || rr.top() > view.bottom() {
+                            continue;
+                        }
+                        let dot = match n.kind {
+                            NoteKind::Update => pal().primary,
+                            NoteKind::Warn => pal().amber,
+                            NoteKind::Info => pal().n(0xaa),
+                        };
+                        p.circle_filled(pos2(rr.left() + 20.0, top + 15.0), 3.0, dot);
+                        let g = galley(ui, &n.text, Ts::new(Fam::Reg, 13.0, pal().text).ls(0.0), rr.width() - 56.0);
+                        p.galley(pos2(rr.left() + 36.0, top + 7.0), g.clone(), pal().text);
+                        p.galley(pos2(rr.left() + 36.0, top + 7.0 + g.size().y + 1.0), galley(ui, &ago(n.at), Ts::new(Fam::Reg, 11.0, pal().muted).ls(0.3), f32::INFINITY), pal().muted);
+                        if i + 1 < notes.len() {
+                            p.line_segment([pos2(rr.left() + 14.0, rr.bottom()), pos2(rr.right() - 14.0, rr.bottom())], Stroke::new(1.0, pal().divider));
+                        }
+                    }
+                }
+                rect
+            });
+        let area_rect = resp.inner;
+        if mark_read {
+            self.feed.mark_read();
+        }
+        let pressed_outside = ctx.input(|i| {
+            i.pointer.any_pressed() && i.pointer.interact_pos().is_some_and(|p| !area_rect.contains(p) && !anchor.contains(p))
+        });
+        if (pressed_outside && ctx.cumulative_frame_nr() > self.overlay_frame) || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.overlay = None;
+        }
     }
 
     fn draw_toast(&mut self, ui: &Ui, win: Rect) {
@@ -1085,7 +1263,14 @@ impl eframe::App for GhubApp {
             set_palette(want);
             style(&ctx);
         }
-        if self.shot.is_none() && crate::win::tray_ready() && self.cfg.lock().unwrap().general.close_to_tray && ctx.input(|i| i.viewport().close_requested()) {
+        if !self.applying && self.update.state() == crate::update::UpdateState::Applied {
+            // The worker swapped the exe and spawned the new build; the tray's
+            // quit usually beats this frame, but without a tray the window
+            // still has to close so the engine releases the mouse.
+            self.applying = true;
+            ctx.send_viewport_cmd(ViewportCommand::Close);
+        }
+        if !self.applying && self.shot.is_none() && crate::win::tray_ready() && self.cfg.lock().unwrap().general.close_to_tray && ctx.input(|i| i.viewport().close_requested()) {
             ctx.send_viewport_cmd(ViewportCommand::CancelClose);
             self.hide_to_tray();
         }
@@ -1146,6 +1331,7 @@ impl eframe::App for GhubApp {
     }
 
     fn on_exit(&mut self) {
+        self.update.quit();
         self.exit.run();
     }
 }

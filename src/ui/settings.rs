@@ -124,7 +124,44 @@ impl GhubApp {
         if dropdown(ui, dd, &label.0, &label.1, "s-persist").clicked() {
             self.open_overlay(ui.ctx(), Overlay::Persistent(dd));
         }
-        para(ui, pos2(main.left(), dd.bottom() + 14.0), main.width(), "This Persistent Profile overrides all other profiles in all games and apps until you set it back to None.", Ts::new(Fam::Reg, 13.0, pal().label).ls(0.3));
+        let pr = para(ui, pos2(main.left(), dd.bottom() + 14.0), main.width(), "This Persistent Profile overrides all other profiles in all games and apps until you set it back to None.", Ts::new(Fam::Reg, 13.0, pal().label).ls(0.3));
+        self.app_section(ui, main, pr.bottom() + 30.0);
+    }
+
+    /// Settings > General > APP: the version + the update controls. In dev and
+    /// scripted runs the update handle is `fixed()`, so the buttons are inert.
+    /// `--shot` renders skip the whole section so the baseline pages keep their
+    /// pixels; the `notify` shot page covers the update UI instead.
+    fn app_section(&mut self, ui: &Ui, main: Rect, mut y: f32) {
+        if self.shot.is_some() {
+            return;
+        }
+        ui.painter().line_segment([pos2(main.left(), y), pos2(main.right(), y)], Stroke::new(1.0, pal().divider));
+        y += 26.0;
+        text(ui, pos2(main.left(), y), Align2::LEFT_CENTER, "APP", t_section());
+        let live = !crate::engine::observer_mode();
+        text(ui, pos2(main.left(), y + 34.0), Align2::LEFT_CENTER, &format!("GHUB-X v{}", env!("CARGO_PKG_VERSION")), Ts::new(Fam::Bold, 15.0, pal().text).ls(0.2));
+        let cr = Rect::from_min_size(pos2(main.right() - 122.0, y + 20.0), vec2(122.0, 30.0));
+        if dark_button(ui, cr, "CHECK NOW", "s-check-now", live).clicked() {
+            self.update.check_now();
+        }
+        let (line, action) = match self.update.state() {
+            crate::update::UpdateState::Idle => ("Not checked yet".to_string(), None),
+            crate::update::UpdateState::Checking => ("Checking for updates…".into(), None),
+            crate::update::UpdateState::UpToDate => ("Up to date".into(), None),
+            crate::update::UpdateState::Available(r) => (format!("Update available: {}", r.tag), Some(("UPDATE AND RESTART", crate::update::UpdateMsg::Download(r)))),
+            crate::update::UpdateState::Downloading => ("Downloading…".into(), None),
+            crate::update::UpdateState::Ready { tag, .. } => (format!("{tag} downloaded — restart to apply"), Some(("RESTART NOW", crate::update::UpdateMsg::Apply))),
+            crate::update::UpdateState::Failed(_) => ("Check failed".into(), Some(("RETRY", crate::update::UpdateMsg::Check))),
+            crate::update::UpdateState::Applied => ("Restarting…".into(), None),
+        };
+        text(ui, pos2(main.left(), y + 70.0), Align2::LEFT_CENTER, &line, Ts::new(Fam::Reg, 13.0, pal().label).ls(0.3));
+        if let Some((label, msg)) = action {
+            let br = Rect::from_min_size(pos2(main.right() - 190.0, y + 56.0), vec2(190.0, 30.0));
+            if dark_button(ui, br, label, "s-update-action", live).clicked() {
+                self.update.send(msg);
+            }
+        }
     }
 
     fn ghub_tab(&mut self, ui: &Ui, main: Rect) {

@@ -77,9 +77,37 @@ fn main() {
         Some("osd-png") => std::process::exit(osd_png(&std::env::args().skip(2).collect::<Vec<_>>())),
         Some("osd") => std::process::exit(osd_show(&std::env::args().skip(2).collect::<Vec<_>>())),
         Some("listen") => listen(std::env::args().nth(2).and_then(|s| s.parse().ok()).unwrap_or(15)),
+        Some("update-check") => std::process::exit(update_check_cmd()),
         Some(other) => {
             eprintln!("unknown subcommand {other:?}; use ghub-status, ghub-close, ghub-start, takeover-test, release or listen");
             std::process::exit(64);
+        }
+    }
+}
+
+/// `probe update-check` — one real GitHub releases/latest call; prints what it
+/// found and whether the tag is newer than this build. Read-only: never
+/// downloads or applies.
+fn update_check_cmd() -> i32 {
+    match ghubx::update::latest_release() {
+        Ok(Some(r)) => {
+            let (a, b, c) = r.version;
+            let local = ghubx::update::current_ver();
+            println!("tag: {}", r.tag);
+            println!("parsed version: {a}.{b}.{c}");
+            println!("local version: {}", env!("CARGO_PKG_VERSION"));
+            println!("update available: {}", if ghubx::update::ver_gt(r.version, local) { "yes" } else { "no" });
+            0
+        }
+        Ok(None) => {
+            println!("latest release: none — the repo has no releases yet (GitHub returned 404)");
+            println!("local version: {}", env!("CARGO_PKG_VERSION"));
+            println!("update available: no");
+            0
+        }
+        Err(e) => {
+            eprintln!("update check failed: {e}");
+            1
         }
     }
 }

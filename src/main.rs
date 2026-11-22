@@ -30,6 +30,12 @@ fn main() -> eframe::Result<()> {
         std::process::exit(2);
     }
     ghubx::win::set_dev(dev);
+    // A self-update leaves the previous exe as <name>.old.exe next to us; the
+    // old process is gone now, so it can be deleted.
+    if let Ok(exe) = std::env::current_exe() {
+        let _ = std::fs::remove_file(ghubx::update::old_exe_path(&exe));
+    }
+    let from_update = args.iter().any(|a| a == "--from-update");
     ghubx::games::preload();
     let script = match flag("--script") {
         None => None,
@@ -55,8 +61,13 @@ fn main() -> eframe::Result<()> {
     }
     ghubx::engine::set_observer(dev || shot.is_some());
     let minimized = args.iter().any(|a| a == "--minimized") && shot.is_none();
-    if shot.is_none() && script.is_none() && !ghubx::win::single_instance() {
-        return Ok(());
+    if shot.is_none() && script.is_none() {
+        // After an update the spawning instance is still exiting; wait for the
+        // mutex instead of waking it (there is nothing to wake anyway).
+        let fresh = if from_update { ghubx::win::take_instance_after_update() } else { ghubx::win::single_instance() };
+        if !fresh {
+            return Ok(());
+        }
     }
 
     // First run (or a config from an older version): bring over the G HUB setup.
@@ -99,6 +110,9 @@ fn main() -> eframe::Result<()> {
     } else {
         ghubx::lua::Handle::spawn_with(std::sync::Arc::new(ghubx::engine::RealInput), std::sync::Arc::new(ghubx::win::is_vk_down), Some(eng_tx.clone()))
     };
+    // Notification feed + update worker (fixed no-op in observer/test modes).
+    let feed = ghubx::notify::Feed::default();
+    let update = ghubx::update::Handle::spawn(feed.clone());
     let (ui_tx, ui_rx) = unbounded::<UiEvent>();
     let (done_tx, done_rx) = crossbeam_channel::bounded::<()>(1);
     {
@@ -152,7 +166,7 @@ fn main() -> eframe::Result<()> {
                     },
                 );
             }
-            let mut app = GhubApp::new(cc, cfg, eng_tx, ui_rx, exit, shot, fx, obs, lua);
+            let mut app = GhubApp::new(cc, cfg, eng_tx, ui_rx, exit, shot, fx, obs, lua, feed, update);
             if let Some(r) = script {
                 app.set_script(r);
             }

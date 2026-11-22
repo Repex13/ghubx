@@ -326,6 +326,16 @@ pub fn gear(p: &egui::Painter, c: Pos2, s: f32, st: Stroke) {
     p.circle_stroke(c, s * 0.16, st);
 }
 
+/// Notification bell: a stroked dome with flared base and a clapper dot.
+pub fn bell(p: &egui::Painter, c: Pos2, s: f32, st: Stroke) {
+    use std::f32::consts::{PI, TAU};
+    let mut pts = vec![c + vec2(-s * 0.42, s * 0.28), c + vec2(-s * 0.28, -s * 0.10)];
+    pts.extend(arc(c + vec2(0.0, -s * 0.10), s * 0.28, PI, TAU, 16));
+    pts.push(c + vec2(s * 0.42, s * 0.28));
+    p.add(Shape::closed_line(pts, st));
+    p.circle_filled(c + vec2(0.0, s * 0.40), s * 0.07, st.color);
+}
+
 pub fn sun(p: &egui::Painter, c: Pos2, s: f32, st: Stroke) {
     use std::f32::consts::TAU;
     p.circle_stroke(c, s * 0.2, st);

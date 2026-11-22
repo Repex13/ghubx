@@ -5,7 +5,7 @@ Everything discussed but **not started** yet. Status tags: `[proposed]`
 `[blocked]` (needs something external first), `[won't]` (out of scope,
 with the reason).
 
-## 1. Auto-update + notifications `[decided next]`
+## 1. Auto-update + notifications `[done TBD]`
 
 Now that the repo is public (`https://github.com/Repex13/ghubx`):
 
