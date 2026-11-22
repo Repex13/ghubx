@@ -221,11 +221,11 @@ impl GhubApp {
     fn prepare_shot(&mut self, page: &str) {
         self.route = match page {
             "home" | "dropdown" => Route::Home,
-            "assign" | "assign2" | "gshift" | "macro" | "macroedit" | "select" | "keys" | "actions" => Route::Device(DevTab::Assignments),
+            "assign" | "assign2" | "gshift" | "macro" | "macroedit" | "select" | "keys" | "actions" | "gamecmds" => Route::Device(DevTab::Assignments),
             "sens" => Route::Device(DevTab::Sensitivity),
             "light" | "fixed" => Route::Device(DevTab::Lighting),
             "devset" => Route::DeviceSettings,
-            "profiles" | "appdetail" => Route::Profiles,
+            "profiles" | "appdetail" | "addgame" => Route::Profiles,
             "settings" | "sleep" => Route::Settings(0),
             "appearance" => Route::Settings(1),
             "diag" => Route::Settings(2),
@@ -252,6 +252,15 @@ impl GhubApp {
             p.lighting[1] = crate::profile::Lighting { effect: crate::profile::Effect::Fixed, color: [0x00, 0xB8, 0xFC], period_ms: 4000, brightness: 80 };
             drop(c);
             self.light.zone = 1;
+        }
+        if page == "addgame" {
+            self.prof.open_add();
+        }
+        if page == "gamecmds" {
+            let ghub_id = crate::games::db_blocking().and_then(|d| d.by_name("Counter-Strike 2")).map(|g| g.id.clone());
+            let mut c = self.cfg.lock().unwrap();
+            c.apps.push(crate::profile::AppEntry { name: "Counter-Strike 2".into(), ghub_id, ..crate::profile::AppEntry::desktop() });
+            c.current_app = c.apps.len() - 1;
         }
         if page == "sleep" {
             self.cfg.lock().unwrap().general.lighting_sleep_min = 10;
@@ -310,6 +319,7 @@ impl GhubApp {
                 }
                 UiEvent::Status(s) => {
                     if let Some(fg) = &s.foreground
+                        && self.shot.is_none()
                         && !self.seen_exes.contains(fg)
                         && !fg.eq_ignore_ascii_case("ghubx.exe")
                     {

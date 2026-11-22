@@ -3,11 +3,23 @@
 
 use super::theme::*;
 use super::{GhubApp, Overlay};
+use crate::games::{self, Installed};
 use crate::profile::*;
+use crossbeam_channel::Receiver;
 use egui::{Align2, Color32, CornerRadius, Mesh, Rect, Shape, Stroke, StrokeKind, Ui, UiBuilder, pos2, vec2};
 
 #[derive(Default)]
+enum GameScan {
+    #[default]
+    Idle,
+    Running(Receiver<Vec<Installed>>),
+    Done(Vec<Installed>),
+}
+
+#[derive(Default)]
 pub struct ProfState {
+    scan: GameScan,
+    pick: Option<Receiver<Option<String>>>,
     filter: usize,
     search: String,
     adding: Option<String>,
@@ -16,6 +28,10 @@ pub struct ProfState {
 }
 
 impl ProfState {
+    pub fn open_add(&mut self) {
+        self.adding = Some(String::new());
+    }
+
     pub fn open_detail(&mut self, app: usize) {
         self.detail = Some(app);
     }
@@ -108,6 +124,9 @@ impl GhubApp {
         }
 
         let mut y = sb.bottom() + 24.0;
+        if self.prof.adding.is_none() {
+            self.prof.scan = GameScan::Idle;
+        }
         if self.prof.adding.is_some() {
             y = self.add_app_form(ui, pos2(main.left(), y), main.width());
         }
@@ -186,12 +205,80 @@ impl GhubApp {
     }
 
     fn add_app_form(&mut self, ui: &mut Ui, origin: egui::Pos2, width: f32) -> f32 {
+        if matches!(self.prof.scan, GameScan::Idle) {
+            self.prof.scan = if self.shot.is_some() {
+                GameScan::Done(games::scan(games::db_blocking()))
+            } else {
+                let (tx, rx) = crossbeam_channel::bounded(1);
+                std::thread::spawn(move || {
+                    let _ = tx.send(games::scan(games::db_blocking()));
+                });
+                GameScan::Running(rx)
+            };
+        }
+        if let GameScan::Running(rx) = &self.prof.scan {
+            match rx.try_recv() {
+                Ok(list) => self.prof.scan = GameScan::Done(list),
+                Err(_) => ui.ctx().request_repaint_after(std::time::Duration::from_millis(100)),
+            }
+        }
+        let cfg = self.cfg();
+        let folder = |d: &str| d.replace('/', "\\").trim_end_matches('\\').to_lowercase();
+        let available: Vec<Installed> = match &self.prof.scan {
+            GameScan::Done(list) => list
+                .iter()
+                .filter(|g| !cfg.apps.iter().any(|a| a.dir.as_deref().is_some_and(|d| folder(d) == folder(&g.dir)) || (g.ghub_id.is_some() && a.ghub_id == g.ghub_id)))
+                .cloned()
+                .collect(),
+            _ => Vec::new(),
+        };
+        let list_h = available.len().clamp(1, 5) as f32 * 34.0;
         let w = width.min(560.0);
-        let r = Rect::from_min_size(origin, vec2(w, 112.0));
+        let field_top = 58.0 + list_h + 8.0 + 14.0;
+        let r = Rect::from_min_size(origin, vec2(w, field_top + 28.0 + 12.0 + 22.0 + 14.0));
         ui.painter().rect_filled(r, CornerRadius::same(10), pal().surface);
         text(ui, r.left_top() + vec2(16.0, 20.0), Align2::LEFT_CENTER, "ADD A GAME OR APP", Ts::new(Fam::Bold, 12.0, pal().text));
+        text(ui, r.left_top() + vec2(16.0, 44.0), Align2::LEFT_CENTER, "DETECTED GAMES", t_small_label());
+
+        let list_r = Rect::from_min_size(r.left_top() + vec2(16.0, 58.0), vec2(w - 32.0, list_h));
+        let mut chosen: Option<Installed> = None;
+        match &self.prof.scan {
+            GameScan::Done(_) if !available.is_empty() => {
+                let mut child = ui.new_child(UiBuilder::new().max_rect(list_r));
+                egui::ScrollArea::vertical().id_salt("detected-games").max_height(list_h).auto_shrink([false, false]).show(&mut child, |ui| {
+                    for (i, g) in available.iter().enumerate() {
+                        let (row, _) = ui.allocate_exact_size(vec2(list_r.width() - 8.0, 34.0), egui::Sense::hover());
+                        text(ui, pos2(row.left(), row.center().y), Align2::LEFT_CENTER, &g.name, Ts::new(Fam::Bold, 13.0, pal().text).ls(0.2));
+                        let add = Rect::from_center_size(pos2(row.right() - 28.0, row.center().y), vec2(56.0, 22.0));
+                        text(ui, pos2(add.left() - 14.0, row.center().y), Align2::RIGHT_CENTER, g.source, Ts::new(Fam::Reg, 11.0, pal().muted).ls(0.3));
+                        if blue_button(ui, add, "ADD", ("game-add", i)).clicked() {
+                            chosen = Some(g.clone());
+                        }
+                        ui.painter().line_segment([pos2(row.left(), row.bottom() - 0.5), pos2(row.right(), row.bottom() - 0.5)], Stroke::new(1.0, pal().row_line));
+                    }
+                });
+            }
+            state => {
+                let msg = if matches!(state, GameScan::Done(_)) { "No other installed games found." } else { "Scanning\u{2026}" };
+                text(ui, pos2(list_r.left(), list_r.top() + 17.0), Align2::LEFT_CENTER, msg, Ts::new(Fam::Reg, 12.0, pal().muted).ls(0.4));
+            }
+        }
+        let div_y = r.top() + 58.0 + list_h + 8.0;
+        ui.painter().line_segment([pos2(r.left() + 16.0, div_y), pos2(r.right() - 16.0, div_y)], Stroke::new(1.0, pal().divider));
+
         let mut s = self.prof.adding.clone().unwrap_or_default();
-        let fr = Rect::from_min_size(r.left_top() + vec2(16.0, 36.0), vec2(w - 200.0, 28.0));
+        if let Some(rx) = &self.prof.pick {
+            match rx.try_recv() {
+                Ok(picked) => {
+                    self.prof.pick = None;
+                    if let Some(path) = picked {
+                        s = path.rsplit(['\\', '/']).next().unwrap_or("").to_string();
+                    }
+                }
+                Err(_) => ui.ctx().request_repaint_after(std::time::Duration::from_millis(100)),
+            }
+        }
+        let fr = Rect::from_min_size(r.left_top() + vec2(16.0, field_top), vec2(w - 284.0, 28.0));
         let te = egui::TextEdit::singleline(&mut s)
             .hint_text(egui::RichText::new("Executable name, e.g. cs2.exe").color(pal().label))
             .frame(egui::Frame::NONE)
@@ -200,13 +287,22 @@ impl GhubApp {
         let mut child = ui.new_child(UiBuilder::new().max_rect(fr));
         child.put(fr.shrink2(vec2(2.0, 4.0)), te);
         ui.painter().line_segment([pos2(fr.left(), fr.bottom()), pos2(fr.right(), fr.bottom())], Stroke::new(1.0, pal().outline_hi));
+        let idle = self.prof.pick.is_none();
+        if dark_button(ui, Rect::from_min_size(pos2(r.right() - 260.0, fr.top()), vec2(80.0, 28.0)), "BROWSE", "app-browse", idle).clicked() && idle {
+            let owner = crate::win::main_window_handle();
+            let (tx, rx) = crossbeam_channel::bounded(1);
+            std::thread::spawn(move || {
+                let _ = tx.send(crate::win::pick_exe(owner));
+            });
+            self.prof.pick = Some(rx);
+        }
         let add = blue_button(ui, Rect::from_min_size(pos2(r.right() - 172.0, fr.top()), vec2(76.0, 28.0)), "ADD", "app-add-ok").clicked();
         let cancel = dark_button(ui, Rect::from_min_size(pos2(r.right() - 88.0, fr.top()), vec2(72.0, 28.0)), "CANCEL", "app-add-cancel", true).clicked();
         // recently focused apps as suggestions
         let mut x = r.left() + 16.0;
         for (i, exe) in self.seen_exes.clone().iter().take(5).enumerate() {
             let g = galley(ui, exe, Ts::new(Fam::Reg, 11.0, pal().text).ls(0.2), f32::INFINITY);
-            let cr = Rect::from_min_size(pos2(x, r.bottom() - 34.0), vec2(g.size().x + 18.0, 22.0));
+            let cr = Rect::from_min_size(pos2(x, fr.bottom() + 12.0), vec2(g.size().x + 18.0, 22.0));
             if cr.right() > r.right() - 16.0 {
                 break;
             }
@@ -215,7 +311,16 @@ impl GhubApp {
             }
             x = cr.right() + 8.0;
         }
-        if cancel {
+        if let Some(game) = chosen {
+            self.edit(|c| {
+                let mut base = c.apps[0].profile().clone();
+                base.name = "Default".into();
+                c.apps.push(AppEntry { name: game.name.clone(), exe: None, dir: Some(game.dir.clone()), ghub_id: game.ghub_id.clone(), enabled: true, profiles: vec![base], active_profile: 0, macros: c.apps[0].macros.clone() });
+                c.profile_switching = true;
+            });
+            self.prof.adding = Some(s);
+            self.say("Added \u{2014} its profile activates when the game is in front");
+        } else if cancel {
             self.prof.adding = None;
         } else if add && !s.trim().is_empty() {
             let exe = s.trim().trim_matches('"').rsplit(['\\', '/']).next().unwrap_or("").to_string();
@@ -226,11 +331,11 @@ impl GhubApp {
             self.edit(|c| {
                 let mut base = c.apps[0].profile().clone();
                 base.name = "Default".into();
-                c.apps.push(AppEntry { name, exe: Some(exe.clone()), enabled: true, profiles: vec![base], active_profile: 0, macros: c.apps[0].macros.clone() });
+                c.apps.push(AppEntry { name, exe: Some(exe.clone()), dir: None, ghub_id: None, enabled: true, profiles: vec![base], active_profile: 0, macros: c.apps[0].macros.clone() });
                 c.profile_switching = true;
             });
             self.prof.adding = None;
-            self.say("Added — its profile activates when the app is in front");
+            self.say("Added \u{2014} its profile activates when the app is in front");
         } else {
             self.prof.adding = Some(s);
         }
@@ -249,8 +354,15 @@ impl GhubApp {
             self.prof.renaming = None;
         }
         text(ui, pos2(main.left(), main.top() + 76.0), Align2::LEFT_CENTER, &app.name, Ts::new(Fam::Bold, 24.0, pal().text).ls(0.0));
-        let sub = app.exe.clone().unwrap_or_else(|| "Used whenever no other app's profile is active".into());
-        text(ui, pos2(main.left(), main.top() + 102.0), Align2::LEFT_CENTER, &sub, Ts::new(Fam::Reg, 12.0, pal().muted).ls(0.4));
+        let sub = match (&app.dir, &app.exe) {
+            (Some(d), _) => format!("Folder: {d}"),
+            (None, Some(e)) => format!("Executable: {e}"),
+            _ => "Used whenever no other app's profile is active".into(),
+        };
+        let sub_r = text(ui, pos2(main.left(), main.top() + 102.0), Align2::LEFT_CENTER, &sub, Ts::new(Fam::Reg, 12.0, pal().muted).ls(0.4));
+        if app.ghub_id.is_some() {
+            text(ui, pos2(sub_r.right() + 16.0, main.top() + 102.0), Align2::LEFT_CENTER, "G HUB game profile", Ts::new(Fam::Reg, 12.0, pal().muted).ls(0.4));
+        }
         if app.exe.is_some() {
             text(ui, pos2(main.right() - 50.0, main.top() + 76.0), Align2::RIGHT_CENTER, "ENABLED", Ts::new(Fam::Bold, 12.0, pal().text));
             if switch(ui, pos2(main.right() - 18.0, main.top() + 76.0), app.enabled, pal().primary, "app-enabled").clicked() {

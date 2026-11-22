@@ -180,7 +180,7 @@ pub struct Card {
 
 #[derive(Clone, Debug)]
 pub struct Section {
-    pub title: &'static str,
+    pub title: String,
     /// G HUB category tag colour.
     pub tag: Option<[u8; 3]>,
     pub cards: Vec<Card>,
@@ -202,7 +202,7 @@ pub fn commands() -> Vec<Section> {
     const A: u8 = MOD_ALT;
     vec![
         Section {
-            title: "Windows",
+            title: "Windows".into(),
             tag: Some([0x43, 0xEE, 0xFF]),
             cards: vec![
                 sc("Open Task View", "Left Windows + Tab", 0x09, W),
@@ -230,7 +230,7 @@ pub fn commands() -> Vec<Section> {
             ],
         },
         Section {
-            title: "Editing",
+            title: "Editing".into(),
             tag: Some([0xFF, 0x43, 0xEE]),
             cards: vec![
                 sc("Cut", "Ctrl + X", 0x58, C),
@@ -252,7 +252,7 @@ pub fn commands() -> Vec<Section> {
             ],
         },
         Section {
-            title: "Productivity",
+            title: "Productivity".into(),
             tag: Some([0xEE, 0xFF, 0x43]),
             cards: vec![
                 sc("Switch Between Apps", "Alt + Tab", 0x09, A),
@@ -263,7 +263,7 @@ pub fn commands() -> Vec<Section> {
             ],
         },
         Section {
-            title: "Navigation",
+            title: "Navigation".into(),
             tag: Some([0xFF, 0x43, 0x90]),
             cards: vec![sc("Go Back", "Alt + Left", 0x25, A), sc("Go Forward", "Alt + Right", 0x27, A)],
         },
@@ -300,7 +300,7 @@ pub fn system() -> Vec<Section> {
     };
     vec![
         Section {
-            title: "Mouse",
+            title: "Mouse".into(),
             tag: None,
             cards: [
                 Mouse(MouseFn::Primary),
@@ -324,7 +324,7 @@ pub fn system() -> Vec<Section> {
             .collect(),
         },
         Section {
-            title: "Device",
+            title: "Device".into(),
             tag: None,
             cards: [
                 System(SystemFn::GShift),
@@ -338,7 +338,7 @@ pub fn system() -> Vec<Section> {
             .collect(),
         },
         Section {
-            title: "Media",
+            title: "Media".into(),
             tag: None,
             cards: vec![
                 key("Play/Pause", 0xB3),
@@ -356,7 +356,7 @@ pub fn system() -> Vec<Section> {
 /// ACTIONS tab: GHUB-X's Razer Basilisk–style functions.
 pub fn actions() -> Vec<Section> {
     vec![Section {
-        title: "Basilisk",
+        title: "Basilisk".into(),
         tag: Some([0x44, 0xD6, 0x2C]),
         cards: vec![
             Card {

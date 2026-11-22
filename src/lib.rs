@@ -1,6 +1,7 @@
 pub mod catalog;
 pub mod device;
 pub mod engine;
+pub mod games;
 pub mod ghub_import;
 pub mod hidpp;
 pub mod io;

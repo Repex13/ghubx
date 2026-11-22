@@ -322,7 +322,7 @@ pub fn convert(d: &Value) -> Result<(Vec<AppEntry>, bool, Summary), String> {
             Some((_, e)) => e,
             None => {
                 let name = app_names.get(app_id.as_str()).cloned().unwrap_or_else(|| "Desktop".into());
-                apps.push((app_id.clone(), AppEntry { name, exe: None, enabled: true, profiles: vec![], active_profile: 0, macros: vec![] }));
+                apps.push((app_id.clone(), AppEntry { name, exe: None, dir: None, ghub_id: None, enabled: true, profiles: vec![], active_profile: 0, macros: vec![] }));
                 &mut apps.last_mut().unwrap().1
             }
         };

@@ -58,7 +58,8 @@ pub enum EngineMsg {
     ConfigChanged,
     CloseGhub,
     StartGhub,
-    TestPerfect180,
+    /// Inject a test turn of exactly this many counts.
+    TestPerfect180 { counts: i32 },
     /// Pick the active on-board slot (only while not in host control).
     OnboardSlot(u8),
     Quit,
@@ -70,7 +71,10 @@ pub struct Status {
     pub controlled: bool,
     pub ghub_running: bool,
     pub active: (usize, usize),
+    /// File name of the foreground process (for the UI).
     pub foreground: Option<String>,
+    /// Full path of the foreground process (for profile matching).
+    pub foreground_path: Option<String>,
     pub gshift: bool,
 }
 
@@ -182,11 +186,9 @@ impl Engine {
                             let _ = self.dev.send(DevCmd::Refresh);
                         }
                     }
-                    Ok(EngineMsg::TestPerfect180) => {
-                        if let Some((p, _, e)) = self.profile() {
-                            let counts = turn_counts(turn_for(&p, &e).counts, turn_for(&p, &e).angle);
-                            std::thread::spawn(move || perfect_180(counts, e.p180_ms, e.p180_steps));
-                        }
+                    Ok(EngineMsg::TestPerfect180 { counts }) => {
+                        let e = self.cfg.lock().unwrap().extras.clone();
+                        std::thread::spawn(move || perfect_180(counts, e.p180_ms, e.p180_steps));
                     }
                     Ok(EngineMsg::Quit) | Err(_) => {
                         self.release_device();
@@ -196,10 +198,11 @@ impl Engine {
                 },
                 recv(ticker) -> _ => {
                     n = n.wrapping_add(1);
-                    let fg = win::foreground_exe();
+                    let path = win::foreground_path();
                     let mut dirty = false;
-                    if fg != self.st.foreground {
-                        self.st.foreground = fg;
+                    if path != self.st.foreground_path {
+                        self.st.foreground = path.as_deref().and_then(|p| p.rsplit(['\\', '/']).next()).map(str::to_string);
+                        self.st.foreground_path = path;
                         dirty = true;
                     }
                     if n.is_multiple_of(8) {
@@ -266,7 +269,7 @@ impl Engine {
     fn reconcile(&mut self) {
         let cfg = self.cfg.lock().unwrap().clone();
         win::set_scroll_accel(cfg.extras.scroll_accel, cfg.extras.scroll_boost);
-        let active = cfg.resolve(self.st.foreground.as_deref());
+        let active = cfg.resolve(self.st.foreground_path.as_deref());
         if active != self.st.active {
             let switched_in_control = self.applied.is_some();
             self.release_all();

@@ -30,6 +30,7 @@ fn main() -> eframe::Result<()> {
         std::process::exit(2);
     }
     ghubx::win::set_dev(dev);
+    ghubx::games::preload();
     ghubx::engine::set_observer(dev || shot.is_some());
     let minimized = args.iter().any(|a| a == "--minimized") && shot.is_none();
     if shot.is_none() && !ghubx::win::single_instance() {

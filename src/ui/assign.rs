@@ -82,6 +82,28 @@ pub fn egui_vk(k: egui::Key) -> Option<u16> {
     })
 }
 
+/// The edited app's G HUB game commands (one section per category).
+fn game_sections(cfg: &Config) -> Vec<Section> {
+    let Some(game) = cfg.current().0.ghub_id.as_deref().and_then(|id| crate::games::db()?.by_id(id)) else { return Vec::new() };
+    game.categories
+        .iter()
+        .map(|(cat, tag)| Section {
+            title: cat.clone(),
+            tag: *tag,
+            cards: game
+                .commands
+                .iter()
+                .filter(|c| &c.category == cat)
+                .filter_map(|c| {
+                    let combo = crate::games::key_combo(&c.keys)?;
+                    Some(Card { name: catalog::combo_name(combo), detail: c.name.clone(), assignment: Assignment::Shortcut { name: c.name.clone(), combo } })
+                })
+                .collect(),
+        })
+        .filter(|s| !s.cards.is_empty())
+        .collect()
+}
+
 enum ListItem {
     Header(String, Option<[u8; 3]>),
     Card(Card),
@@ -131,9 +153,13 @@ impl GhubApp {
         let q = self.asg.search.to_lowercase();
         let keep = |c: &Card| q.is_empty() || c.name.to_lowercase().contains(&q) || c.detail.to_lowercase().contains(&q);
         let sections: Vec<Section> = match self.asg.tab {
-            0 => catalog::commands(),
+            0 => {
+                let mut v = game_sections(cfg);
+                v.extend(catalog::commands());
+                v
+            }
             1 => vec![Section {
-                title: "",
+                title: String::new(),
                 tag: None,
                 cards: catalog::keys()
                     .into_iter()
@@ -145,13 +171,13 @@ impl GhubApp {
             }],
             2 => catalog::actions(),
             3 => vec![Section {
-                title: "",
+                title: String::new(),
                 tag: None,
                 cards: cfg.current().0.macros.iter().map(|m| Card { name: m.name.clone(), detail: String::new(), assignment: Assignment::Macro(m.id.clone()) }).collect(),
             }],
             _ => {
                 let mut v = vec![Section {
-                    title: "Launch Application",
+                    title: "Launch Application".into(),
                     tag: None,
                     cards: launch_cards(cfg),
                 }];
@@ -163,8 +189,8 @@ impl GhubApp {
         for s in sections {
             let cards: Vec<Card> = s.cards.into_iter().filter(keep).collect();
             if !s.title.is_empty() {
-                out.push(ListItem::Header(s.title.to_string(), s.tag));
-                if self.asg.collapsed.contains(s.title) && q.is_empty() {
+                out.push(ListItem::Header(s.title.clone(), s.tag));
+                if self.asg.collapsed.contains(&s.title) && q.is_empty() {
                     continue;
                 }
             }
@@ -197,8 +223,6 @@ impl GhubApp {
         // tab-specific header blocks
         if tab == 1 {
             self.keys_header(&mut child);
-        } else if tab == 2 {
-            self.p180_block(&mut child);
         } else if tab == 3 && dark_button(&child, Rect::from_min_size(child.cursor().min, vec2(278.0, 32.0)), "CREATE NEW MACRO", "new-macro", true).clicked() {
             self.asg.editor = Some(MacroEditor::new());
         }
@@ -284,6 +308,10 @@ impl GhubApp {
                         }
                     }
                 }
+            }
+            if tab == 2 {
+                ui.add_space(8.0);
+                self.p180_block(ui);
             }
             if tab == 3 && macros.is_empty() {
                 ui.add_space(8.0);
@@ -463,7 +491,7 @@ impl GhubApp {
             ui.ctx().request_repaint();
             if t.elapsed().as_secs_f32() >= 3.0 {
                 self.p180_at = None;
-                let _ = self.eng.send(EngineMsg::TestPerfect180);
+                let _ = self.eng.send(EngineMsg::TestPerfect180 { counts: turn_counts(counts, angle_deg) });
             }
         }
         if checkbox(ui, pos2(x, br.bottom() + 12.0), "USE FOR THIS PROFILE ONLY", per_profile, true, "p180-per-profile").clicked() {

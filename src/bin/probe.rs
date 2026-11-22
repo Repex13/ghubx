@@ -32,6 +32,10 @@ fn main() {
         }
         Some("takeover-test") => std::process::exit(takeover_test()),
         Some("release") => std::process::exit(release()),
+        Some("games") => std::process::exit(games()),
+        Some("pick-exe") => {
+            println!("{:?}", win::pick_exe(0));
+        }
         Some("osd-png") => std::process::exit(osd_png(&std::env::args().skip(2).collect::<Vec<_>>())),
         Some("osd") => std::process::exit(osd_show(&std::env::args().skip(2).collect::<Vec<_>>())),
         Some("listen") => listen(std::env::args().nth(2).and_then(|s| s.parse().ok()).unwrap_or(15)),
@@ -40,6 +44,21 @@ fn main() {
             std::process::exit(64);
         }
     }
+}
+
+fn games() -> i32 {
+    let db = ghubx::games::GameDb::load();
+    println!("G HUB game database: {} games", db.as_ref().map_or(0, |d| d.games.len()));
+    println!("name | source | folder | G HUB id | commands with a key combo");
+    for g in ghubx::games::scan(db.as_ref()) {
+        let mapped = g
+            .ghub_id
+            .as_deref()
+            .and_then(|id| db.as_ref()?.by_id(id))
+            .map_or(0, |game| game.commands.iter().filter(|c| ghubx::games::key_combo(&c.keys).is_some()).count());
+        println!("{} | {} | {} | {} | {}", g.name, g.source, g.dir, g.ghub_id.as_deref().unwrap_or("-"), mapped);
+    }
+    0
 }
 
 fn parse_osd(args: &[String]) -> Option<OsdKind> {

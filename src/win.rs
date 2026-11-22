@@ -99,8 +99,8 @@ pub fn hwheel(delta: i32) {
     send(&[mouse_input(0, 0, delta, MOUSEEVENTF_HWHEEL)]);
 }
 
-/// Executable file name of the foreground window's process.
-pub fn foreground_exe() -> Option<String> {
+/// Full image path of the foreground window's process.
+pub fn foreground_path() -> Option<String> {
     use windows::Win32::System::Threading::{
         OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
     };
@@ -115,13 +115,12 @@ pub fn foreground_exe() -> Option<String> {
             return None;
         }
         let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
-        let mut buf = [0u16; 512];
+        let mut buf = [0u16; 1024];
         let mut len = buf.len() as u32;
         let ok = QueryFullProcessImageNameW(h, PROCESS_NAME_WIN32, windows::core::PWSTR(buf.as_mut_ptr()), &mut len);
         let _ = CloseHandle(h);
         ok.ok()?;
-        let path = String::from_utf16_lossy(&buf[..len as usize]);
-        path.rsplit('\\').next().map(str::to_string)
+        Some(String::from_utf16_lossy(&buf[..len as usize]))
     }
 }
 
@@ -366,6 +365,38 @@ fn main_hwnd() -> Option<HWND> {
 /// True once the tray window exists (a hidden main window is only reachable then).
 pub fn tray_ready() -> bool {
     TRAY_READY.load(Ordering::Relaxed)
+}
+
+/// The main window's handle (0 before the tray started).
+pub fn main_window_handle() -> isize {
+    MAIN_HWND.load(Ordering::Relaxed)
+}
+
+/// Native "open file" dialog for `*.exe`; blocks until closed. Returns the full path.
+pub fn pick_exe(owner: isize) -> Option<String> {
+    use windows::Win32::UI::Controls::Dialogs::{GetOpenFileNameW, OFN_FILEMUSTEXIST, OFN_NOCHANGEDIR, OFN_PATHMUSTEXIST, OPENFILENAMEW};
+    std::thread::spawn(move || unsafe {
+        let mut file = [0u16; 1024];
+        let filter: Vec<u16> = "Programs (*.exe)\0*.exe\0All files (*.*)\0*.*\0\0".encode_utf16().collect();
+        let title: Vec<u16> = "Choose a game or app\0".encode_utf16().collect();
+        let mut ofn = OPENFILENAMEW {
+            lStructSize: std::mem::size_of::<OPENFILENAMEW>() as u32,
+            hwndOwner: HWND(owner as *mut _),
+            lpstrFilter: PCWSTR(filter.as_ptr()),
+            lpstrFile: windows::core::PWSTR(file.as_mut_ptr()),
+            nMaxFile: file.len() as u32,
+            lpstrTitle: PCWSTR(title.as_ptr()),
+            Flags: OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR,
+            ..Default::default()
+        };
+        GetOpenFileNameW(&mut ofn).as_bool().then(|| {
+            let end = file.iter().position(|&c| c == 0).unwrap_or(file.len());
+            String::from_utf16_lossy(&file[..end])
+        })
+    })
+    .join()
+    .ok()
+    .flatten()
 }
 
 pub fn main_hidden() -> bool {

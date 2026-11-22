@@ -372,6 +372,12 @@ pub struct AppEntry {
     /// Executable file name for automatic switching; `None` for Desktop.
     #[serde(default)]
     pub exe: Option<String>,
+    /// Install folder: the app is active when a process from inside it is in front.
+    #[serde(default)]
+    pub dir: Option<String>,
+    /// G HUB game database id (for the game's commands).
+    #[serde(default)]
+    pub ghub_id: Option<String>,
     #[serde(default = "yes")]
     pub enabled: bool,
     pub profiles: Vec<Profile>,
@@ -379,6 +385,10 @@ pub struct AppEntry {
     pub active_profile: usize,
     #[serde(default)]
     pub macros: Vec<Macro>,
+}
+
+fn path_key(p: &str) -> String {
+    p.replace('/', "\\").to_lowercase()
 }
 
 fn yes() -> bool {
@@ -390,6 +400,8 @@ impl AppEntry {
         Self {
             name: "Desktop".into(),
             exe: None,
+            dir: None,
+            ghub_id: None,
             enabled: true,
             profiles: vec![Profile::new("Default")],
             active_profile: 0,
@@ -586,20 +598,39 @@ impl Config {
         &mut a.profiles[i]
     }
 
-    /// The (app, profile) that should drive the mouse given the foreground exe.
-    pub fn resolve(&self, foreground_exe: Option<&str>) -> (usize, usize) {
+    /// The (app, profile) that should drive the mouse given the foreground
+    /// process path. An executable-name match beats an install-folder match;
+    /// among folders the longest wins.
+    pub fn resolve(&self, foreground_path: Option<&str>) -> (usize, usize) {
         if let Some(p) = self.persistent {
             return p;
         }
         if self.profile_switching
-            && let Some(exe) = foreground_exe
-            && let Some(i) = self.apps.iter().position(|a| {
-                a.enabled && a.exe.as_deref().is_some_and(|e| e.eq_ignore_ascii_case(exe))
-            })
+            && let Some(path) = foreground_path
+            && let Some(i) = self.match_app(path)
         {
             return (i, self.apps[i].active_profile);
         }
         (self.current_app, self.apps[self.current_app].active_profile)
+    }
+
+    fn match_app(&self, path: &str) -> Option<usize> {
+        let exe = path.rsplit(['\\', '/']).next().unwrap_or(path);
+        let by_exe = self.apps.iter().position(|a| a.enabled && a.exe.as_deref().is_some_and(|e| e.eq_ignore_ascii_case(exe)));
+        by_exe.or_else(|| {
+            let p = path_key(path);
+            self.apps
+                .iter()
+                .enumerate()
+                .filter(|(_, a)| a.enabled)
+                .filter_map(|(i, a)| {
+                    let d = path_key(a.dir.as_deref()?);
+                    let d = d.trim_end_matches('\\');
+                    (!d.is_empty() && p.len() > d.len() && p.starts_with(d) && p.as_bytes()[d.len()] == b'\\').then_some((d.len(), i))
+                })
+                .max_by_key(|&(len, _)| len)
+                .map(|(_, i)| i)
+        })
     }
 
     pub fn profile_at(&self, (a, p): (usize, usize)) -> Option<&Profile> {
@@ -737,6 +768,31 @@ mod tests {
             assert_eq!(dpi_flash_color(i), *c);
         }
         assert_eq!(dpi_flash_color(5), dpi_flash_color(0));
+    }
+
+    fn dir_app(name: &str, exe: Option<&str>, dir: Option<&str>) -> AppEntry {
+        AppEntry { name: name.into(), exe: exe.map(Into::into), dir: dir.map(Into::into), ..AppEntry::desktop() }
+    }
+
+    #[test]
+    fn resolve_matches_install_dir() {
+        let mut c = Config { profile_switching: true, ..Config::default() };
+        c.apps.push(dir_app("CS", None, Some(r"C:\Games\CS")));
+        assert_eq!(c.resolve(Some("c:/games/cs/game/bin/win64/cs2.exe")), (1, 0));
+        assert_eq!(c.resolve(Some(r"C:\Games\CSX\a.exe")), (0, 0));
+        c.apps.push(dir_app("A", Some("a.exe"), None));
+        assert_eq!(c.resolve(Some(r"C:\Games\CS\a.exe")), (2, 0));
+        let mut d = Config { profile_switching: true, ..Config::default() };
+        d.apps.push(dir_app("Games", None, Some(r"C:\Games")));
+        d.apps.push(dir_app("CS", None, Some(r"C:\Games\CS")));
+        assert_eq!(d.resolve(Some(r"C:\Games\CS\x.exe")), (2, 0));
+        assert_eq!(d.resolve(Some(r"C:\Games\Other\x.exe")), (1, 0));
+    }
+
+    #[test]
+    fn old_config_without_dir_loads() {
+        let c: Config = toml::from_str("[[apps]]\nname = \"Old\"\nexe = \"old.exe\"\n\n[[apps.profiles]]\nname = \"Default\"\n").unwrap();
+        assert_eq!((c.apps[0].dir.clone(), c.apps[0].ghub_id.clone()), (None, None));
     }
 
     #[test]
