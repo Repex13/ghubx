@@ -422,9 +422,14 @@ impl Engine {
                         }
                     }
                     Ok(EngineMsg::TestPerfect180 { counts }) => {
-                        let e = self.cfg.lock().unwrap().extras.clone();
-                        let input = self.input.clone();
-                        std::thread::spawn(move || perfect_180(&*input, counts, e.p180_ms, e.p180_steps));
+                        // Same gate as test_macro: dev/script runs never inject input.
+                        if observer() {
+                            self.log("Perfect 180 test is off in dev mode".into());
+                        } else {
+                            let e = self.cfg.lock().unwrap().extras.clone();
+                            let input = self.input.clone();
+                            std::thread::spawn(move || perfect_180(&*input, counts, e.p180_ms, e.p180_steps));
+                        }
                     }
                     Ok(EngineMsg::Quit) | Err(_) => {
                         self.release_device();
