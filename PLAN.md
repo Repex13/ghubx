@@ -29,7 +29,7 @@ Now that the repo is public (`https://github.com/Repex13/ghubx`):
 
 ## 2. Perfect 180 compatibility `[decided with boundary]`
 
-- **Input-sender fallback chain** `[done TBD]` — the injection path is
+- **Input-sender fallback chain** `[done bdae9ae]` — the injection path is
   pluggable behind `engine::Input`: `SendInput` → legacy `mouse_event`
   → `PostMessage`, picked in the P180 panel (`Extras.p180_sender`) and
   tried with the TEST button. For games with *flaky* handling of one
@@ -39,7 +39,7 @@ Now that the repo is public (`https://github.com/Repex13/ghubx`):
   sender in the chain changes that. The only past-the-wall options are
   kernel/interception drivers or firmware spoofing: anti-cheat
   circumvention, ban-risk, out of scope. No work on this.
-- **Honest answers for blocked games** `[done TBD]` — (a) the Sensitivity
+- **Honest answers for blocked games** `[done bdae9ae]` — (a) the Sensitivity
   Clutch + a physical flick: real hardware movement, works everywhere,
   it's what the clutch is for; (b) on-board can't help — G502 on-board
   macros emit key/button events only, never movement deltas; (c) the
