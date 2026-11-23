@@ -1068,6 +1068,32 @@ pub fn open_wdl_settings() {
     }
 }
 
+/// All monitor rectangles in virtual-screen coordinates as (x, y, w, h), the
+/// primary monitor first (GetMonitorInfo's MONITORINFOF_PRIMARY, then the
+/// enum's own order). `GetDC(NULL)` covers the whole virtual desktop, so a
+/// capture can BitBlt straight from these coordinates — mind that the virtual
+/// origin need not be (0,0).
+pub fn monitors() -> Vec<(i32, i32, i32, i32)> {
+    use windows::Win32::Foundation::RECT;
+    use windows::Win32::Graphics::Gdi::{EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFO};
+    use windows::core::BOOL;
+    unsafe extern "system" fn each(m: HMONITOR, _hdc: HDC, r: *mut RECT, data: LPARAM) -> BOOL {
+        let primary = unsafe {
+            let mut mi = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+            GetMonitorInfoW(m, &mut mi).as_bool() && mi.dwFlags & MONITORINFOF_PRIMARY != 0
+        };
+        unsafe { (*(data.0 as *mut Vec<(RECT, bool)>)).push((*r, primary)) };
+        BOOL(1)
+    }
+    let mut found: Vec<(RECT, bool)> = Vec::new();
+    unsafe {
+        let _ = EnumDisplayMonitors(None, None, Some(each), LPARAM(&mut found as *mut _ as isize));
+    }
+    // stable: the one flagged primary is index 0, the rest keep enum order
+    found.sort_by_key(|(_, primary)| !*primary);
+    found.iter().map(|(r, _)| (r.left, r.top, r.right - r.left, r.bottom - r.top)).collect()
+}
+
 // ---------------------------------------------------------------- HTTP (WinINet)
 
 /// GET `url` through WinINet (HTTP and HTTPS; redirects are followed). The

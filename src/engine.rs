@@ -203,6 +203,8 @@ pub struct Engine {
     wdl_on: bool,
     pub(crate) dpi_led_off_at: Option<Instant>,
     pub(crate) fx: Box<dyn FnMut([Option<Lighting>; 2]) + Send>,
+    /// "Any captured button is down" for the fx thread's REACTIVE effect.
+    pub(crate) fx_down: Box<dyn FnMut(bool) + Send>,
     fx_last: [Option<Lighting>; 2],
     pub(crate) persist: bool,
     pub(crate) flash_until: Option<Instant>,
@@ -235,6 +237,7 @@ impl Engine {
             wdl_on: false,
             dpi_led_off_at: None,
             fx: Box::new(|_| {}),
+            fx_down: Box::new(|_| {}),
             fx_last: [None, None],
             persist: true,
             flash_until: None,
@@ -268,7 +271,9 @@ impl Engine {
     }
 
     pub fn with_host_lighting(mut self, h: crate::fx::Handle) -> Self {
+        let h2 = h.clone();
         self.fx = Box::new(move |z| h.set_device(z));
+        self.fx_down = Box::new(move |d| h2.set_reactive_down(d));
         self
     }
 
@@ -515,6 +520,7 @@ impl Engine {
         self.st.controlled = false;
         self.mask = 0;
         self.flash_until = None;
+        (self.fx_down)(false);
     }
 
     fn release_device(&mut self) {
@@ -679,6 +685,8 @@ impl Engine {
         let changed = mask ^ self.mask;
         self.mask = mask;
         let _ = self.ui.send(UiEvent::Buttons(mask));
+        // REACTIVE host lighting follows the whole bitmap: any captured slot down = lit.
+        (self.fx_down)(mask != 0);
         if !self.st.controlled {
             return;
         }
@@ -1959,6 +1967,25 @@ mod tests {
         r.e.reconcile();
         assert_eq!(last_fx(&log).0, [None, None]);
         assert_eq!(zone_cmds(r.cmds()), vec![(0, [0u8; 11]), (1, [0u8; 11])]);
+    }
+
+    #[test]
+    fn spy_bitmap_feeds_the_reactive_down_state() {
+        let mut r = rig(host_logo(Effect::Reactive));
+        let downs: Arc<Mutex<Vec<bool>>> = Arc::default();
+        let sink = downs.clone();
+        r.e.fx_down = Box::new(move |d| sink.lock().unwrap().push(d));
+        r.take_control();
+        // every bitmap change reports whether ANY captured slot is down
+        r.e.on_mask(1 << 3);
+        r.e.on_mask((1 << 3) | (1 << 5));
+        r.e.on_mask(1 << 3);
+        r.e.on_mask(0);
+        assert_eq!(*downs.lock().unwrap(), [true, true, true, false]);
+        // losing control clears it
+        r.e.on_mask(1 << 3);
+        r.e.on_control_lost();
+        assert!(!downs.lock().unwrap().last().unwrap());
     }
 
     #[test]

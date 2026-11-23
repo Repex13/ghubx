@@ -238,9 +238,15 @@ fn fx_screen(secs: f32) -> i32 {
     let (mut total, mut n) = (0.0f64, 0u32);
     let end = Instant::now() + Duration::from_secs_f32(secs);
     let hex = |c: Option<[u8; 3]>| c.map(|c| format!("#{:02X}{:02X}{:02X}", c[0], c[1], c[2])).unwrap_or_else(|| "failed".into());
+    // per-monitor sanity: rect in virtual-screen coordinates + one FULL capture each
+    let mons = win::monitors();
+    for (i, m) in mons.iter().enumerate() {
+        let name = if i == 0 { "primary".to_string() } else { format!("monitor {}", i + 1) };
+        println!("{name}: {}x{} at ({},{})  full {}", m.2, m.3, m.0, m.1, hex(src.screen(ScreenArea::Full, i)));
+    }
     while Instant::now() < end {
         let t = Instant::now();
-        let (full, center) = (src.screen(ScreenArea::Full), src.screen(ScreenArea::Center));
+        let (full, center) = (src.screen(ScreenArea::Full, 0), src.screen(ScreenArea::Center, 0));
         let ms = t.elapsed().as_secs_f64() * 1000.0;
         total += ms / 2.0;
         n += 1;
@@ -248,7 +254,7 @@ fn fx_screen(secs: f32) -> i32 {
         std::thread::sleep(Duration::from_millis(250));
     }
     let (w, h) = unsafe { (windows::Win32::UI::WindowsAndMessaging::GetSystemMetrics(windows::Win32::UI::WindowsAndMessaging::SM_CXSCREEN), windows::Win32::UI::WindowsAndMessaging::GetSystemMetrics(windows::Win32::UI::WindowsAndMessaging::SM_CYSCREEN)) };
-    println!("avg capture {:.1} ms over {n} samples (screen {w}x{h})", total / n.max(1) as f64);
+    println!("avg capture {:.1} ms over {n} samples (screen {w}x{h}, {} monitor(s))", total / n.max(1) as f64, mons.len());
     0
 }
 
@@ -538,8 +544,8 @@ fn fx_screen_check() -> i32 {
     let diff = |a: [u8; 3], b: [u8; 3]| (0..3).map(|i| (a[i] as i32 - b[i] as i32).abs()).max().unwrap_or(0);
     let mut best = i32::MAX;
     for round in 1..=3 {
-        let (sf, sc) = (src.screen(ScreenArea::Full), src.screen(ScreenArea::Center));
-        let (ef, ec) = (ghubx::fx::exact_screen(ScreenArea::Full), ghubx::fx::exact_screen(ScreenArea::Center));
+        let (sf, sc) = (src.screen(ScreenArea::Full, 0), src.screen(ScreenArea::Center, 0));
+        let (ef, ec) = (ghubx::fx::exact_screen(ScreenArea::Full, 0), ghubx::fx::exact_screen(ScreenArea::Center, 0));
         let (Some(sf), Some(sc), Some(ef), Some(ec)) = (sf, sc, ef, ec) else {
             eprintln!("round {round}: capture failed");
             return 1;
@@ -592,7 +598,7 @@ fn fx_sample(args: &[String]) -> i32 {
     let diff = |a: [u8; 3], b: [u8; 3]| (0..3).map(|i| (a[i] as i32 - b[i] as i32).abs()).max().unwrap_or(0);
     let mut best = i32::MAX;
     for round in 1..=3 {
-        let (s, e) = (src.screen(area), ghubx::fx::exact_screen(area));
+        let (s, e) = (src.screen(area, 0), ghubx::fx::exact_screen(area, 0));
         let pic = ghubx::fx::screen_picture(640, 640).and_then(|(px, w, h)| pic_average(&px, w, h, area));
         let (Some(s), Some(e)) = (s, e) else {
             eprintln!("round {round}: capture failed");
@@ -619,7 +625,7 @@ fn fx_audio(secs: f32) -> i32 {
             println!("{e}");
         }
         match a {
-            Some((p, b)) => println!("peak {p:.3} bass {b:.3}"),
+            Some((p, b, m)) => println!("peak {p:.3} bass {b:.3} mids {m:.3}"),
             None => println!("no audio device"),
         }
         std::thread::sleep(Duration::from_millis(100));

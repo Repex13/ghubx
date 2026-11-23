@@ -402,11 +402,14 @@ pub enum Effect {
     Screen,
     /// Host-driven: the PC follows the audio it plays and writes the colour.
     Audio,
+    /// Host-driven: `color` lights up while a captured button is held (and a
+    /// short hold afterwards), dark otherwise.
+    Reactive,
 }
 
 impl Effect {
     pub fn is_host(self) -> bool {
-        matches!(self, Effect::Screen | Effect::Audio)
+        matches!(self, Effect::Screen | Effect::Audio | Effect::Reactive)
     }
 }
 
@@ -423,7 +426,7 @@ pub enum ScreenArea {
     BottomLeft,
     Bottom,
     BottomRight,
-    /// An own rectangle: x0, y0, x1, y1 in thousandths of the primary screen.
+    /// An own rectangle: x0, y0, x1, y1 in thousandths of the sampled monitor.
     Rect([u16; 4]),
 }
 
@@ -431,7 +434,8 @@ pub enum ScreenArea {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Sample {
     pub name: String,
-    /// x0, y0, x1, y1 in thousandths of the primary screen.
+    /// x0, y0, x1, y1 in thousandths of the monitor the zone samples
+    /// (`HostFx::monitor`; the sample editor always draws the primary one).
     pub rect: [u16; 4],
 }
 
@@ -482,7 +486,7 @@ impl ScreenArea {
         ScreenArea::BottomRight,
     ];
 
-    /// (x0, y0, x1, y1) as fractions of the primary screen.
+    /// (x0, y0, x1, y1) as fractions of the sampled monitor.
     pub fn rect(self) -> (f32, f32, f32, f32) {
         if let ScreenArea::Rect(r) = self {
             return (r[0] as f32 / 1000.0, r[1] as f32 / 1000.0, r[2] as f32 / 1000.0, r[3] as f32 / 1000.0);
@@ -511,11 +515,25 @@ impl ScreenArea {
     }
 }
 
-/// Settings of the two host-driven effects (SCREEN SAMPLER, AUDIO VISUALIZER).
+/// The frequency band the AUDIO VISUALIZER follows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum AudioBand {
+    /// Below ~150 Hz.
+    Bass,
+    /// ~300 Hz to ~3 kHz.
+    Mids,
+    /// Overall peak (the old behaviour).
+    #[default]
+    All,
+}
+
+/// Settings of the host-driven effects (SCREEN SAMPLER, AUDIO VISUALIZER, REACTIVE).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct HostFx {
     pub area: ScreenArea,
+    /// Monitor `area` is measured on: an index into `win::monitors()` (0 = primary).
+    pub monitor: usize,
     /// Colour boost 0..=100.
     pub boost: u8,
     /// 0..=100.
@@ -526,12 +544,19 @@ pub struct HostFx {
     pub auto_sens: bool,
     /// Manual sensitivity 1..=100.
     pub sensitivity: u8,
+    /// Which audio band the visualizer follows.
+    pub band: AudioBand,
+    /// REACTIVE: milliseconds the colour stays up after the last button releases.
+    pub hold_ms: u16,
+    /// Old configs' "pulse on bass only"; migrated to `band == Bass` by
+    /// `Config::sanitize_app` and never written back.
+    #[serde(skip_serializing)]
     pub bass_only: bool,
 }
 
 impl Default for HostFx {
     fn default() -> Self {
-        Self { area: ScreenArea::Full, boost: 50, smoothing: 40, color2: [0, 0, 0], intensity: 50, auto_sens: true, sensitivity: 50, bass_only: false }
+        Self { area: ScreenArea::Full, monitor: 0, boost: 50, smoothing: 40, color2: [0, 0, 0], intensity: 50, auto_sens: true, sensitivity: 50, band: AudioBand::All, hold_ms: 300, bass_only: false }
     }
 }
 
@@ -566,7 +591,8 @@ impl Lighting {
         match self.effect {
             Effect::Off => l[0] = LED_OFF,
             Effect::Screen | Effect::Audio => l[0] = LED_FIXED,
-            Effect::Fixed => {
+            // REACTIVE is host-driven; the device-side fallback is its colour, fixed.
+            Effect::Fixed | Effect::Reactive => {
                 l[0] = LED_FIXED;
                 let s = self.brightness.clamp(1, 100) as u16;
                 for i in 0..3 {
@@ -1118,6 +1144,13 @@ impl Config {
             p.gshift.resize(SLOTS, Assignment::Default);
             if p.dpi.levels.is_empty() {
                 p.dpi = DpiTable::default();
+            }
+            for l in &mut p.lighting {
+                // Migrate pre-band configs: "pulse on bass only" is now a 3-way band pick.
+                if l.host.bass_only {
+                    l.host.band = AudioBand::Bass;
+                    l.host.bass_only = false;
+                }
             }
         }
         for m in &mut a.macros {
@@ -1891,9 +1924,10 @@ mod tests {
     #[test]
     fn host_effects_round_trip_and_old_configs_load() {
         let mut c = Config::default();
-        let host = HostFx { area: ScreenArea::Center, boost: 70, smoothing: 10, color2: [1, 2, 3], intensity: 20, auto_sens: false, sensitivity: 80, bass_only: true };
+        let host = HostFx { area: ScreenArea::Center, monitor: 1, boost: 70, smoothing: 10, color2: [1, 2, 3], intensity: 20, auto_sens: false, sensitivity: 80, band: AudioBand::Bass, hold_ms: 650, ..Default::default() };
         c.apps[0].profiles[0].lighting[1] = Lighting { effect: Effect::Screen, host, ..Default::default() };
         let text = toml::to_string_pretty(&c).unwrap();
+        assert!(!text.contains("bass_only"), "{text}");
         let back: Config = toml::from_str(&text).unwrap();
         assert_eq!(back.apps[0].profiles[0].lighting[1].host, host);
         assert_eq!(back.apps[0].profiles[0].lighting[1].effect, Effect::Screen);
@@ -1901,6 +1935,54 @@ mod tests {
         assert!(!plain.contains("host"), "default host written out");
         let back: Config = toml::from_str(&plain).unwrap();
         assert_eq!(back.apps[0].profiles[0].lighting[0].host, HostFx::default());
+    }
+
+    #[test]
+    fn bass_only_configs_migrate_to_the_band_pick() {
+        // what an old version wrote for "pulse on bass only": `bass_only = true`
+        // inside the host table and no `band` key.
+        let text = r#"
+[[apps]]
+name = "Desktop"
+enabled = true
+active_profile = 0
+
+[[apps.profiles]]
+name = "Default"
+
+[[apps.profiles.lighting]]
+effect = "Cycle"
+color = [0, 184, 252]
+period_ms = 8000
+brightness = 100
+
+[[apps.profiles.lighting]]
+effect = "Audio"
+color = [0, 184, 252]
+period_ms = 8000
+brightness = 100
+
+[apps.profiles.lighting.host]
+area = "Full"
+boost = 50
+smoothing = 40
+color2 = [0, 0, 0]
+intensity = 50
+auto_sens = true
+sensitivity = 50
+bass_only = true
+"#;
+        let mut back: Config = toml::from_str(text).unwrap();
+        back.sanitize();
+        assert_eq!(back.apps[0].profiles[0].lighting[1].host.band, AudioBand::Bass);
+        assert!(!back.apps[0].profiles[0].lighting[1].host.bass_only);
+        // re-saving never writes the legacy key again
+        let out = toml::to_string_pretty(&back).unwrap();
+        assert!(!out.contains("bass_only"), "{out}");
+        // a config that never had the field keeps the default
+        let mut plain = Config::default();
+        plain.sanitize();
+        assert_eq!(plain.apps[0].profiles[0].lighting[1].host.band, AudioBand::All);
     }
 
     #[test]

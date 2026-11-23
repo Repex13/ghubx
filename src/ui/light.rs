@@ -9,13 +9,14 @@ use crate::fx::{hsv_to_rgb, rgb_to_hsv};
 use egui::ecolor::Hsva;
 use egui::{Align2, Color32, CornerRadius, Mesh, Pos2, Rect, Sense, Shape, Stroke, StrokeKind, Ui, pos2, vec2};
 
-pub const EFFECTS: [(&str, Effect); 6] = [
+pub const EFFECTS: [(&str, Effect); 7] = [
     ("OFF", Effect::Off),
     ("FIXED", Effect::Fixed),
     ("CYCLE", Effect::Cycle),
     ("BREATHING", Effect::Breathing),
     ("SCREEN SAMPLER", Effect::Screen),
     ("AUDIO VISUALIZER", Effect::Audio),
+    ("REACTIVE", Effect::Reactive),
 ];
 
 const SWATCHES: [[u8; 3]; 9] = [
@@ -74,7 +75,7 @@ pub fn preview_color(l: &Lighting, t: f64, live: Option<[u8; 3]>) -> Option<Colo
             Color32::from_rgb(r, g, b)
         }
         Effect::Screen => live.map(|c| Color32::from_rgb(c[0], c[1], c[2])).unwrap_or(Color32::from_rgb(0x3A, 0x7B, 0xD5)),
-        Effect::Audio => live.map(|c| Color32::from_rgb(c[0], c[1], c[2])).unwrap_or(Color32::from_rgb(l.color[0], l.color[1], l.color[2]).gamma_multiply(0.6)),
+        Effect::Audio | Effect::Reactive => live.map(|c| Color32::from_rgb(c[0], c[1], c[2])).unwrap_or(Color32::from_rgb(l.color[0], l.color[1], l.color[2]).gamma_multiply(0.6)),
     };
     if l.effect.is_host() && live.is_some() {
         return Some(c);
@@ -139,7 +140,7 @@ impl GhubApp {
 
         let mut y = top + 338.0 + dy;
         let mut new_l = l;
-        if matches!(l.effect, Effect::Fixed | Effect::Breathing) {
+        if matches!(l.effect, Effect::Fixed | Effect::Breathing | Effect::Reactive) {
             if let Some(c) = Self::color_picker(ui, pos2(x0, y), l.color, &mut self.light.picker, "light", &SWATCHES) {
                 new_l.color = c;
             }
@@ -148,6 +149,7 @@ impl GhubApp {
         match l.effect {
             Effect::Screen => y = self.screen_panel(ui, x0, y, panel, zone, l, &mut new_l),
             Effect::Audio => y = self.audio_panel(ui, x0, y, panel, zone, l, &mut new_l),
+            Effect::Reactive => y = self.reactive_panel(ui, x0, y, panel, zone, l, &mut new_l),
             _ => {}
         }
         if matches!(l.effect, Effect::Breathing | Effect::Cycle) {
@@ -160,7 +162,7 @@ impl GhubApp {
             y += 65.0;
         }
         if l.effect.is_host() {
-            if l.effect == Effect::Screen || self.light.advanced {
+            if l.effect == Effect::Screen || l.effect == Effect::Reactive || self.light.advanced {
                 let mut v = l.brightness as f32;
                 if host_slider(ui, panel, x0, y, "EFFECT BRIGHTNESS", &mut v, 1.0..=100.0, ("bright", zone), true) {
                     new_l.brightness = v.round() as u8;
@@ -323,7 +325,33 @@ impl GhubApp {
         if host_slider(ui, panel, x0, y + 174.0 + list_h, "SMOOTHING", &mut v, 0.0..=100.0, ("smooth", zone), true) {
             new_l.host.smoothing = v.round() as u8;
         }
-        y + 220.0 + list_h
+        // MONITOR: which screen the area is read from (index into win::monitors(), 0 = primary)
+        let mons = self.monitors();
+        let my = y + 222.0 + list_h;
+        text(ui, pos2(x0, my), Align2::LEFT_TOP, "MONITOR", Ts::new(Fam::Reg, 12.0, th.label));
+        let n = mons.len().max(1);
+        let pw = ((278.0 - (n - 1) as f32 * 8.0) / n as f32).min(90.0);
+        for (i, _) in mons.iter().enumerate() {
+            let label = if i == 0 { "PRIMARY".to_string() } else { format!("MONITOR {}", i + 1) };
+            if pill(ui, Rect::from_min_size(pos2(x0 + i as f32 * (pw + 8.0), my + 20.0), vec2(pw, 22.0)), &label, l.host.monitor == i, ("monitor", zone, i)).clicked() {
+                new_l.host.monitor = i;
+            }
+        }
+        y + 274.0 + list_h
+    }
+
+    /// REACTIVE controls; returns the y where the next block starts.
+    #[allow(clippy::too_many_arguments)]
+    fn reactive_panel(&mut self, ui: &mut Ui, x0: f32, y: f32, panel: Rect, zone: usize, l: Lighting, new_l: &mut Lighting) -> f32 {
+        let th = pal();
+        para(ui, pos2(x0, y), 278.0, "Lights the zone while a captured button is held, and briefly after it is released.", Ts::new(Fam::Reg, 11.0, th.label));
+        text(ui, pos2(x0, y + 46.0), Align2::LEFT_TOP, "STAYS ON FOR", Ts::new(Fam::Reg, 12.0, th.label));
+        let mut v = l.host.hold_ms as f32;
+        if slider(ui, Rect::from_min_size(pos2(x0, y + 72.0), vec2(180.0, 12.0)), &mut v, 0.0..=2000.0, ("hold", zone)) {
+            new_l.host.hold_ms = ((v / 50.0).round() * 50.0) as u16;
+        }
+        value_label(ui, pos2(panel.right() - 16.0, y + 78.0), &format!("{}", new_l.host.hold_ms), "ms");
+        y + 98.0
     }
 
     /// AUDIO VISUALIZER controls; returns the y where the next block starts.
@@ -368,10 +396,14 @@ impl GhubApp {
         if host_slider(ui, panel, x0, y + 110.0, "MANUAL SENSITIVITY", &mut v, 1.0..=100.0, ("sens", zone), !l.host.auto_sens) && !l.host.auto_sens {
             new_l.host.sensitivity = v.round() as u8;
         }
-        if checkbox(ui, pos2(x0, y + 162.0), "PULSE ON BASS ONLY", l.host.bass_only, true, ("bass-only", zone)).clicked() {
-            new_l.host.bass_only = !l.host.bass_only;
+        // BAND: which part of the spectrum the visualizer follows
+        text(ui, pos2(x0, y + 162.0), Align2::LEFT_TOP, "BAND", Ts::new(Fam::Reg, 12.0, th.label));
+        for (i, (label, b)) in [("BASS", AudioBand::Bass), ("MIDS", AudioBand::Mids), ("ALL", AudioBand::All)].iter().enumerate() {
+            if pill(ui, Rect::from_min_size(pos2(x0 + i as f32 * 78.0, y + 184.0), vec2(70.0, 22.0)), label, l.host.band == *b, ("band", zone, i)).clicked() {
+                new_l.host.band = *b;
+            }
         }
-        y + 188.0
+        y + 212.0
     }
 
     /// Saturation/value square + hue bar + swatches + hex. Returns a new colour.

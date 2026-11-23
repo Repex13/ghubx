@@ -118,7 +118,7 @@ impl Loopback {
         }
     }
 
-    fn drain(&mut self) -> Option<(f32, f32)> {
+    fn drain(&mut self) -> Option<(f32, f32, f32)> {
         unsafe {
             loop {
                 let n = self.capture.GetNextPacketSize().ok()?;
@@ -223,18 +223,18 @@ impl Default for WinSource {
 }
 
 impl Source for WinSource {
-    fn screen(&mut self, area: ScreenArea) -> Option<[u8; 3]> {
+    fn screen(&mut self, area: ScreenArea, monitor: usize) -> Option<[u8; 3]> {
         if self.gdi.is_none() {
             self.gdi = Gdi::new();
         }
-        let r = self.try_screen(area);
+        let r = self.try_screen(area, monitor);
         if r.is_none() {
             self.gdi = None;
         }
         r
     }
 
-    fn audio(&mut self) -> Option<(f32, f32)> {
+    fn audio(&mut self) -> Option<(f32, f32, f32)> {
         self.audio_inner()
     }
 
@@ -263,14 +263,19 @@ fn resolve_default() -> Option<(windows::Win32::Media::Audio::IMMDevice, IAudioM
     }
 }
 
-/// 1:1 linear-light average of an area of the primary screen (every pixel).
-pub fn exact_screen(area: ScreenArea) -> Option<[u8; 3]> {
+/// The virtual-screen rect (x, y, w, h) of monitor `pick` (`win::monitors()`
+/// order, 0 = primary); out-of-range picks and an empty list fall back to the
+/// primary monitor.
+fn monitor_rect(pick: usize) -> (i32, i32, i32, i32) {
+    let primary = unsafe { (0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)) };
+    super::monitor_rect(&crate::win::monitors(), pick, primary)
+}
+
+/// 1:1 linear-light average of an area of monitor `monitor` (every pixel).
+pub fn exact_screen(area: ScreenArea, monitor: usize) -> Option<[u8; 3]> {
     let lut = WinSource::new().lut;
     unsafe {
-        let (sw, sh) = (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN));
-        let (x0, y0, x1, y1) = area.rect();
-        let (sx, sy) = ((x0 * sw as f32) as i32, (y0 * sh as f32) as i32);
-        let (cw, ch) = ((((x1 - x0) * sw as f32) as i32).max(1), (((y1 - y0) * sh as f32) as i32).max(1));
+        let (sx, sy, cw, ch) = super::area_rect_on(monitor_rect(monitor), area);
         let screen = GetDC(None);
         let mem = CreateCompatibleDC(Some(screen));
         let bmp = CreateCompatibleBitmap(screen, cw, ch);
@@ -351,16 +356,13 @@ pub fn screen_picture(max_w: u32, max_h: u32) -> Option<(Vec<u8>, u32, u32)> {
 }
 
 impl WinSource {
-    fn try_screen(&self, area: ScreenArea) -> Option<[u8; 3]> {
+    fn try_screen(&self, area: ScreenArea, monitor: usize) -> Option<[u8; 3]> {
         let g = self.gdi.as_ref()?;
         unsafe {
-            let (sw, sh) = (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN));
-            if sw <= 0 || sh <= 0 {
+            let (sx, sy, cw, ch) = super::area_rect_on(monitor_rect(monitor), area);
+            if cw <= 0 || ch <= 0 {
                 return None;
             }
-            let (x0, y0, x1, y1) = area.rect();
-            let (sx, sy) = ((x0 * sw as f32) as i32, (y0 * sh as f32) as i32);
-            let (cw, ch) = ((((x1 - x0) * sw as f32) as i32).max(1), (((y1 - y0) * sh as f32) as i32).max(1));
             if !StretchBlt(g.mem, 0, 0, W, H, Some(g.screen), sx, sy, cw, ch, SRCCOPY).as_bool() {
                 return None;
             }
@@ -388,7 +390,7 @@ impl WinSource {
         }
     }
 
-    fn audio_inner(&mut self) -> Option<(f32, f32)> {
+    fn audio_inner(&mut self) -> Option<(f32, f32, f32)> {
         if !self.setup_meter() {
             return None;
         }
@@ -409,7 +411,7 @@ impl WinSource {
         if quiet {
             self.close_loopback();
             self.recheck_device(now);
-            return Some((0.0, 0.0));
+            return Some((0.0, 0.0, 0.0));
         }
         if self.loopback.is_none() && self.last_open.is_none_or(|t| t.elapsed() >= RETRY) {
             self.last_open = Some(now);
@@ -426,10 +428,10 @@ impl WinSource {
                 None => {
                     self.close_loopback();
                     self.meter_device = None;
-                    Some((peak, peak))
+                    Some((peak, peak, peak))
                 }
             },
-            None => Some((peak, peak)),
+            None => Some((peak, peak, peak)),
         }
     }
 

@@ -89,11 +89,20 @@ Now that the repo is public (`https://github.com/Repex13/ghubx`):
 - **Diagnostics page** `[done 5e67bc3]` — firmware version, HID++ feature table,
   one-click "copy report" for debugging.
 
-## 5. Lighting extras `[proposed]`
+## 5. Lighting extras `[done TBD]`
 
-- **Multi-monitor Screen Sampler** — pick which monitor a sample watches.
-- **Audio Visualizer bands** — bass on logo, mids on side strip.
-- **Reactive lighting** — light up on button press (host-driven, RAM only).
+- **Multi-monitor Screen Sampler** `[done TBD]` — `win::monitors()` lists every
+  monitor in virtual-screen coordinates (primary first, negative origins kept),
+  `HostFx.monitor` picks which one a zone samples, and the panel gets a MONITOR
+  pill row. `probe fx-screen` prints each monitor's rect + a capture sanity line.
+- **Audio Visualizer bands** `[done TBD]` — `AudioBand::{Bass, Mids, All}`; the
+  loopback `Bands` splitter now also isolates ~300 Hz-3 kHz. The old
+  "PULSE ON BASS ONLY" checkbox became three BAND pills; `bass_only` configs
+  migrate to `band = "Bass"` on load.
+- **Reactive lighting** `[done TBD]` — `Effect::Reactive` (host-driven, RAM
+  only): the zone's colour fades in while any captured button is held and for
+  `host.hold_ms` (default 300 ms) after release; the engine feeds
+  `fx::Handle::set_reactive_down` from every spy-mask change.
 
 ## 6. Bigger items `[proposed / uncertain]`
 

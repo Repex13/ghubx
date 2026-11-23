@@ -1,8 +1,8 @@
 use super::*;
-use crate::profile::HostFx;
+use crate::profile::{AudioBand, HostFx};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-fn sine_bands(freq: f32) -> (f32, f32) {
+fn sine_bands(freq: f32) -> (f32, f32, f32) {
     let mut b = Bands::new(48000);
     let sample = |i: usize| (2.0 * std::f32::consts::PI * freq * i as f32 / 48000.0).sin();
     for i in 0..24000 {
@@ -17,7 +17,7 @@ fn sine_bands(freq: f32) -> (f32, f32) {
 
 #[test]
 fn bands_follow_the_frequency() {
-    let (peak, bass) = sine_bands(60.0);
+    let (peak, bass, _) = sine_bands(60.0);
     assert!((bass - 0.862).abs() < 0.02 && (peak - 1.0).abs() < 0.01, "{peak} {bass}");
     assert!((sine_bands(150.0).1 - 0.50).abs() < 0.02);
     assert!(sine_bands(4000.0).1 < 0.01);
@@ -25,13 +25,24 @@ fn bands_follow_the_frequency() {
     for _ in 0..1000 {
         b.feed(0.0);
     }
-    assert_eq!(b.take(), (0.0, 0.0));
+    assert_eq!(b.take(), (0.0, 0.0, 0.0));
     let mut b = Bands::new(48000);
     for i in 0..4800 {
         b.feed((2.0 * std::f32::consts::PI * 60.0 * i as f32 / 48000.0).sin());
     }
     assert!(b.take().0 > 0.5);
-    assert_eq!(b.take(), (0.0, 0.0));
+    assert_eq!(b.take(), (0.0, 0.0, 0.0));
+}
+
+#[test]
+fn bands_split_bass_mids_and_all() {
+    // a 60 Hz sine is nearly all bass; 1 kHz is nearly all mids; 8 kHz passes neither band
+    let (_, bass60, mids60) = sine_bands(60.0);
+    assert!(bass60 > 0.8 && mids60 < 0.1, "60 Hz: bass {bass60} mids {mids60}");
+    let (peak1k, bass1k, mids1k) = sine_bands(1000.0);
+    assert!(mids1k > 0.6 && bass1k < 0.05, "1 kHz: peak {peak1k} bass {bass1k} mids {mids1k}");
+    let (_, bass8k, mids8k) = sine_bands(8000.0);
+    assert!(bass8k < 0.01 && mids8k < 0.25, "8 kHz: bass {bass8k} mids {mids8k}");
 }
 
 fn close(a: [u8; 3], b: [u8; 3], tol: i32) -> bool {
@@ -82,21 +93,21 @@ fn screen_zone_smoothing() {
     let mut z = ZoneState::default();
     let l = screen_light(HostFx { smoothing: 0, ..Default::default() });
     for c in [[10, 200, 30], [0, 0, 0], [255, 128, 7]] {
-        assert_eq!(z.step(&l, Some(c), None, dt), c);
+        assert_eq!(z.step(&l, Some(c), None, false, dt), c);
     }
     let l = screen_light(HostFx { smoothing: 100, ..Default::default() });
     let mut z = ZoneState::default();
-    assert_eq!(z.step(&l, Some([0, 0, 0]), None, dt), [0, 0, 0]);
+    assert_eq!(z.step(&l, Some([0, 0, 0]), None, false, dt), [0, 0, 0]);
     let mut reds = Vec::new();
     for _ in 0..12 {
-        reds.push(z.step(&l, Some([255, 0, 0]), None, dt)[0]);
+        reds.push(z.step(&l, Some([255, 0, 0]), None, false, dt)[0]);
     }
     assert!((reds[0] as i32 - 20).abs() <= 1 && (reds[1] as i32 - 39).abs() <= 1 && (reds[11] as i32 - 161).abs() <= 1, "{reds:?}");
-    let prev = z.step(&l, Some([255, 0, 0]), None, dt);
-    assert_eq!(z.step(&l, None, None, dt), prev);
+    let prev = z.step(&l, Some([255, 0, 0]), None, false, dt);
+    assert_eq!(z.step(&l, None, None, false, dt), prev);
     let half = Lighting { brightness: 50, ..screen_light(HostFx { smoothing: 0, ..Default::default() }) };
     let mut z = ZoneState::default();
-    assert!(close(z.step(&half, Some([200, 100, 50]), None, dt), [100, 50, 25], 1));
+    assert!(close(z.step(&half, Some([200, 100, 50]), None, false, dt), [100, 50, 25], 1));
 }
 
 #[test]
@@ -104,15 +115,82 @@ fn audio_zone_envelope() {
     let dt = 0.05;
     let l = audio_light(HostFx::default());
     let mut z = ZoneState::default();
-    assert_eq!(z.step(&l, None, Some((0.0, 0.0)), dt), [16, 16, 48]);
-    assert_eq!(z.step(&l, None, Some((1.0, 0.0)), dt), [0, 184, 252]);
-    assert!(close(z.step(&l, None, Some((0.0, 0.0)), dt), [3, 154, 215], 1));
+    assert_eq!(z.step(&l, None, Some((0.0, 0.0, 0.0)), false, dt), [16, 16, 48]);
+    assert_eq!(z.step(&l, None, Some((1.0, 0.0, 0.0)), false, dt), [0, 184, 252]);
+    assert!(close(z.step(&l, None, Some((0.0, 0.0, 0.0)), false, dt), [3, 154, 215], 1));
     let mut z = ZoneState::default();
-    assert_eq!(z.step(&l, None, None, dt), [16, 16, 48]);
-    let b = audio_light(HostFx { bass_only: true, ..Default::default() });
+    assert_eq!(z.step(&l, None, None, false, dt), [16, 16, 48]);
+    let b = audio_light(HostFx { band: AudioBand::Bass, ..Default::default() });
     let mut z = ZoneState::default();
-    assert_eq!(z.step(&b, None, Some((1.0, 0.0)), dt), [16, 16, 48]);
-    assert_eq!(z.step(&b, None, Some((0.0, 1.0)), dt), [0, 184, 252]);
+    assert_eq!(z.step(&b, None, Some((1.0, 0.0, 0.0)), false, dt), [16, 16, 48]);
+    assert_eq!(z.step(&b, None, Some((0.0, 1.0, 0.0)), false, dt), [0, 184, 252]);
+    // MIDS follows only the third component
+    let m = audio_light(HostFx { band: AudioBand::Mids, ..Default::default() });
+    let mut z = ZoneState::default();
+    assert_eq!(z.step(&m, None, Some((1.0, 1.0, 0.0)), false, dt), [16, 16, 48]);
+    assert_eq!(z.step(&m, None, Some((0.0, 0.0, 1.0)), false, dt), [0, 184, 252]);
+}
+
+#[test]
+fn reactive_zone_holds_then_fades() {
+    let dt = 0.05;
+    let l = Lighting { effect: Effect::Reactive, color: [200, 100, 50], brightness: 100, host: HostFx { hold_ms: 200, ..Default::default() }, ..Default::default() };
+    let mut z = ZoneState::default();
+    assert_eq!(z.step(&l, None, None, false, dt), [0, 0, 0]);
+    // a held button fades the colour in fast
+    let c1 = z.step(&l, None, None, true, dt);
+    let c2 = z.step(&l, None, None, true, dt);
+    let c3 = z.step(&l, None, None, true, dt);
+    assert!(c1[0] > 100 && c2[0] > c1[0] && c3[0] > c2[0], "{c1:?} {c2:?} {c3:?}");
+    for _ in 0..20 {
+        z.step(&l, None, None, true, dt);
+    }
+    assert_eq!(z.step(&l, None, None, true, dt), [200, 100, 50]);
+    // release: hold_ms keeps it lit, then it fades out
+    assert!(z.step(&l, None, None, false, dt)[0] > 195);
+    assert!(z.step(&l, None, None, false, dt)[0] > 195);
+    let mut last = 255i32;
+    let mut went_out = false;
+    for _ in 0..40 {
+        let c = z.step(&l, None, None, false, dt)[0] as i32;
+        assert!(c <= last, "fade must be monotonic: {last} -> {c}");
+        last = c;
+        if c == 0 {
+            went_out = true;
+            break;
+        }
+    }
+    assert!(went_out, "reactive zone never faded out");
+    // brightness scales the colour
+    let half = Lighting { brightness: 50, ..l };
+    let mut z = ZoneState::default();
+    for _ in 0..20 {
+        z.step(&half, None, None, true, dt);
+    }
+    assert!(close(z.step(&half, None, None, true, dt), [100, 50, 25], 1));
+}
+
+#[test]
+fn monitor_rect_maps_area_fractions() {
+    // primary at origin
+    assert_eq!(area_rect_on((0, 0, 1920, 1080), ScreenArea::Full), (0, 0, 1920, 1080));
+    assert_eq!(area_rect_on((0, 0, 1920, 1080), ScreenArea::Center), (640, 360, 640, 360));
+    // a second monitor to the right of a 1920-wide primary
+    assert_eq!(area_rect_on((1920, 0, 2560, 1440), ScreenArea::Center), (1920 + 853, 480, 853, 480));
+    assert_eq!(area_rect_on((1920, 0, 2560, 1440), ScreenArea::TopLeft), (1920, 0, 853, 480));
+    // a monitor LEFT of the primary has negative virtual coordinates
+    assert_eq!(area_rect_on((-1280, 0, 1280, 1024), ScreenArea::BottomRight), (-1280 + 853, 682, 426, 341));
+    // own rectangle (thousandths of the monitor)
+    assert_eq!(area_rect_on((1920, 0, 2560, 1440), ScreenArea::Rect([500, 0, 1000, 500])), (1920 + 1280, 0, 1280, 720));
+    // degenerate picks still produce at least 1 px
+    let (_, _, cw, ch) = area_rect_on((0, 0, 1, 1), ScreenArea::Center);
+    assert!(cw >= 1 && ch >= 1);
+    // out-of-range picks and an empty list fall back to the primary rect
+    let mons = [(0, 0, 1920, 1080), (1920, 0, 2560, 1440)];
+    assert_eq!(monitor_rect(&mons, 0, (0, 0, 1, 1)), (0, 0, 1920, 1080));
+    assert_eq!(monitor_rect(&mons, 1, (0, 0, 1, 1)), (1920, 0, 2560, 1440));
+    assert_eq!(monitor_rect(&mons, 9, (0, 0, 1, 1)), (0, 0, 1920, 1080));
+    assert_eq!(monitor_rect(&[], 3, (0, 0, 1, 1)), (0, 0, 1, 1));
 }
 
 #[test]
@@ -132,14 +210,14 @@ struct Fake {
 }
 
 impl Source for Fake {
-    fn screen(&mut self, area: ScreenArea) -> Option<[u8; 3]> {
+    fn screen(&mut self, area: ScreenArea, _monitor: usize) -> Option<[u8; 3]> {
         self.screens.fetch_add(1, Ordering::SeqCst);
         self.areas.lock().unwrap().push(area);
         Some([200, 10, 10])
     }
 
-    fn audio(&mut self) -> Option<(f32, f32)> {
-        Some((0.0, 0.0))
+    fn audio(&mut self) -> Option<(f32, f32, f32)> {
+        Some((0.0, 0.0, 0.0))
     }
 
     fn release(&mut self) {

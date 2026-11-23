@@ -1,8 +1,9 @@
-//! Host-driven lighting effects (SCREEN SAMPLER, AUDIO VISUALIZER): a thread computes a colour
-//! from the screen or from the audio the PC plays and hands it to the IO thread through a
-//! `Mailbox`. The IO thread writes it as a RAM-only fixed colour (never to flash).
+//! Host-driven lighting effects (SCREEN SAMPLER, AUDIO VISUALIZER, REACTIVE): a thread
+//! computes a colour from the screen, from the audio the PC plays, or from the buttons
+//! the spy map sees, and hands it to the IO thread through a `Mailbox`. The IO thread
+//! writes it as a RAM-only fixed colour (never to flash).
 
-use crate::profile::{Effect, Lighting, ScreenArea};
+use crate::profile::{AudioBand, Effect, Lighting, ScreenArea};
 use std::collections::HashMap;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
@@ -66,10 +67,14 @@ pub struct ZoneState {
     cur: Option<[f32; 3]>,
     env: f32,
     reference: f32,
+    /// REACTIVE: seconds left of the after-release hold (`HostFx::hold_ms`).
+    relax: f32,
 }
 
 impl ZoneState {
-    pub fn step(&mut self, l: &Lighting, screen: Option<[u8; 3]>, audio: Option<(f32, f32)>, dt: f32) -> [u8; 3] {
+    /// `audio` is (peak, bass, mids) of the last tick; `down` is "any captured
+    /// button held" for REACTIVE.
+    pub fn step(&mut self, l: &Lighting, screen: Option<[u8; 3]>, audio: Option<(f32, f32, f32)>, down: bool, dt: f32) -> [u8; 3] {
         let k = l.brightness.clamp(1, 100) as f32 / 100.0;
         let rgb = match l.effect {
             Effect::Screen => {
@@ -85,10 +90,31 @@ impl ZoneState {
                 self.cur.unwrap_or([0.0; 3])
             }
             Effect::Audio => {
-                let x = audio.map(|(peak, bass)| if l.host.bass_only { bass } else { peak }).unwrap_or(0.0);
+                let x = audio
+                    .map(|(peak, bass, mids)| match l.host.band {
+                        AudioBand::Bass => bass,
+                        AudioBand::Mids => mids,
+                        AudioBand::All => peak,
+                    })
+                    .unwrap_or(0.0);
                 let level = audio_level(x, &mut self.reference, l.host.auto_sens, l.host.sensitivity, l.host.intensity, dt);
                 self.env = level.max(self.env * (-dt / 0.25).exp());
                 [0, 1, 2].map(|i| l.host.color2[i] as f32 + (l.color[i] as f32 - l.host.color2[i] as f32) * self.env)
+            }
+            Effect::Reactive => {
+                // Lit while a button is down and for `hold_ms` after the release
+                // (the envelope still fades in during the hold, so a quick tap
+                // reaches full brightness); dark otherwise.
+                let active = if down {
+                    self.relax = l.host.hold_ms as f32 / 1000.0;
+                    true
+                } else {
+                    self.relax = (self.relax - dt).max(0.0);
+                    self.relax > 0.0
+                };
+                let tau = if active { 0.05 } else { 0.22 };
+                self.env += ((if active { 1.0 } else { 0.0 }) - self.env) * (1.0 - (-dt / tau).exp());
+                [0, 1, 2].map(|i| l.color[i] as f32 * self.env.clamp(0.0, 1.0))
             }
             _ => [0.0; 3],
         };
@@ -96,33 +122,53 @@ impl ZoneState {
     }
 }
 
-/// Peak and bass (two cascaded one-pole low-passes at 150 Hz) of a mono stream.
+/// Peak, bass and mids of a mono stream. Bass is two cascaded one-pole
+/// low-passes at 150 Hz; mids (~300 Hz - ~3 kHz) is two cascaded one-pole
+/// high-passes at 300 Hz followed by two cascaded one-pole low-passes at 3 kHz.
 pub struct Bands {
-    coef: f32,
+    /// One-pole coefficients for 150 Hz (bass LP), 300 Hz (mids HP), 3 kHz (mids LP).
+    c150: f32,
+    c300: f32,
+    c3k: f32,
     lp1: f32,
     lp2: f32,
+    hp1: f32,
+    hp2: f32,
+    ml1: f32,
+    ml2: f32,
     peak: f32,
     bass: f32,
+    mids: f32,
 }
 
 impl Bands {
     pub fn new(sample_rate: u32) -> Self {
-        let coef = 1.0 - (-2.0 * std::f32::consts::PI * 150.0 / sample_rate.max(1) as f32).exp();
-        Self { coef, lp1: 0.0, lp2: 0.0, peak: 0.0, bass: 0.0 }
+        let r = sample_rate.max(1) as f32;
+        let coef = |hz: f32| 1.0 - (-2.0 * std::f32::consts::PI * hz / r).exp();
+        Self { c150: coef(150.0), c300: coef(300.0), c3k: coef(3000.0), lp1: 0.0, lp2: 0.0, hp1: 0.0, hp2: 0.0, ml1: 0.0, ml2: 0.0, peak: 0.0, bass: 0.0, mids: 0.0 }
     }
 
     pub fn feed(&mut self, mono: f32) {
         self.peak = self.peak.max(mono.abs());
-        self.lp1 += self.coef * (mono - self.lp1);
-        self.lp2 += self.coef * (self.lp1 - self.lp2);
+        self.lp1 += self.c150 * (mono - self.lp1);
+        self.lp2 += self.c150 * (self.lp1 - self.lp2);
         self.bass = self.bass.max(self.lp2.abs());
+        // one-pole high-pass = input minus its low-pass, twice for a steeper knee
+        self.hp1 += self.c300 * (mono - self.hp1);
+        let h1 = mono - self.hp1;
+        self.hp2 += self.c300 * (h1 - self.hp2);
+        let h2 = h1 - self.hp2;
+        self.ml1 += self.c3k * (h2 - self.ml1);
+        self.ml2 += self.c3k * (self.ml1 - self.ml2);
+        self.mids = self.mids.max(self.ml2.abs());
     }
 
-    /// (peak, bass) since the last call, each 0..=1. Resets the maxima, keeps the filter state.
-    pub fn take(&mut self) -> (f32, f32) {
-        let out = (self.peak.min(1.0), self.bass.min(1.0));
+    /// (peak, bass, mids) since the last call, each 0..=1. Resets the maxima, keeps the filter state.
+    pub fn take(&mut self) -> (f32, f32, f32) {
+        let out = (self.peak.min(1.0), self.bass.min(1.0), self.mids.min(1.0));
         self.peak = 0.0;
         self.bass = 0.0;
+        self.mids = 0.0;
         out
     }
 }
@@ -150,10 +196,13 @@ impl Mailbox {
 // ---------------------------------------------------------------- sources
 
 pub trait Source {
-    /// Average colour of that part of the primary screen, averaged in linear light. None if the capture failed.
-    fn screen(&mut self, area: ScreenArea) -> Option<[u8; 3]>;
-    /// (peak, bass) of what the PC played since the last call, each 0..=1. None if there is no audio source.
-    fn audio(&mut self) -> Option<(f32, f32)>;
+    /// Average colour of `area` (fractions) on monitor `monitor` (index into
+    /// `win::monitors()`, 0 = primary), averaged in linear light. None if the
+    /// capture failed.
+    fn screen(&mut self, area: ScreenArea, monitor: usize) -> Option<[u8; 3]>;
+    /// (peak, bass, mids) of what the PC played since the last call, each 0..=1.
+    /// None if there is no audio source.
+    fn audio(&mut self) -> Option<(f32, f32, f32)>;
     /// Called once when the thread stops needing audio or the whole source.
     fn release(&mut self) {}
     /// What the source is (for the probe).
@@ -188,6 +237,8 @@ struct Shared {
     device: [Option<Lighting>; 2],
     preview: [Option<(Lighting, Instant)>; 2],
     preview_out: [Option<[u8; 3]>; 2],
+    /// Any captured button is currently held (the engine feeds every spy-mask change).
+    down: bool,
 }
 
 struct Inner {
@@ -227,6 +278,12 @@ impl Handle {
         }
     }
 
+    /// Feed the "any captured button is down" flag the REACTIVE effect reads.
+    /// Cheap to call with the same value again.
+    pub fn set_reactive_down(&self, down: bool) {
+        self.0.shared.lock().unwrap_or_else(|e| e.into_inner()).down = down;
+    }
+
     /// Keep a live preview for this zone; it is forgotten 500 ms after its last call. The same `Lighting`
     /// again does not reset the zone's state.
     pub fn preview_zone(&self, zone: usize, l: Lighting) {
@@ -253,13 +310,13 @@ fn run(inner: Arc<Inner>, mut src: Box<dyn Source>, timing: Timing) {
     let mut dev_sent: [Option<([u8; 3], Instant)>; 2] = [None, None];
     let mut pv_cfg: [Option<Lighting>; 2] = [None; 2];
     let mut pv_state = [ZoneState::default(), ZoneState::default()];
-    let mut cache: HashMap<ScreenArea, Option<[u8; 3]>> = HashMap::new();
+    let mut cache: HashMap<(usize, ScreenArea), Option<[u8; 3]>> = HashMap::new();
     let mut last_capture: Option<Instant> = None;
     let mut had_any = false;
     let mut had_audio = false;
     let mut last = Instant::now();
     loop {
-        let (device, preview) = {
+        let (device, preview, down) = {
             let mut g = inner.shared.lock().unwrap_or_else(|e| e.into_inner());
             loop {
                 let now = Instant::now();
@@ -282,7 +339,7 @@ fn run(inner: Arc<Inner>, mut src: Box<dyn Source>, timing: Timing) {
                 g = inner.wake.wait(g).unwrap_or_else(|e| e.into_inner());
                 last = Instant::now();
             }
-            (g.device, g.preview.map(|p| p.map(|(l, _)| l)))
+            (g.device, g.preview.map(|p| p.map(|(l, _)| l)), g.down)
         };
         let now = Instant::now();
         let dt = now.duration_since(last).as_secs_f32().min(0.5);
@@ -311,19 +368,19 @@ fn run(inner: Arc<Inner>, mut src: Box<dyn Source>, timing: Timing) {
             cache.clear();
             last_capture = Some(now);
         }
-        let mut screen = |area: ScreenArea, src: &mut Box<dyn Source>| *cache.entry(area).or_insert_with(|| src.screen(area));
+        let mut screen = |area: ScreenArea, monitor: usize, src: &mut Box<dyn Source>| *cache.entry((monitor, area)).or_insert_with(|| src.screen(area, monitor));
         let audio = if need_audio { src.audio() } else { None };
 
         let mut dev_out: [Option<[u8; 3]>; 2] = [None; 2];
         let mut pv_out: [Option<[u8; 3]>; 2] = [None; 2];
         for z in 0..2 {
             if let Some(l) = &device[z] {
-                let s = if l.effect == Effect::Screen { screen(l.host.area, &mut src) } else { None };
-                dev_out[z] = Some(dev_state[z].step(l, s, audio, dt));
+                let s = if l.effect == Effect::Screen { screen(l.host.area, l.host.monitor, &mut src) } else { None };
+                dev_out[z] = Some(dev_state[z].step(l, s, audio, down, dt));
             }
             if let Some(l) = &preview[z] {
-                let s = if l.effect == Effect::Screen { screen(l.host.area, &mut src) } else { None };
-                pv_out[z] = Some(pv_state[z].step(l, s, audio, dt));
+                let s = if l.effect == Effect::Screen { screen(l.host.area, l.host.monitor, &mut src) } else { None };
+                pv_out[z] = Some(pv_state[z].step(l, s, audio, down, dt));
             }
         }
 
@@ -362,10 +419,26 @@ pub fn win_source() -> Box<dyn Source> {
     Box::new(win_src::WinSource::new())
 }
 
-/// Exact (1:1) linear-light average of an area of the primary screen, for checking the sampler.
+/// Pixel rect (x, y, w, h) an `area` covers on a monitor given as (x, y, w, h).
+/// Pure — used by the GDI capture paths and unit-tested against monitor layouts.
+pub fn area_rect_on(mon: (i32, i32, i32, i32), area: ScreenArea) -> (i32, i32, i32, i32) {
+    let (mx, my, mw, mh) = mon;
+    let (x0, y0, x1, y1) = area.rect();
+    (mx + (x0 * mw as f32) as i32, my + (y0 * mh as f32) as i32, (((x1 - x0) * mw as f32) as i32).max(1), (((y1 - y0) * mh as f32) as i32).max(1))
+}
+
+/// The (x, y, w, h) monitor rect for index `pick` (`win::monitors()` order,
+/// 0 = primary); falls back to the primary monitor for out-of-range picks or an
+/// empty list. Pure given the monitor list.
+pub fn monitor_rect(monitors: &[(i32, i32, i32, i32)], pick: usize, primary: (i32, i32, i32, i32)) -> (i32, i32, i32, i32) {
+    monitors.get(pick).copied().or_else(|| monitors.first().copied()).unwrap_or(primary)
+}
+
+/// Exact (1:1) linear-light average of an area of monitor `monitor` (index into
+/// `win::monitors()`, 0 = primary), for checking the sampler.
 #[cfg(windows)]
-pub fn exact_screen(area: ScreenArea) -> Option<[u8; 3]> {
-    win_src::exact_screen(area)
+pub fn exact_screen(area: ScreenArea, monitor: usize) -> Option<[u8; 3]> {
+    win_src::exact_screen(area, monitor)
 }
 
 /// The primary screen scaled to fit `max_w` x `max_h` (aspect kept), as RGBA bytes — the
@@ -379,10 +452,10 @@ pub fn screen_picture(max_w: u32, max_h: u32) -> Option<(Vec<u8>, u32, u32)> {
 pub fn win_source() -> Box<dyn Source> {
     struct None_;
     impl Source for None_ {
-        fn screen(&mut self, _: ScreenArea) -> Option<[u8; 3]> {
+        fn screen(&mut self, _: ScreenArea, _: usize) -> Option<[u8; 3]> {
             None
         }
-        fn audio(&mut self) -> Option<(f32, f32)> {
+        fn audio(&mut self) -> Option<(f32, f32, f32)> {
             None
         }
     }

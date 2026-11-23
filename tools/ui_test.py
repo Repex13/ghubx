@@ -572,13 +572,27 @@ def lighting_audio_visualizer():
         SETTLE, "click 240 346",  # BACKGROUND COLOR tab
         SETTLE, "dclick 345 524", "text 101030", "key Enter",  # picker hex field
         SETTLE, "click 130 596",  # ADVANCED SETTINGS row
-        SETTLE, "click 150 507",  # PULSE ON BASS ONLY
+        SETTLE, "click 140 533",  # BAND: BASS pill
         SETTLE, "click 150 427",  # AUTO-ADJUST SENSITIVITY
         SETTLE])
     ok_run(res)
     l1 = prof(res.cfg)["lighting"][1]
     h = l1["host"]
-    must(l1["effect"] == "Audio" and h["color2"] == [16, 16, 48] and h["bass_only"] is True and h["auto_sens"] is False, l1)
+    must(l1["effect"] == "Audio" and h["color2"] == [16, 16, 48] and h["band"] == "Bass" and h["auto_sens"] is False, l1)
+
+
+@scenario
+def reactive_assign():
+    res = run_script("reactive_assign", LIGHT_LOGO_EFFECT_MENU + [
+        "click 110 466",  # menu: REACTIVE
+        SETTLE, "click 122 502",  # red preset swatch
+        SETTLE, "click 182 612",  # STAYS ON FOR slider at about 50 %
+        SETTLE])
+    ok_run(res)
+    l1 = prof(res.cfg)["lighting"][1]
+    h = l1.get("host", {})
+    must(l1["effect"] == "Reactive" and l1["color"] == [255, 0, 0], l1)
+    must(900 <= h.get("hold_ms", 300) <= 1100, h)
 
 
 def sampler_seed_config() -> str:
@@ -665,7 +679,7 @@ def wdl_switch():
 
 @scenario
 def effect_menu_order():
-    names = ["Off", "Fixed", "Cycle", "Breathing", "Screen", "Audio"]
+    names = ["Off", "Fixed", "Cycle", "Breathing", "Screen", "Audio", "Reactive"]
     for i, want in enumerate(names):
         res = run_script(f"effect_menu_order_{i}", ["wait 1500", HOME_TILE, SETTLE, RAIL_LIGHT, SETTLE,
                                                     "click 194 224",  # LOGO tab

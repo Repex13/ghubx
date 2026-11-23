@@ -131,6 +131,9 @@ fn spawn_stash(rx: Receiver<UiEvent>, stash: Stash) {
     });
 }
 
+/// `(x, y, w, h)` virtual-screen rects from `win::monitors()`, primary first.
+pub(crate) type MonitorRects = Vec<(i32, i32, i32, i32)>;
+
 pub struct GhubApp {
     pub(crate) cfg: Arc<Mutex<Config>>,
     pub(crate) eng: Sender<EngineMsg>,
@@ -183,6 +186,8 @@ pub struct GhubApp {
     pub(crate) script_editor: Option<lua_editor::ScriptEditor>,
     pub(crate) slot_saved_msg: Option<String>,
     pub(crate) wdl_cache: Option<(Instant, Option<bool>)>,
+    /// `win::monitors()` (x, y, w, h rects, primary first), refreshed at most every 2 s.
+    pub(crate) monitors_cache: Option<(Instant, MonitorRects)>,
     pub(crate) slot_menu: Option<onboard::SlotMenu>,
     pub(crate) slot_details: Option<usize>,
     /// ASSIGN PROFILES overlay state (Device Settings ON-BOARD column).
@@ -284,6 +289,7 @@ impl GhubApp {
             script_editor: None,
             slot_saved_msg: None,
             wdl_cache: None,
+            monitors_cache: None,
             slot_menu: None,
             slot_details: None,
             slot_assign: None,
@@ -312,7 +318,7 @@ impl GhubApp {
             "home" | "dropdown" => Route::Home,
             "assign" | "assign2" | "gshift" | "macro" | "macroname" | "macrotype" | "macroseq" | "macroedit" | "macrorec" | "macromenu" | "macrocustom" | "macrofold" | "macroconfirm" | "macroaction" | "select" | "keys" | "actions" | "obsactions" | "obsnew" | "p180warn" | "gamecmds" | "p180game" => Route::Device(DevTab::Assignments),
             "sens" => Route::Device(DevTab::Sensitivity),
-            "light" | "fixed" | "wdl" | "effectmenu" | "screenfx" | "screenfxmine" | "sampleedit" | "audiofx" | "audiofxadv" => Route::Device(DevTab::Lighting),
+            "light" | "fixed" | "wdl" | "effectmenu" | "screenfx" | "screenfxmine" | "sampleedit" | "audiofx" | "audiofxadv" | "reactivefx" => Route::Device(DevTab::Lighting),
             "devset" | "onboard" | "slotmenu" | "slotconfirm" | "slotdetails" | "slotassign" => Route::DeviceSettings,
             "profiles" | "appdetail" | "addgame" | "scriptedit" => Route::Profiles,
             "settings" | "sleep" => Route::Settings(0),
@@ -358,23 +364,24 @@ impl GhubApp {
             drop(c);
             self.light.zone = 1;
         }
-        if matches!(page, "effectmenu" | "screenfx" | "audiofx" | "audiofxadv") {
-            use crate::profile::{Effect, HostFx, Lighting, ScreenArea};
+        if matches!(page, "effectmenu" | "screenfx" | "audiofx" | "audiofxadv" | "reactivefx") {
+            use crate::profile::{AudioBand, Effect, HostFx, Lighting, ScreenArea};
             let mut c = self.cfg.lock().unwrap();
             c.current_profile_mut().lighting[1] = match page {
                 "effectmenu" => Lighting { effect: Effect::Fixed, color: [0x00, 0xB8, 0xFC], period_ms: 4000, brightness: 80, ..Default::default() },
                 "screenfx" => Lighting { effect: Effect::Screen, host: HostFx { area: ScreenArea::Center, boost: 50, smoothing: 40, ..Default::default() }, ..Default::default() },
+                "reactivefx" => Lighting { effect: Effect::Reactive, color: [0xFF, 0x6A, 0x00], brightness: 90, ..Default::default() },
                 _ => Lighting {
                     effect: Effect::Audio,
                     color: [0x00, 0xB8, 0xFC],
-                    host: HostFx { color2: [0x10, 0x10, 0x30], auto_sens: page != "audiofxadv", bass_only: page == "audiofxadv", ..Default::default() },
+                    host: HostFx { color2: [0x10, 0x10, 0x30], auto_sens: page != "audiofxadv", band: if page == "audiofxadv" { AudioBand::Bass } else { AudioBand::All }, ..Default::default() },
                     ..Default::default()
                 },
             };
             drop(c);
             self.light.zone = 1;
             self.light.set_advanced(page == "audiofxadv");
-            if page == "effectmenu" {
+            if page == "effectmenu" || page == "reactivefx" {
                 self.overlay = Some(Overlay::Effect(Rect::from_min_size(pos2(88.0, 289.0), vec2(70.0, 26.0))));
             }
         }
@@ -517,6 +524,19 @@ impl GhubApp {
 
     pub(crate) fn cfg(&self) -> Config {
         self.cfg.lock().unwrap().clone()
+    }
+
+    /// Monitor rects (x, y, w, h) in virtual-screen coordinates, primary first;
+    /// re-enumerated at most every 2 s (a monitor plug/unplug shows up quickly).
+    pub(crate) fn monitors(&mut self) -> MonitorRects {
+        match &self.monitors_cache {
+            Some((at, m)) if at.elapsed().as_secs() < 2 => m.clone(),
+            _ => {
+                let m = crate::win::monitors();
+                self.monitors_cache = Some((Instant::now(), m.clone()));
+                m
+            }
+        }
     }
 
     pub(crate) fn scripted(&self) -> bool {
@@ -736,7 +756,7 @@ impl GhubApp {
             let l = cfg.current().1.lighting[1];
             match l.effect {
                 Effect::Fixed | Effect::Breathing if l.color.iter().max().copied().unwrap_or(0) >= 40 => Some(l.color),
-                Effect::Screen | Effect::Audio => {
+                Effect::Screen | Effect::Audio | Effect::Reactive => {
                     ctx.request_repaint_after(Duration::from_millis(100));
                     self.fx.as_ref().and_then(|h| {
                         h.preview_zone(1, l);
