@@ -1,0 +1,20 @@
+- main "DEVIN startup animation" [ref=f2e2]:
+  - generic [aria-hidden] [ref=f2e3]:
+    - generic [ref=f2e5]:
+      - generic [ref=f2e10]:
+        - generic [ref=f2e11]:
+          - generic [ref=f2e12]: SYNC RATIO
+          - generic [ref=f2e13]: 33.88%
+        - generic [ref=f2e16]: INITIALIZING
+      - generic [ref=f2e17]: 幽灵来到…你身边～
+      - generic [ref=f2e18]: RESONANCE / AEMEATH
+      - generic [ref=f2e19]: 00:03:11
+    - generic:
+      - generic:
+        - generic: 飞行雪绒
+        - generic: DEVIN INITIALIZE / TYPE-0
+    - generic [ref=f2e24]:
+      - generic [ref=f2e25]: "> MAGI SYSTEM · CASPER / MELCHIOR / BALTHASAR"
+      - generic [ref=f2e26]: "> loading renderer surface ........ ok"
+      - generic [ref=f2e27]: "> entry plug depth 21.6 ........... ok"
+      - generic [ref=f2e28]: "> LCL pressure nominal"

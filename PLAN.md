@@ -65,6 +65,17 @@ Now that the repo is public (`https://github.com/Repex13/ghubx`):
   process-wide atomic `SetSender` overwrites; the Lua worker's
   `RealInput` reads it for every `MoveMouse` dispatch, so a sender pick
   changed after spawn applies without rebuilding the worker.
+- **Auto-script 180 (MAKE A LUA 180)** `[done TBD]` — the P180 panel writes
+  the calibrated turn into the active profile's Lua script as an editable
+  `OnEvent` block bound to a chosen G-key (G4..G11 -> `G_PRESSED` arg), the
+  "logitech method" (`MoveMouseRelative`). `profile::p180_lua_snippet` emits
+  a managed `--[==[ GHUB-X PERFECT 180 ]==]` block with the same
+  `total*i/step` spread `engine::perfect_180` uses; `p180_lua_inject`
+  replaces it between its markers, seeds or appends an `OnEvent`, or splices
+  it before the existing `OnEvent`'s matching `end` — counted on the lexed
+  keyword stream (comments/strings can't fake `end`s) and rebound to the
+  signature's own parameter names. Same injected input as the built-in
+  action, just scriptable — blocked games still need HARDWARE FLICK.
 
 ## 3. Remaining G HUB parity gaps
 

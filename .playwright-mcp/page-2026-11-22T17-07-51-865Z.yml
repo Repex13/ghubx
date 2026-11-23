@@ -1,0 +1,19 @@
+- main "DEVIN startup animation" [ref=e2]:
+  - generic [aria-hidden] [ref=e3]:
+    - generic [ref=e5]:
+      - generic [ref=e10]:
+        - generic [ref=e11]:
+          - generic [ref=e12]: SYNC RATIO
+          - generic [ref=e13]: 00.00%
+        - generic [ref=e15]: INITIALIZING
+      - generic [ref=e16]: lib
+      - generic [ref=e17]: 00:00:00
+    - generic:
+      - generic:
+        - generic: HUNTER X HUNTER PHANTOM TROUPE EDITION
+        - generic: DEVIN INITIALIZE
+    - generic [ref=e22]:
+      - generic [ref=e23]: "> Devin launcher ready"
+      - generic [ref=e24]: "> theme: lib"
+      - generic [ref=e25]: "> artwork 888 × 500"
+      - generic [ref=e26]: "> opening Devin"

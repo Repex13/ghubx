@@ -1,0 +1,50 @@
+- generic [active] [ref=f64e1]:
+  - generic [ref=f64e3]:
+    - generic [ref=f64e5]:
+      - generic [ref=f64e6]:
+        - button "menu" [ref=f64e7] [cursor=pointer]
+        - generic:
+          - generic:
+            - heading [level=1]
+      - generic [ref=f64e10]:
+        - button [ref=f64e12] [cursor=pointer]
+        - progressbar "Loading Navigation" [ref=f64e16]
+    - link [ref=f64e27] [cursor=pointer]:
+      - /url: /
+    - generic [ref=f64e31]:
+      - progressbar "loading" [ref=f64e36]
+      - generic [ref=f64e39]:
+        - generic [ref=f64e41]:
+          - link:
+            - /url: https://www.roblox.com/info/terms
+          - text: ·
+          - link:
+            - /url: https://www.roblox.com/info/privacy
+          - text: ·
+          - link:
+            - /url: https://www.roblox.com/info/accessibility
+          - text: ·
+          - link:
+            - /url: https://www.roblox.com/info/help
+          - text: ·
+          - button [ref=f64e42] [cursor=pointer]
+        - generic [ref=f64e44]:
+          - link [ref=f64e45] [cursor=pointer]:
+            - /url: https://x.com/Roblox
+            - button "X" [ref=f64e46]
+          - link [ref=f64e49] [cursor=pointer]:
+            - /url: https://www.facebook.com/Roblox/
+            - button "Facebook" [ref=f64e50]
+          - link [ref=f64e53] [cursor=pointer]:
+            - /url: https://www.linkedin.com/company/roblox
+            - button "LinkedIn" [ref=f64e54]
+          - link [ref=f64e57] [cursor=pointer]:
+            - /url: https://www.instagram.com/roblox/
+            - button "Instagram" [ref=f64e58]
+          - link [ref=f64e62] [cursor=pointer]:
+            - /url: https://www.youtube.com/@RobloxCreators
+            - button "YouTube" [ref=f64e63]
+        - link [ref=f64e67] [cursor=pointer]:
+          - /url: https://roblox.com/my/account
+          - button "English" [ref=f64e68]
+  - alert [ref=f64e73]

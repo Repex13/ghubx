@@ -1,0 +1,8 @@
+[     435ms] [ERROR] Permissions policy violation: unload is not allowed in this document. @ https://static.canva.com/web/5b6837185efa56f3.sentry_browser.js?br=1:1
+[     473ms] [LOG] ripple[DAHbrqdfO-k:vnYf8FWwg76G6e4iE(1795389016364-0,0)]: subscribing to channel @ https://static.canva.com/web/5b6837185efa56f3.sentry_browser.js?br=1:1
+[     484ms] [INFO] ripple[DAHbrqdfO-k:vnYf8FWwg76G6e4iE(1795389016364-0,0)]: unsubscribing from channel @ https://static.canva.com/web/5b6837185efa56f3.sentry_browser.js?br=1:1
+[     485ms] [INFO] websocket_client: 1795389332642 connecting... @ https://static.canva.com/web/5b6837185efa56f3.sentry_browser.js?br=1:1
+[     824ms] [INFO] websocket_client: connected @ https://static.canva.com/web/5b6837185efa56f3.sentry_browser.js?br=1:1
+[     824ms] [LOG] ripple[DAHbrqdfO-k:vnYf8FWwg76G6e4iE(1795389016364-0,0)]: subscribing to channel @ https://static.canva.com/web/5b6837185efa56f3.sentry_browser.js?br=1:1
+[     824ms] [INFO] websocket_client: status CONNECTED @ https://static.canva.com/web/5b6837185efa56f3.sentry_browser.js?br=1:1
+[     898ms] [INFO] websocket_client: request id a5eba2ff7db1ab82 @ https://static.canva.com/web/5b6837185efa56f3.sentry_browser.js?br=1:1

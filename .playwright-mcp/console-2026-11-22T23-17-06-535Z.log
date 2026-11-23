@@ -1,0 +1,7 @@
+[     122ms] [ERROR] Permissions policy violation: unload is not allowed in this document. @ https://assets.create.roblox.com/838cfd9ebc22d2c70a944f6710de0f61eddfffa0/_next/static/chunks/0jj22kc54d2ab.js:2
+[     399ms] [WARNING] [From context - ] The translation key 'Heading.ApiExtensions' doesn't exist for locale 'en-US'! @ https://assets.create.roblox.com/838cfd9ebc22d2c70a944f6710de0f61eddfffa0/_next/static/chunks/0jj22kc54d2ab.js:2
+[     400ms] [WARNING] [From context - ol] The translation key 'undefined' doesn't exist for locale 'en-US'! @ https://assets.create.roblox.com/838cfd9ebc22d2c70a944f6710de0f61eddfffa0/_next/static/chunks/0jj22kc54d2ab.js:2
+[     400ms] [WARNING] [From context - ol] The translation key 'undefined' doesn't exist for locale 'en-US'! @ https://assets.create.roblox.com/838cfd9ebc22d2c70a944f6710de0f61eddfffa0/_next/static/chunks/0jj22kc54d2ab.js:2
+[     423ms] [WARNING] [From context - ] The translation key 'Heading.ApiExtensions' doesn't exist for locale 'en-US'! @ https://assets.create.roblox.com/838cfd9ebc22d2c70a944f6710de0f61eddfffa0/_next/static/chunks/0jj22kc54d2ab.js:2
+[     425ms] [WARNING] [From context - ol] The translation key 'undefined' doesn't exist for locale 'en-US'! @ https://assets.create.roblox.com/838cfd9ebc22d2c70a944f6710de0f61eddfffa0/_next/static/chunks/0jj22kc54d2ab.js:2
+[     425ms] [WARNING] [From context - ol] The translation key 'undefined' doesn't exist for locale 'en-US'! @ https://assets.create.roblox.com/838cfd9ebc22d2c70a944f6710de0f61eddfffa0/_next/static/chunks/0jj22kc54d2ab.js:2

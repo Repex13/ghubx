@@ -588,6 +588,114 @@ fn vk_fallback(n: &str) -> Option<u16> {
     None
 }
 
+// ------------------------------------------------------------------ lexing
+// Shared by the editor's syntax colouring (`ui::lua_editor::highlight_lua`)
+// and the managed-block injection (`profile::p180_lua_inject`).
+
+/// What a byte range of a Lua script is coloured/recognised as.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Tok {
+    /// Identifiers, operators, punctuation — plain text colour.
+    Plain,
+    /// `-- line` and `--[[ block ]]` / `--[==[ block ]==]` comments.
+    Comment,
+    /// `".."` / `'..'` strings and `[[ .. ]]` / `[=[ .. ]=]` long strings.
+    Str,
+    /// Lua keywords (primary colour, like G HUB's editor).
+    Key,
+    /// Number literals.
+    Num,
+}
+
+const KEYWORDS: &[&str] = &["function", "end", "if", "then", "else", "elseif", "for", "while", "do", "local", "return", "true", "false", "nil", "and", "or", "not", "repeat", "until", "in", "break"];
+
+fn is_ident(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
+/// `[` `=`* `[` — the level of a Lua long bracket at `i`, if there is one.
+fn long_bracket(b: &[u8], i: usize) -> Option<usize> {
+    if b.get(i) != Some(&b'[') {
+        return None;
+    }
+    let mut n = i + 1;
+    while b.get(n) == Some(&b'=') {
+        n += 1;
+    }
+    (b.get(n) == Some(&b'[')).then_some(n - i - 1)
+}
+
+/// `]` `=`*level `]` — whether a long-bracket close sits at `i`.
+fn bracket_close(b: &[u8], i: usize, level: usize) -> bool {
+    b.get(i) == Some(&b']') && (i + 1..=i + level).all(|j| b.get(j) == Some(&b'=')) && b.get(i + level + 1) == Some(&b']')
+}
+
+/// Lex `s` into (start byte, end byte, class) spans covering the whole text.
+/// Kept deliberately small: Lua's real grammar is out of scope, but long
+/// comments and long strings are covered at every `--[=*[`/`[=*[` level so a
+/// keyword inside one can never be mistaken for code.
+pub fn lex_lua(s: &str) -> Vec<(usize, usize, Tok)> {
+    let b = s.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < b.len() {
+        let start = i;
+        let kind = if b[i] == b'-' && b.get(i + 1) == Some(&b'-') {
+            if let Some(lv) = long_bracket(b, i + 2) {
+                // long comment --[[ ... ]] / --[==[ ... ]==]
+                i += lv + 4;
+                while i < b.len() && !bracket_close(b, i, lv) {
+                    i += 1;
+                }
+                i = (i + lv + 2).min(b.len());
+            } else {
+                while i < b.len() && b[i] != b'\n' {
+                    i += 1;
+                }
+            }
+            Tok::Comment
+        } else if b[i] == b'"' || b[i] == b'\'' {
+            let q = b[i];
+            i += 1;
+            while i < b.len() && b[i] != q && b[i] != b'\n' {
+                i += if b[i] == b'\\' { 2 } else { 1 };
+            }
+            i = (i + 1).min(b.len());
+            Tok::Str
+        } else if let Some(lv) = long_bracket(b, i) {
+            // long string [[ ... ]] / [=[ ... ]=]
+            i += lv + 2;
+            while i < b.len() && !bracket_close(b, i, lv) {
+                i += 1;
+            }
+            i = (i + lv + 2).min(b.len());
+            Tok::Str
+        } else if b[i].is_ascii_digit() || (b[i] == b'.' && b.get(i + 1).is_some_and(|c| c.is_ascii_digit())) {
+            while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'.' || b[i] == b'_') {
+                i += 1;
+            }
+            Tok::Num
+        } else if b[i].is_ascii_alphabetic() || b[i] == b'_' {
+            while i < b.len() && is_ident(b[i]) {
+                i += 1;
+            }
+            if KEYWORDS.contains(&&s[start..i]) { Tok::Key } else { Tok::Plain }
+        } else {
+            i += 1;
+            Tok::Plain
+        };
+        if let Some((_, e, k)) = out.last_mut()
+            && *k == kind
+            && *e == start
+        {
+            *e = i;
+        } else {
+            out.push((start, i, kind));
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 pub(crate) fn spy() -> (Handle, Receiver<LuaMsg>) {
     let (tx, rx) = channel();
@@ -885,6 +993,99 @@ mod tests {
         h2.send(LuaMsg::Script(r#"function OnEvent(e, a) AbortMacro() end"#.into()));
         h2.send(LuaMsg::Event("X", 0));
         assert!(wait_for(|| lines(&h2).iter().any(|l| l.contains("AbortMacro is not supported"))), "{:?}", lines(&h2));
+    }
+
+    // ---------------------------------------------------------------- lexer
+
+    fn kinds(s: &str) -> Vec<(Tok, &str)> {
+        lex_lua(s).into_iter().map(|(a, b, k)| (k, &s[a..b])).collect()
+    }
+
+    #[test]
+    fn comments_strings_keywords_and_numbers_class() {
+        let got = kinds("-- note\nfunction f(x) return \"a\\'b\" .. 's' .. 1.5 .. 0xFF .. not_a end");
+        assert!(got.contains(&(Tok::Comment, "-- note")), "{got:?}");
+        assert!(got.contains(&(Tok::Key, "function")), "{got:?}");
+        assert!(got.contains(&(Tok::Key, "return")), "{got:?}");
+        assert!(got.contains(&(Tok::Str, "\"a\\'b\"")), "{got:?}");
+        assert!(got.contains(&(Tok::Str, "'s'")), "{got:?}");
+        assert!(got.contains(&(Tok::Num, "1.5")), "{got:?}");
+        assert!(got.contains(&(Tok::Num, "0xFF")), "{got:?}");
+        assert!(got.iter().any(|(k, s)| *k == Tok::Plain && s.contains("not_a")), "{got:?}");
+        assert!(got.contains(&(Tok::Key, "end")), "{got:?}");
+    }
+
+    #[test]
+    fn long_comment_covers_block() {
+        let got = kinds("a = 1 --[[ skipped \"x\" 999 ]] b = 2");
+        assert!(got.contains(&(Tok::Comment, "--[[ skipped \"x\" 999 ]]")), "{got:?}");
+        // unterminated still colours as a comment
+        let got = kinds("x --[[ open");
+        assert_eq!(got.last(), Some(&(Tok::Comment, "--[[ open")));
+        // unterminated string too
+        let got = kinds("y = \"no end");
+        assert_eq!(got.last(), Some(&(Tok::Str, "\"no end")));
+    }
+
+    #[test]
+    fn leveled_long_brackets_class() {
+        // --[==[ ... ]==] is one comment at any level
+        let got = kinds("--[==[ managed\nfunction end\n]==]\nend");
+        assert!(got.contains(&(Tok::Comment, "--[==[ managed\nfunction end\n]==]")), "{got:?}");
+        assert_eq!(got.last(), Some(&(Tok::Key, "end")), "{got:?}");
+        // a level-0 ]] does not close a level-2 block
+        let got = kinds("--[==[ a ]] b ]==] x");
+        assert!(matches!(got.first(), Some((Tok::Comment, _))), "{got:?}");
+        assert_eq!(got.last(), Some(&(Tok::Plain, " x")), "{got:?}");
+        // long strings keep keywords out of the code stream
+        let got = kinds("s = [[function end]] .. [=[if end]=]");
+        assert!(got.contains(&(Tok::Str, "[[function end]]")), "{got:?}");
+        assert!(got.contains(&(Tok::Str, "[=[if end]=]")), "{got:?}");
+        assert!(!got.iter().any(|(k, _)| *k == Tok::Key), "{got:?}");
+        // but a plain [ stays plain
+        let got = kinds("t[1] = 2");
+        assert!(!got.iter().any(|(k, _)| *k == Tok::Str), "{got:?}");
+    }
+
+    #[test]
+    fn generated_p180_script_moves_the_baked_counts() {
+        let rec = Arc::new(Rec::default());
+        let h = spawn(&rec);
+        let script = crate::profile::p180_lua_inject("", &crate::profile::p180_lua_snippet(5, 2348, 12, 60));
+        h.send(LuaMsg::Script(script));
+        h.send(LuaMsg::Event("G_PRESSED", 5));
+        assert!(wait_for(|| rec.events().len() == 12), "{:?}", rec.events());
+        let evs = rec.events();
+        let total: i32 = evs
+            .iter()
+            .map(|e| match e {
+                Ev::Move(dx, dy) => {
+                    assert_eq!(*dy, 0);
+                    *dx
+                }
+                other => panic!("unexpected event {other:?}"),
+            })
+            .sum();
+        assert_eq!(total, 2348, "{evs:?}");
+        // a different G doesn't fire
+        h.send(LuaMsg::Event("G_PRESSED", 4));
+        std::thread::sleep(Duration::from_millis(150));
+        assert_eq!(rec.events().len(), 12, "{:?}", rec.events());
+    }
+
+    #[test]
+    fn injected_p180_block_keeps_the_users_handler() {
+        let rec = Arc::new(Rec::default());
+        let h = spawn(&rec);
+        let script = crate::profile::p180_lua_inject(
+            r#"function OnEvent(e, a)
+                if e == "G_PRESSED" then OutputLogMessage("mine " .. a) end
+            end"#,
+            &crate::profile::p180_lua_snippet(4, 40, 4, 4),
+        );
+        h.send(LuaMsg::Script(script));
+        h.send(LuaMsg::Event("G_PRESSED", 4));
+        assert!(wait_for(|| rec.events().len() == 4 && lines(&h).iter().any(|l| l == "mine 4")), "{:?} {:?}", rec.events(), lines(&h));
     }
 
     #[test]

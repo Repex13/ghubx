@@ -1,0 +1,75 @@
+[   36854ms] [ERROR] Permissions policy violation: unload is not allowed in this document. @ https://js.rbxcdn.com/4a852a00887fba4111ace530165b849dbf020ab8a943a976a9e919fb500eb311-Sentry.js:6
+[   36903ms] [ERROR] WebSocket connection to 'wss://realtime.roblox.com/' failed: Error during WebSocket handshake: Unexpected response code: 404 @ https://js.rbxcdn.com/95aad7f7b1cdec3dc13afca4629d0d47d8fb30a40e4210acaca32664fe47b9ba-RealTime.js:6
+[   36904ms] [INFO] [2026-11-22T23:10:56.674Z] Information: (WebSockets transport) There was an error with the transport. @ https://js.rbxcdn.com/4a852a00887fba4111ace530165b849dbf020ab8a943a976a9e919fb500eb311-Sentry.js:6
+[   36904ms] [ERROR] [2026-11-22T23:10:56.674Z] Error: Failed to start the connection: Error: WebSocket failed to connect. The connection could not be found on the server, either the endpoint may not be a SignalR endpoint, the connection ID is not present on the server, or there is a proxy blocking WebSockets. If you have multiple servers check that sticky sessions are enabled. @ https://js.rbxcdn.com/4a852a00887fba4111ace530165b849dbf020ab8a943a976a9e919fb500eb311-Sentry.js:6
+[   37028ms] [ERROR] Failed to load resource: the server responded with a status of 403 () @ https://apis.roblox.com/rotating-client-service/v1/heartbeat?pathname=%2F&urlLocale=en_us:1
+[   39022ms] [WARNING] An error occurred! For more details, see the full error text at https://go.apollo.dev/c/err#%7B%22version%22%3A%223.14.0%22%2C%22message%22%3A104%2C%22args%22%3A%5B%22ApolloClient%22%2C%22connectToDevTools%22%2C%22Please%20use%20%60devtools.enabled%60%20instead.%22%5D%7D @ https://js.rbxcdn.com/4a852a00887fba4111ace530165b849dbf020ab8a943a976a9e919fb500eb311-Sentry.js:6
+[   39041ms] [WARNING] The namespace Purchasing.PurchaseDialog was not found @ https://js.rbxcdn.com/4a852a00887fba4111ace530165b849dbf020ab8a943a976a9e919fb500eb311-Sentry.js:6
+[   39050ms] [LOG] 
+      _______      _________      _____       ______     _
+     / _____ \    |____ ____|    / ___ \     | ____ \   | |
+    / /     \_\       | |       / /   \ \    | |   \ \  | |
+    | |               | |      / /     \ \   | |   | |  | |
+    \ \______         | |      | |     | |   | |___/ /  | |
+     \______ \        | |      | |     | |   |  ____/   | |
+            \ \       | |      | |     | |   | |        | |
+     _      | |       | |      \ \     / /   | |        |_|
+    \ \_____/ /       | |       \ \___/ /    | |         _
+     \_______/        |_|        \_____/     |_|        |_|
+
+     Keep your account safe! Do not send any information from
+     here to anyone or paste any text here.
+
+     If someone is asking you to copy or paste text here then
+     you're giving someone access to your account, your gear,
+     and your Robux.
+
+     To learn more about keeping your account safe you can go to
+
+     https://www.roblox.com/info/account-safety @ https://js.rbxcdn.com/4a852a00887fba4111ace530165b849dbf020ab8a943a976a9e919fb500eb311-Sentry.js:6
+[   40461ms] [ERROR] `DialogContent` requires a `DialogTitle` for the component to be accessible for screen reader users.
+
+If you want to hide the `DialogTitle`, you can wrap it with our VisuallyHidden component.
+
+For more information, see https://radix-ui.com/primitives/docs/components/dialog @ https://js.rbxcdn.com/4a852a00887fba4111ace530165b849dbf020ab8a943a976a9e919fb500eb311-Sentry.js:6
+[   42686ms] [ERROR] Permissions policy violation: unload is not allowed in this document. @ https://js.rbxcdn.com/4a852a00887fba4111ace530165b849dbf020ab8a943a976a9e919fb500eb311-Sentry.js:6
+[   42709ms] [ERROR] WebSocket connection to 'wss://realtime.roblox.com/' failed: Error during WebSocket handshake: Unexpected response code: 404 @ https://js.rbxcdn.com/95aad7f7b1cdec3dc13afca4629d0d47d8fb30a40e4210acaca32664fe47b9ba-RealTime.js:6
+[   42709ms] [INFO] [2026-11-22T23:11:02.480Z] Information: (WebSockets transport) There was an error with the transport. @ https://js.rbxcdn.com/4a852a00887fba4111ace530165b849dbf020ab8a943a976a9e919fb500eb311-Sentry.js:6
+[   42710ms] [ERROR] [2026-11-22T23:11:02.480Z] Error: Failed to start the connection: Error: WebSocket failed to connect. The connection could not be found on the server, either the endpoint may not be a SignalR endpoint, the connection ID is not present on the server, or there is a proxy blocking WebSockets. If you have multiple servers check that sticky sessions are enabled. @ https://js.rbxcdn.com/4a852a00887fba4111ace530165b849dbf020ab8a943a976a9e919fb500eb311-Sentry.js:6
+[   51679ms] [WARNING] An error occurred! For more details, see the full error text at https://go.apollo.dev/c/err#%7B%22version%22%3A%223.14.0%22%2C%22message%22%3A104%2C%22args%22%3A%5B%22ApolloClient%22%2C%22connectToDevTools%22%2C%22Please%20use%20%60devtools.enabled%60%20instead.%22%5D%7D @ https://js.rbxcdn.com/4a852a00887fba4111ace530165b849dbf020ab8a943a976a9e919fb500eb311-Sentry.js:6
+[   51710ms] [WARNING] An error occurred! For more details, see the full error text at https://go.apollo.dev/c/err#%7B%22version%22%3A%223.14.0%22%2C%22message%22%3A104%2C%22args%22%3A%5B%22ApolloClient%22%2C%22connectToDevTools%22%2C%22Please%20use%20%60devtools.enabled%60%20instead.%22%5D%7D @ https://js.rbxcdn.com/4a852a00887fba4111ace530165b849dbf020ab8a943a976a9e919fb500eb311-Sentry.js:6
+[   51716ms] [WARNING] The namespace Purchasing.PurchaseDialog was not found @ https://js.rbxcdn.com/4a852a00887fba4111ace530165b849dbf020ab8a943a976a9e919fb500eb311-Sentry.js:6
+[   51752ms] [ERROR] Failed to load resource: the server responded with a status of 403 () @ https://apis.roblox.com/rotating-client-service/v1/register:1
+[   51918ms] [WARNING] [sdui-core] RegistryCompositionWarning: SDUI registry module "sdui-common" provided fallback components "205", but the more specific module "sdui-client" already defined it; the fallback definition was ignored @ https://js.rbxcdn.com/4a852a00887fba4111ace530165b849dbf020ab8a943a976a9e919fb500eb311-Sentry.js:6
+[   51919ms] [WARNING] [sdui-core] RegistryCompositionWarning: SDUI registry module "sdui-common" provided fallback components "500", but the more specific module "sdui-client" already defined it; the fallback definition was ignored @ https://js.rbxcdn.com/4a852a00887fba4111ace530165b849dbf020ab8a943a976a9e919fb500eb311-Sentry.js:6
+[   51988ms] [LOG] 
+      _______      _________      _____       ______     _
+     / _____ \    |____ ____|    / ___ \     | ____ \   | |
+    / /     \_\       | |       / /   \ \    | |   \ \  | |
+    | |               | |      / /     \ \   | |   | |  | |
+    \ \______         | |      | |     | |   | |___/ /  | |
+     \______ \        | |      | |     | |   |  ____/   | |
+            \ \       | |      | |     | |   | |        | |
+     _      | |       | |      \ \     / /   | |        |_|
+    \ \_____/ /       | |       \ \___/ /    | |         _
+     \_______/        |_|        \_____/     |_|        |_|
+
+     Keep your account safe! Do not send any information from
+     here to anyone or paste any text here.
+
+     If someone is asking you to copy or paste text here then
+     you're giving someone access to your account, your gear,
+     and your Robux.
+
+     To learn more about keeping your account safe you can go to
+
+     https://www.roblox.com/info/account-safety @ https://js.rbxcdn.com/4a852a00887fba4111ace530165b849dbf020ab8a943a976a9e919fb500eb311-Sentry.js:6
+[   52275ms] [ERROR] Failed to load resource: the server responded with a status of 403 () @ https://apis.roblox.com/user-heartbeats-api/pulse:1
+[   52279ms] [LOG] Account Security Prompt: No assignments were retrieved @ https://js.rbxcdn.com/4a852a00887fba4111ace530165b849dbf020ab8a943a976a9e919fb500eb311-Sentry.js:6
+[   52324ms] [ERROR] Failed to load resource: the server responded with a status of 403 () @ https://apis.roblox.com/platform-chat-api/v1/get-chat-moderation-statuses:1
+[   55641ms] [ERROR] Permissions policy violation: unload is not allowed in this document. @ https://js.rbxcdn.com/4a852a00887fba4111ace530165b849dbf020ab8a943a976a9e919fb500eb311-Sentry.js:6
+[   55712ms] [INFO] [2026-11-22T23:11:15.482Z] Information: WebSocket connected to wss://realtime-signalr.roblox.com/userhub. @ https://js.rbxcdn.com/4a852a00887fba4111ace530165b849dbf020ab8a943a976a9e919fb500eb311-Sentry.js:6
+[   55784ms] [ERROR] Failed to load resource: the server responded with a status of 403 () @ https://apis.roblox.com/realtime-replay-api/v1/replay:1
+[   59679ms] [ERROR] Failed to load resource: the server responded with a status of 403 () @ https://apis.roblox.com/rotating-client-service/v1/heartbeat?pathname=%2Fhome:1
+[   59958ms] [ERROR] Failed to load resource: the server responded with a status of 403 () @ https://apis.roblox.com/rotating-client-service/v1/submit:1
+[   59976ms] [ERROR] Failed to load resource: the server responded with a status of 403 () @ https://apis.roblox.com/rotating-client-service/v1/submit:1

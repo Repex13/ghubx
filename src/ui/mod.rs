@@ -320,7 +320,7 @@ impl GhubApp {
     fn prepare_shot(&mut self, page: &str) {
         self.route = match page {
             "home" | "dropdown" => Route::Home,
-            "assign" | "assign2" | "gshift" | "macro" | "macroname" | "macrotype" | "macroseq" | "macroedit" | "macrorec" | "macromenu" | "macrocustom" | "macrofold" | "macroconfirm" | "macroaction" | "select" | "keys" | "actions" | "obsactions" | "obsnew" | "p180warn" | "p180blocked" | "gamecmds" | "p180game" => Route::Device(DevTab::Assignments),
+            "assign" | "assign2" | "gshift" | "macro" | "macroname" | "macrotype" | "macroseq" | "macroedit" | "macrorec" | "macromenu" | "macrocustom" | "macrofold" | "macroconfirm" | "macroaction" | "select" | "keys" | "actions" | "obsactions" | "obsnew" | "p180warn" | "p180blocked" | "p180lua" | "gamecmds" | "p180game" => Route::Device(DevTab::Assignments),
             "sens" => Route::Device(DevTab::Sensitivity),
             "light" | "fixed" | "wdl" | "effectmenu" | "screenfx" | "screenfxmine" | "sampleedit" | "audiofx" | "audiofxadv" | "reactivefx" => Route::Device(DevTab::Lighting),
             "devset" | "onboard" | "slotmenu" | "slotconfirm" | "slotdetails" | "slotassign" => Route::DeviceSettings,
@@ -336,7 +336,7 @@ impl GhubApp {
         self.asg.tab = match page {
             "macro" | "macroname" | "macrotype" | "macroseq" | "macroedit" | "macrorec" | "macromenu" | "macrocustom" | "macrofold" | "macroconfirm" | "macroaction" => 3,
             "keys" => 1,
-            "actions" | "p180game" | "p180warn" | "p180blocked" | "obsactions" | "obsnew" => 2,
+            "actions" | "p180game" | "p180warn" | "p180blocked" | "p180lua" | "obsactions" | "obsnew" => 2,
             _ => 0,
         };
         if page == "select" {
@@ -365,6 +365,10 @@ impl GhubApp {
             c.extras.p180_sender = 1;
             drop(c);
             self.asg.scroll_to = Some(200.0);
+        }
+        if page == "p180lua" {
+            // the MAKE A LUA 180 row + the TEST button under it
+            self.asg.scroll_to = Some(240.0);
         }
         if page == "obsactions" || page == "obsnew" {
             self.asg.collapsed.remove("OBS");

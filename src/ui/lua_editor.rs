@@ -242,83 +242,7 @@ impl GhubApp {
 
 // ------------------------------------------------------------------ syntax colouring
 
-/// What a byte range of a Lua script is coloured as.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Tok {
-    /// Identifiers, operators, punctuation — plain text colour.
-    Plain,
-    /// `-- line` and `--[[ block ]]` comments.
-    Comment,
-    /// `".."` and `'..'` strings.
-    Str,
-    /// Lua keywords (primary colour, like G HUB's editor).
-    Key,
-    /// Number literals.
-    Num,
-}
-
-const KEYWORDS: &[&str] = &["function", "end", "if", "then", "else", "elseif", "for", "while", "do", "local", "return", "true", "false", "nil", "and", "or", "not", "repeat", "until", "in", "break"];
-
-fn is_ident(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || b == b'_'
-}
-
-/// Lex `s` into (start byte, end byte, class) spans covering the whole text.
-/// Kept deliberately small: Lua's real grammar (nested long brackets etc.)
-/// is out of scope for colouring.
-pub fn lex_lua(s: &str) -> Vec<(usize, usize, Tok)> {
-    let b = s.as_bytes();
-    let mut out = Vec::new();
-    let mut i = 0;
-    while i < b.len() {
-        let start = i;
-        let kind = if b[i] == b'-' && b.get(i + 1) == Some(&b'-') {
-            if b.get(i + 2) == Some(&b'[') && b.get(i + 3) == Some(&b'[') {
-                // long comment --[[ ... ]]
-                i += 4;
-                while i < b.len() && !(b[i] == b']' && b.get(i + 1) == Some(&b']')) {
-                    i += 1;
-                }
-                i = (i + 2).min(b.len());
-            } else {
-                while i < b.len() && b[i] != b'\n' {
-                    i += 1;
-                }
-            }
-            Tok::Comment
-        } else if b[i] == b'"' || b[i] == b'\'' {
-            let q = b[i];
-            i += 1;
-            while i < b.len() && b[i] != q && b[i] != b'\n' {
-                i += if b[i] == b'\\' { 2 } else { 1 };
-            }
-            i = (i + 1).min(b.len());
-            Tok::Str
-        } else if b[i].is_ascii_digit() || (b[i] == b'.' && b.get(i + 1).is_some_and(|c| c.is_ascii_digit())) {
-            while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'.' || b[i] == b'_') {
-                i += 1;
-            }
-            Tok::Num
-        } else if b[i].is_ascii_alphabetic() || b[i] == b'_' {
-            while i < b.len() && is_ident(b[i]) {
-                i += 1;
-            }
-            if KEYWORDS.contains(&&s[start..i]) { Tok::Key } else { Tok::Plain }
-        } else {
-            i += 1;
-            Tok::Plain
-        };
-        if let Some((_, e, k)) = out.last_mut()
-            && *k == kind
-            && *e == start
-        {
-            *e = i;
-        } else {
-            out.push((start, i, kind));
-        }
-    }
-    out
-}
+use crate::lua::{Tok, lex_lua};
 
 /// The `egui::TextEdit::layouter` job for a Lua script (egui demo pattern):
 /// comments muted, strings amber, keywords primary, numbers bright.
@@ -341,36 +265,6 @@ pub fn highlight_lua(s: &str, pal: &Palette) -> egui::text::LayoutJob {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn kinds(s: &str) -> Vec<(Tok, &str)> {
-        lex_lua(s).into_iter().map(|(a, b, k)| (k, &s[a..b])).collect()
-    }
-
-    #[test]
-    fn comments_strings_keywords_and_numbers_class() {
-        let got = kinds("-- note\nfunction f(x) return \"a\\'b\" .. 's' .. 1.5 .. 0xFF .. not_a end");
-        assert!(got.contains(&(Tok::Comment, "-- note")), "{got:?}");
-        assert!(got.contains(&(Tok::Key, "function")), "{got:?}");
-        assert!(got.contains(&(Tok::Key, "return")), "{got:?}");
-        assert!(got.contains(&(Tok::Str, "\"a\\'b\"")), "{got:?}");
-        assert!(got.contains(&(Tok::Str, "'s'")), "{got:?}");
-        assert!(got.contains(&(Tok::Num, "1.5")), "{got:?}");
-        assert!(got.contains(&(Tok::Num, "0xFF")), "{got:?}");
-        assert!(got.iter().any(|(k, s)| *k == Tok::Plain && s.contains("not_a")), "{got:?}");
-        assert!(got.contains(&(Tok::Key, "end")), "{got:?}");
-    }
-
-    #[test]
-    fn long_comment_covers_block() {
-        let got = kinds("a = 1 --[[ skipped \"x\" 999 ]] b = 2");
-        assert!(got.contains(&(Tok::Comment, "--[[ skipped \"x\" 999 ]]")), "{got:?}");
-        // unterminated still colours as a comment
-        let got = kinds("x --[[ open");
-        assert_eq!(got.last(), Some(&(Tok::Comment, "--[[ open")));
-        // unterminated string too
-        let got = kinds("y = \"no end");
-        assert_eq!(got.last(), Some(&(Tok::Str, "\"no end")));
-    }
 
     #[test]
     fn highlight_job_has_the_right_sections() {

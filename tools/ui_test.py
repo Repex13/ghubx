@@ -556,6 +556,28 @@ def p180_sender():
     must(not res.cfg["extras"].get("p180_blocked"), res.cfg["extras"])
 
 
+# MAKE A LUA 180 row after `scroll -240` (matches the p180lua shot page):
+# G pill at x~237, ADD TO SCRIPT at x~310, row y~670.
+P180_LUA_G = "click 237 670"  # cycles G4..G11 (seed leaves it on G5)
+P180_LUA_ADD = "click 310 670"
+
+
+@scenario
+def p180_lua():
+    """ADD TO SCRIPT injects a managed G-key block; re-clicking replaces it."""
+    open_actions = device_assign() + [TAB_ACTIONS, SETTLE, "scroll 230 500 -240", SETTLE]
+    res = run_script("p180_lua_add", open_actions + ["shot {shots}/row.png", P180_LUA_ADD, SETTLE])
+    ok_run(res)
+    s = prof(res.cfg).get("script", "")
+    must("function OnEvent(event, arg)" in s and "MoveMouseRelative" in s, s)
+    must('arg == 5' in s and s.count("GHUB-X PERFECT 180") == 2, s)
+    # pick G6, add twice: the managed block is replaced, never duplicated
+    res = run_script("p180_lua_swap", open_actions + [P180_LUA_G, SETTLE, P180_LUA_ADD, SETTLE, P180_LUA_ADD, SETTLE])
+    ok_run(res)
+    s = prof(res.cfg).get("script", "")
+    must(s.count("GHUB-X PERFECT 180") == 2 and 'arg == 6' in s and 'arg == 5' not in s, s)
+
+
 @scenario
 def sensitivity():
     res = run_script("sensitivity", ["wait 1500", HOME_TILE, SETTLE, RAIL_SENS, SETTLE,

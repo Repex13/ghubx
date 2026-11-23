@@ -15,6 +15,8 @@ use std::time::Instant;
 const TABS: [&str; 5] = ["COMMANDS", "KEYS", "ACTIONS", "MACROS", "SYSTEM"];
 /// Extra height the HARDWARE FLICK section adds to the Perfect 180 box.
 const FLICK_H: f32 = 132.0;
+/// Extra height the MAKE A LUA 180 row adds under the SENDER row.
+const LUA_H: f32 = 48.0;
 
 pub struct AsgState {
     pub tab: usize,
@@ -31,6 +33,9 @@ pub struct AsgState {
     pub p180_counts_text: String,
     /// HARDWARE FLICK: physical swipe length in cm (slider, 0.5 steps).
     pub flick_cm: f32,
+    /// MAKE A LUA 180: the G-key the generated OnEvent block binds to
+    /// (`G_PRESSED` arg 4..=11; primary buttons can't be OnEvent args).
+    pub p180_g: u8,
     pub game_sens: Option<(usize, Option<crate::games::GameSens>)>,
     /// Game sens behind the selected Perfect 180 preset pill (READ FROM GAME).
     pub read_sens: Option<(usize, Option<crate::games::GameSens>)>,
@@ -46,7 +51,7 @@ impl Default for AsgState {
             tab: 0, search: String::new(), side: false, gshift: false, selected: None,
             collapsed: HashSet::new(), mods: 0, editor: None, last_tab: None,
             launch_path: String::new(), p180_sens_text: String::new(), p180_counts_text: String::new(),
-            flick_cm: 2.5, game_sens: None, read_sens: None, obs_form: None, scroll_to: None, obs_refresh: None,
+            flick_cm: 2.5, p180_g: 5, game_sens: None, read_sens: None, obs_form: None, scroll_to: None, obs_refresh: None,
         }
     }
 }
@@ -619,7 +624,7 @@ impl GhubApp {
         // preset's parser actually finds a settings file)
         let read_sens = self.read_sens_for(shown_game);
         let read_h = if read_sens.is_some() { 18.0 } else { 0.0 };
-        let box_r = Rect::from_min_size(top, vec2(278.0, 366.0 + extra + warn_h + sender_h + FLICK_H + read_h));
+        let box_r = Rect::from_min_size(top, vec2(278.0, 366.0 + extra + warn_h + sender_h + LUA_H + FLICK_H + read_h));
         ui.painter().rect_filled(box_r, CornerRadius::same(8), pal().surface_hi);
         let x = box_r.left() + 12.0;
         text(ui, pos2(x, box_r.top() + 12.0), Align2::LEFT_TOP, "PERFECT 180", Ts::new(Fam::Bold, 12.0, pal().text));
@@ -781,7 +786,31 @@ impl GhubApp {
             });
         }
 
-        let br = Rect::from_min_size(pos2(x, row(4) + 20.0 + sender_h), vec2(254.0, 26.0));
+        // MAKE A LUA 180: the same injected turn as an editable OnEvent block
+        // in the profile's script, bound to a G-key (G4..G11 fire `G_PRESSED`;
+        // the primary buttons can't be OnEvent args). The managed markers let
+        // a re-click REPLACE the block instead of piling up copies; the
+        // engine's script watcher picks the edit up on the next ConfigChanged.
+        let ly = row(4) + 20.0 + sender_h;
+        text(ui, pos2(x, ly + 13.0), Align2::LEFT_CENTER, "MAKE A LUA 180", t_small_label());
+        let gr = Rect::from_min_size(pos2(x + 112.0, ly + 2.0), vec2(42.0, 22.0));
+        if pill_sized(ui, gr, &format!("G{}", self.asg.p180_g), true, 11.0, "p180-lua-g").clicked() {
+            let g = self.asg.p180_g + 1;
+            self.asg.p180_g = if g > 11 { 4 } else { g };
+        }
+        let ar = Rect::from_min_size(pos2(x + 254.0 - 96.0, ly), vec2(96.0, 26.0));
+        if dark_button(ui, ar, "ADD TO SCRIPT", "p180-lua-add", true).clicked() {
+            let g = self.asg.p180_g;
+            let total = turn_counts(counts, angle_deg);
+            let (steps, ms) = (e.p180_steps, e.p180_ms);
+            self.edit(move |c| {
+                let p = c.current_profile_mut();
+                p.script = p180_lua_inject(&p.script, &p180_lua_snippet(g, total, steps, ms));
+            });
+            self.say(format!("Lua 180 bound to G{g}"));
+        }
+
+        let br = Rect::from_min_size(pos2(x, ly + LUA_H), vec2(254.0, 26.0));
         let label = match self.p180_at {
             Some(t) => format!("TURNING IN {}…", 3 - t.elapsed().as_secs().min(2)),
             None => "TEST IN 3 SECONDS".into(),
@@ -831,7 +860,7 @@ impl GhubApp {
             para(ui, pos2(x, ab.top() + 4.0), 254.0, &format!("Needs {raw} DPI — outside 100–25,600. Give yourself a longer swipe or a higher sensitivity."), Ts::new(Fam::Reg, 10.0, pal().amber).ls(0.3));
         }
         para(ui, pos2(x, fy + 98.0), 254.0, "Then assign DPI SHIFT (SYSTEM) to a button and save to a slot — the flick works with no software running.", Ts::new(Fam::Reg, 10.0, pal().muted).ls(0.3));
-        ui.add_space(378.0 + extra + warn_h + sender_h + FLICK_H + read_h);
+        ui.add_space(378.0 + extra + warn_h + sender_h + LUA_H + FLICK_H + read_h);
     }
 
     pub(crate) fn assign(&mut self, slot: usize, a: Assignment) {

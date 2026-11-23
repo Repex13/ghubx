@@ -922,6 +922,227 @@ pub fn set_flick_dpi(dpi: &mut DpiTable, v: u16) -> FlickLevel {
     }
 }
 
+// ------------------------------------------------------------- Lua turn
+
+/// Marker pair wrapping the managed block [`p180_lua_snippet`] generates;
+/// [`p180_lua_inject`] replaces everything between them on a re-click.
+pub const P180_LUA_OPEN: &str = "--[==[ GHUB-X PERFECT 180 ]==]";
+pub const P180_LUA_CLOSE: &str = "--[==[ /GHUB-X PERFECT 180 ]==]";
+
+/// The "MAKE A LUA 180" block: a Perfect 180 as an editable `OnEvent` handler
+/// bound to G-key `g` (G HUB fires `G_PRESSED` with `arg` = the G number).
+/// `counts` are spread over `steps` moves — the same `total * i / step`
+/// distribution `engine::perfect_180` uses — with `(ms / steps).max(1)` ms
+/// between them.
+///
+/// Honesty note: this is the same injected input as the built-in action, just
+/// emitted from Lua. Games that block injected turns block this too — for
+/// those the HARDWARE FLICK (a real sensor swipe) is the answer.
+pub fn p180_lua_snippet(g: u8, counts: i32, steps: u8, ms: u16) -> String {
+    let step = steps.max(1);
+    let pause = (ms / u16::from(step)).max(1);
+    format!(
+        "{P180_LUA_OPEN}\nif event == \"G_PRESSED\" and arg == {g} then\n    local total, step, pause = {counts}, {step}, {pause}\n    for i = 1, step do\n        local n = math.floor(total * i / step) - math.floor(total * (i - 1) / step)\n        if n ~= 0 then MoveMouseRelative(n, 0) end\n        Sleep(pause)\n    end\nend\n{P180_LUA_CLOSE}"
+    )
+}
+
+/// `pad` in front of every snippet line (keeps the managed block at body
+/// indent when it lives inside `OnEvent`).
+fn pad_lines(snippet: &str, pad: &str) -> String {
+    snippet.lines().map(|l| format!("{pad}{l}")).collect::<Vec<_>>().join("\n")
+}
+
+/// Splice `snippet` (the [`p180_lua_snippet`] managed block) into a profile's
+/// Lua script:
+/// 1. the markers are already there -> the managed block is replaced whole;
+/// 2. the script is empty -> a complete `OnEvent` holding the block;
+/// 3. the script defines `OnEvent` -> the block goes just before its matching
+///    `end` (found by counting block keywords on the lexed token stream, so
+///    `end`s inside comments, strings and nested blocks can't fool it);
+/// 4. other code but no `OnEvent` -> a new `OnEvent` is appended.
+///
+/// A stray open marker with no close is dropped first. If `OnEvent` exists
+/// but its `end` can't be matched (unbalanced script), the block lands at the
+/// top of the body instead.
+pub fn p180_lua_inject(script: &str, snippet: &str) -> String {
+    // 1. managed block present: replace it wholesale
+    if let Some(o) = script.find(P180_LUA_OPEN) {
+        let from = script[..o].rfind('\n').map_or(0, |i| i + 1);
+        match script[o..].find(P180_LUA_CLOSE) {
+            Some(c) => {
+                let c = o + c;
+                let to = script[c..].find('\n').map_or(script.len(), |i| c + i + 1);
+                // keep the old block's indent so a re-click is a true replace
+                let pad = &script[from..o];
+                let block = if pad.trim().is_empty() { pad_lines(snippet, pad) } else { snippet.to_string() };
+                let mut out = String::with_capacity(script.len() + snippet.len());
+                out.push_str(&script[..from]);
+                out.push_str(&block);
+                if to < script.len() {
+                    out.push('\n');
+                    out.push_str(&script[to..]);
+                }
+                return out;
+            }
+            None => {
+                // stray open marker: drop its line, then inject normally
+                let eol = script[o..].find('\n').map_or(script.len(), |i| o + i + 1);
+                let cleaned = format!("{}{}", &script[..from], &script[eol..]);
+                return p180_lua_inject(&cleaned, snippet);
+            }
+        }
+    }
+    let block = pad_lines(snippet, "    ");
+    // 2. empty script: a complete OnEvent
+    if script.trim().is_empty() {
+        return format!("function OnEvent(event, arg)\n{block}\nend\n");
+    }
+    // 3/3b. an existing OnEvent
+    let toks = crate::lua::lex_lua(script);
+    let fns = onevent_fns(script, &toks);
+    for &f in fns.iter().rev() {
+        if let Some(end) = matching_end(script, &toks, f) {
+            // the block must read the names the signature actually uses —
+            // `OnEvent(e, a)` scripts get `e`/`a`, not `event`/`arg`
+            let (ev, ar) = onevent_params(script, &toks, f);
+            let line_start = script[..end].rfind('\n').map_or(0, |i| i + 1);
+            let pad = &script[line_start..end];
+            return if pad.trim().is_empty() {
+                // `end` on its own line: the block goes before it, indented
+                // one level past the `end` keyword
+                let block = bind_params(&pad_lines(snippet, &format!("{pad}    ")), &ev, &ar);
+                format!("{}{}\n{}", &script[..line_start], block, &script[line_start..])
+            } else {
+                // `end` mid-line (one-line function): break before it
+                format!("{}\n{}\n{}", &script[..end], bind_params(&block, &ev, &ar), &script[end..])
+            };
+        }
+    }
+    if let Some(&f) = fns.last() {
+        // OnEvent found but its end can't be matched (unbalanced script):
+        // put the block at the top of the body, after the signature line
+        let (ev, ar) = onevent_params(script, &toks, f);
+        let pos = script[toks[f].1..].find('\n').map_or(script.len(), |i| toks[f].1 + i + 1);
+        return format!("{}{}\n{}", &script[..pos], bind_params(&block, &ev, &ar), &script[pos..]);
+    }
+    // 4. other code, no OnEvent: append one
+    let mut out = String::from(script);
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str(&format!("\nfunction OnEvent(event, arg)\n{block}\nend\n"));
+    out
+}
+
+/// The first two parameter names of the `function` at `toks[f]`
+/// (`(event, arg)` when the signature can't be read — the conventional names
+/// the snippet is written against).
+fn onevent_params(script: &str, toks: &[(usize, usize, crate::lua::Tok)], f: usize) -> (String, String) {
+    let fallback = || ("event".to_string(), "arg".to_string());
+    // the signature's parens sit within a line or two of the keyword
+    let scope = &script[toks[f].1..(toks[f].1 + 256).min(script.len())];
+    let Some(open) = scope.find('(') else { return fallback() };
+    let Some(close) = scope[open..].find(')') else { return fallback() };
+    let mut it = scope[open + 1..open + close].split(',');
+    let ident = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') && !s.as_bytes()[0].is_ascii_digit();
+    let ev = it.next().map(str::trim).unwrap_or("event");
+    let ar = it.next().map(str::trim).unwrap_or("arg");
+    if ident(ev) && ident(ar) { (ev.to_string(), ar.to_string()) } else { fallback() }
+}
+
+/// Point the block's `if event == "G_PRESSED" and arg == N` line at the
+/// parameter names a user's `OnEvent` actually declares.
+fn bind_params(block: &str, ev: &str, ar: &str) -> String {
+    if ev == "event" && ar == "arg" {
+        return block.to_string();
+    }
+    block.replacen(r#"if event == "G_PRESSED" and arg == "#, &format!(r#"if {ev} == "G_PRESSED" and {ar} == "#), 1)
+}
+
+/// Token indices of `function` keywords that name `OnEvent`, in order:
+/// `function OnEvent(` (also `local function OnEvent(`) or `OnEvent = function(`.
+fn onevent_fns(script: &str, toks: &[(usize, usize, crate::lua::Tok)]) -> Vec<usize> {
+    let ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    let txt = |i: usize| &script[toks[i].0..toks[i].1];
+    let mut fns = Vec::new();
+    for i in 0..toks.len() {
+        if toks[i].2 != crate::lua::Tok::Key || txt(i) != "function" {
+            continue;
+        }
+        // `function OnEvent(`: next non-comment token starts with the name
+        let mut j = i + 1;
+        while j < toks.len() && toks[j].2 == crate::lua::Tok::Comment {
+            j += 1;
+        }
+        let named = j < toks.len() && {
+            let t = txt(j).trim_start();
+            t.len() >= 7 && t.starts_with("OnEvent") && (t.len() == 7 || !ident(t.as_bytes()[7]))
+        };
+        // `OnEvent = function(`: previous non-comment token ends with `name =`
+        let mut k = i;
+        while k > 0 && toks[k - 1].2 == crate::lua::Tok::Comment {
+            k -= 1;
+        }
+        let assigned = k > 0 && {
+            let t = txt(k - 1).trim_end().strip_suffix('=').map(str::trim_end).unwrap_or("");
+            t.len() >= 7 && t.ends_with("OnEvent") && (t.len() == 7 || !ident(t.as_bytes()[t.len() - 8]))
+        };
+        if named || assigned {
+            fns.push(i);
+        }
+    }
+    fns
+}
+
+/// Byte offset of the `end` that closes the block opened at `toks[f]` (a
+/// `function` keyword), `None` when the keywords are unbalanced. `end` closes
+/// `function`/`if`/`do`/resolved `for`/`while`; `until` closes `repeat`.
+fn matching_end(script: &str, toks: &[(usize, usize, crate::lua::Tok)], f: usize) -> Option<usize> {
+    #[derive(PartialEq)]
+    enum B {
+        Any,
+        /// `for` / `while` still waiting for the `do` of their body.
+        For,
+        While,
+        /// `repeat .. until` (closed by `until`, never by `end`).
+        Rep,
+    }
+    let mut st = vec![B::Any]; // the function itself
+    for &(a, b, k) in &toks[f + 1..] {
+        if k != crate::lua::Tok::Key {
+            continue;
+        }
+        match &script[a..b] {
+            "function" | "if" => st.push(B::Any),
+            "for" => st.push(B::For),
+            "while" => st.push(B::While),
+            "do" => match st.last_mut() {
+                Some(b @ (B::For | B::While)) => *b = B::Any,
+                _ => st.push(B::Any),
+            },
+            "repeat" => st.push(B::Rep),
+            "until" => {
+                if st.pop() != Some(B::Rep) {
+                    return None;
+                }
+            }
+            "end" => {
+                match st.last() {
+                    Some(B::For) | Some(B::While) | Some(B::Rep) | None => return None,
+                    Some(B::Any) => {
+                        st.pop();
+                    }
+                }
+                if st.is_empty() {
+                    return Some(a);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Extras {
@@ -2445,6 +2666,112 @@ bass_only = true
         p180_toggle_blocked(&mut b, 0);
         p180_toggle_blocked(&mut b, 2);
         assert!(b.is_empty());
+    }
+
+    #[test]
+    fn p180_lua_snippet_bakes_the_bind_and_calibration() {
+        let s = p180_lua_snippet(5, 2348, 12, 60);
+        assert!(s.starts_with(P180_LUA_OPEN), "{s}");
+        assert!(s.ends_with(P180_LUA_CLOSE), "{s}");
+        // G-key bind on G HUB's G_PRESSED event + the baked calibration
+        assert!(s.contains(r#"if event == "G_PRESSED" and arg == 5 then"#), "{s}");
+        assert!(s.contains("local total, step, pause = 2348, 12, 5"), "{s}");
+        assert!(s.contains("math.floor(total * i / step)"), "{s}");
+        assert!(s.contains("MoveMouseRelative(n, 0)"), "{s}");
+        // pause = ms / steps, floor 1; step floored at 1
+        assert!(p180_lua_snippet(7, 100, 12, 30).contains("pause = 100, 12, 2"));
+        assert!(p180_lua_snippet(4, 100, 4, 0).contains("pause = 100, 4, 1"));
+        assert!(p180_lua_snippet(11, 50, 0, 10).contains("pause = 50, 1, 10"));
+    }
+
+    #[test]
+    fn p180_lua_inject_empty_script_gets_a_full_onevent() {
+        for empty in ["", "   \n  \n"] {
+            let out = p180_lua_inject(empty, &p180_lua_snippet(5, 2348, 12, 60));
+            assert!(out.starts_with("function OnEvent(event, arg)\n"), "{out}");
+            assert!(out.contains("arg == 5"), "{out}");
+            assert_eq!(out.matches(P180_LUA_OPEN).count(), 1, "{out}");
+            assert_eq!(out.matches(P180_LUA_CLOSE).count(), 1, "{out}");
+            assert!(out.trim_end().ends_with("end"), "{out}");
+        }
+    }
+
+    #[test]
+    fn p180_lua_inject_before_onevents_end_with_nested_blocks() {
+        let src = "function OnEvent(event, arg)\n    if event == \"PROFILE_ACTIVATED\" then\n        for i = 1, 2 do\n            if i == 2 then OutputLogMessage(\"go\") end\n        end\n    end\nend\n";
+        let out = p180_lua_inject(src, &p180_lua_snippet(4, 100, 4, 10));
+        // the managed block sits inside OnEvent, after the user's if/for and
+        // just before the function's final end
+        let open = out.find(P180_LUA_OPEN).unwrap();
+        let close = out.find(P180_LUA_CLOSE).unwrap();
+        let body_end = out.rfind("end").unwrap();
+        assert!(open < close && close < body_end, "{out}");
+        assert!(out.contains("arg == 4"), "{out}");
+        // the user's own handler is untouched above the block
+        assert!(out.find("OutputLogMessage(\"go\")").unwrap() < open, "{out}");
+    }
+
+    #[test]
+    fn p180_lua_inject_matching_end_ignores_comments_strings_and_repeat() {
+        // `end`s in a long comment, a long string and a repeat..until do not count
+        let src = "function OnEvent(event, arg)\n    --[==[ ends here? end ]==]\n    local s = [=[end]=]\n    repeat\n        if event == \"G_PRESSED\" then break end\n    until arg == 0\nend\n";
+        let out = p180_lua_inject(src, &p180_lua_snippet(5, 60, 6, 6));
+        let open = out.find(P180_LUA_OPEN).unwrap();
+        let body_end = out.rfind("end").unwrap();
+        assert!(open < body_end, "{out}");
+        assert!(out.find("until arg == 0").unwrap() < open, "{out}");
+        assert!(out.trim_end().ends_with("end"), "{out}");
+    }
+
+    #[test]
+    fn p180_lua_inject_replaces_the_managed_block() {
+        let first = p180_lua_inject("", &p180_lua_snippet(5, 100, 4, 10));
+        let second = p180_lua_inject(&first, &p180_lua_snippet(8, 200, 4, 10));
+        assert_eq!(second.matches(P180_LUA_OPEN).count(), 1, "{second}");
+        assert_eq!(second.matches(P180_LUA_CLOSE).count(), 1, "{second}");
+        assert!(second.contains("arg == 8") && !second.contains("arg == 5"), "{second}");
+        assert!(second.contains("= 200, 4, 2"), "{second}");
+        // the block keeps its body indent inside OnEvent; replacing again is a no-op
+        assert!(second.contains("    --[==[ GHUB-X PERFECT 180 ]==]"), "{second}");
+        assert_eq!(p180_lua_inject(&second, &p180_lua_snippet(8, 200, 4, 10)), second);
+        // a stray open marker without its close is dropped, then injected fresh
+        let stray = format!("function OnEvent(event, arg)\n    {P180_LUA_OPEN}\nend\n");
+        let fixed = p180_lua_inject(&stray, &p180_lua_snippet(5, 10, 2, 4));
+        assert_eq!(fixed.matches(P180_LUA_OPEN).count(), 1, "{fixed}");
+        assert_eq!(fixed.matches(P180_LUA_CLOSE).count(), 1, "{fixed}");
+    }
+
+    #[test]
+    fn p180_lua_inject_appends_onevent_to_other_code() {
+        let src = "local x = 1\nfunction helper() return x end\n";
+        let out = p180_lua_inject(src, &p180_lua_snippet(6, 50, 5, 10));
+        assert!(out.starts_with(src), "{out}");
+        assert!(out.contains("function OnEvent(event, arg)"), "{out}");
+        assert!(out.trim_end().ends_with("end"), "{out}");
+        // the assignment form is found too: no second OnEvent is appended
+        let assigned = "OnEvent = function(e, a)\nend\n";
+        let out = p180_lua_inject(assigned, &p180_lua_snippet(6, 50, 5, 10));
+        assert!(!out.contains("function OnEvent(event, arg)"), "{out}");
+        let open = out.find(P180_LUA_OPEN).unwrap();
+        assert!(open < out.rfind("end").unwrap(), "{out}");
+    }
+
+    #[test]
+    fn p180_lua_inject_one_line_and_shadowed_onevent() {
+        // a one-line OnEvent: the block breaks in just before its `end`, and
+        // the bind is rewritten to the signature's own names (e, a)
+        let out = p180_lua_inject("function OnEvent(e, a) hi() end\n", &p180_lua_snippet(9, 40, 4, 8));
+        assert!(out.contains(r#"if e == "G_PRESSED" and a == 9 then"#), "{out}");
+        assert!(out.contains("hi() \n") || out.contains("hi()\n"), "{out}");
+        let open = out.find(P180_LUA_OPEN).unwrap();
+        let body_end = out.rfind("end").unwrap();
+        assert!(open < body_end, "{out}");
+        // with two definitions the last (live) one gets the block
+        let two = "function OnEvent(e, a) dead() end\nfunction OnEvent(e, a) live() end\n";
+        let out = p180_lua_inject(two, &p180_lua_snippet(9, 40, 4, 8));
+        let open = out.find(P180_LUA_OPEN).unwrap();
+        assert!(out.find("live()").unwrap() < open, "{out}");
+        assert!(open > out.find("dead()").unwrap(), "{out}");
     }
 
     #[test]

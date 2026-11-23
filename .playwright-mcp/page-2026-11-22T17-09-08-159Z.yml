@@ -1,0 +1,9 @@
+- main "DEVIN startup animation" [ref=f6e2]:
+  - generic [aria-hidden] [ref=f6e3]:
+    - generic:
+      - generic:
+        - generic: HUNTER X HUNTER PHANTOM TROUPE EDITION
+        - generic: DEVIN INITIALIZE
+  - button "Skip Esc" [ref=f6e9] [cursor=pointer]:
+    - text: Skip
+    - generic [ref=f6e10]: Esc
