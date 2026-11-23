@@ -1,9 +1,0 @@
-[     497ms] [ERROR] Permissions policy violation: unload is not allowed in this document. @ https://assets.create.roblox.com/838cfd9ebc22d2c70a944f6710de0f61eddfffa0/_next/static/chunks/0jj22kc54d2ab.js:2
-[    1275ms] [WARNING] [From context - ol] The translation key 'undefined' doesn't exist for locale 'en-US'! @ https://assets.create.roblox.com/838cfd9ebc22d2c70a944f6710de0f61eddfffa0/_next/static/chunks/0jj22kc54d2ab.js:2
-[    1275ms] [WARNING] [From context - ol] The translation key 'undefined' doesn't exist for locale 'en-US'! @ https://assets.create.roblox.com/838cfd9ebc22d2c70a944f6710de0f61eddfffa0/_next/static/chunks/0jj22kc54d2ab.js:2
-[    1368ms] [WARNING] [From context - ol] The translation key 'undefined' doesn't exist for locale 'en-US'! @ https://assets.create.roblox.com/838cfd9ebc22d2c70a944f6710de0f61eddfffa0/_next/static/chunks/0jj22kc54d2ab.js:2
-[    1368ms] [WARNING] [From context - ol] The translation key 'undefined' doesn't exist for locale 'en-US'! @ https://assets.create.roblox.com/838cfd9ebc22d2c70a944f6710de0f61eddfffa0/_next/static/chunks/0jj22kc54d2ab.js:2
-[    1589ms] [ERROR] Failed to load resource: the server responded with a status of 404 () @ https://premiumfeatures.roblox.com/v1/users/3944711994/subscriptions:1
-[    1940ms] [ERROR] Failed to load resource: the server responded with a status of 403 () @ https://apis.roblox.com/team-create-service/v1/AreUniversesImpacted:1
-[    1942ms] [ERROR] Failed to load resource: the server responded with a status of 403 () @ https://apis.roblox.com/team-create-service/v1/AreUniversesImpacted:1
-[    1942ms] [ERROR] Failed to load resource: the server responded with a status of 403 () @ https://apis.roblox.com/core-content/v1/universe-eligibility/batch:1
