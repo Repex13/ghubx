@@ -493,17 +493,31 @@ def p180_fortnite_migrates():
 def flick_apply():
     res = run_script("flick_apply", device_assign() + [TAB_ACTIONS, SETTLE, "scroll 230 500 -520", SETTLE,
                                                        "shot {shots}/flick.png",
-                                                       "click 230 662",  # SET SHIFT DPI TO 2400
+                                                       "click 230 680",  # SET SHIFT DPI TO 2400 (READ FROM GAME line shifts it 18 px down on this PC)
                                                        SETTLE], config=fortnite_config(0.138, 2348))
     ok_run(res)
     dpi = res.cfg["apps"][0]["profiles"][0]["dpi"]
     must(dpi["shift"] == 2400 and 2400 in dpi["levels"], dpi)
 
 
-# PERFECT 180 box after `scroll -200` (matches the p180blocked shot page):
-# SENDER row at y~623, pills at y~656.
-P180_SENDER = {0: (145, 656), 1: (231, 656), 2: (317, 656)}  # SENDINPUT / MOUSE_EVENT / POST_MSG
-P180_BLOCKED_LINK = "click 330 623"  # GAME BLOCKS IT
+# PERFECT 180 box after `scroll -200` (matches the p180blocked shot page), with
+# the READ FROM GAME line under IN-GAME SENS (needs this PC's CS2 install):
+# SENDER row at y~641, pills at y~672.
+P180_SENDER = {0: (145, 672), 1: (231, 672), 2: (317, 672)}  # SENDINPUT / MOUSE_EVENT / POST_MSG
+P180_BLOCKED_LINK = "click 330 641"  # GAME BLOCKS IT
+P180_READ_LINK = "click 330 505"  # READ FROM GAME under IN-GAME SENS (CS2 preset)
+
+
+@scenario
+def p180_read():
+    """READ FROM GAME fills sens+counts from the selected preset's settings file."""
+    res = run_script("p180_read", device_assign() + [TAB_ACTIONS, SETTLE, "scroll 230 500 -200", SETTLE,
+                                                       "shot {shots}/read.png",
+                                                       P180_READ_LINK, SETTLE],
+                     config=p180_cs2_config())
+    ok_run(res)
+    ex = res.cfg["extras"]
+    must(ex["p180_game"] == 0 and abs(ex["p180_sens"] - 0.51) < 0.001 and ex["p180_counts"] == 16043, ex)
 
 
 def p180_cs2_config(sender=None, blocked=None):

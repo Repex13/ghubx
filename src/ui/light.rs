@@ -251,7 +251,7 @@ impl GhubApp {
         ui.painter().galley(er.min, galley(ui, "EDIT", Ts::new(Fam::Bold, 12.0, col), f32::INFINITY), col);
         if rr.clicked() {
             let sel = self.cfg().samples.iter().position(|s| ScreenArea::Rect(s.rect) == l.host.area);
-            self.sample_edit = Some(super::samples::SampleEditor::new(sel));
+            self.sample_edit = Some(super::samples::SampleEditor::new(sel, l.host.monitor));
         }
         let scr = Rect::from_min_size(pos2(x0, y + 64.0), vec2(96.0, 54.0));
         let full = l.host.area == ScreenArea::Full;

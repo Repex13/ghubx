@@ -9,7 +9,7 @@ use crate::osd::{self, OsdKind};
 use crate::win;
 use crossbeam_channel::{Receiver, Sender, select, tick};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -66,15 +66,32 @@ impl MoveSender {
     }
 }
 
+/// The live `Extras.p180_sender` pick every `RealInput` shares: the first
+/// `RealInput::new` seeds it, `Engine::set_sender` overwrites it, and
+/// `mouse_move` reads it — so the Lua worker's input (built once at startup)
+/// follows a pick changed after it spawned. `0xFF` = not seeded yet.
+static P180_SENDER: AtomicU8 = AtomicU8::new(0xFF);
+
+/// The current shared pick (`from_u8` normalises: anything unknown is SendInput).
+fn live_sender() -> MoveSender {
+    MoveSender::from_u8(P180_SENDER.load(Ordering::Relaxed))
+}
+
 /// The OS-side input sink; `sender` picks the API relative moves ride on
 /// (Perfect 180 is the only move source — keys/buttons stay on SendInput).
+/// `sender` keeps the pick the input was built with; `Input::sender` and the
+/// moves themselves report/dispatch on [`live_sender`] so a later pick applies
+/// without rebuilding every input (the Lua worker keeps its spawn-built sink).
 pub struct RealInput {
+    /// The pick this input was built with — kept for reporting/debugging.
     pub sender: MoveSender,
 }
 
 impl RealInput {
     pub fn new(sender: u8) -> Self {
-        Self { sender: MoveSender::from_u8(sender) }
+        let s = MoveSender::from_u8(sender);
+        let _ = P180_SENDER.compare_exchange(0xFF, s.as_u8(), Ordering::Relaxed, Ordering::Relaxed);
+        Self { sender: s }
     }
 }
 
@@ -86,7 +103,7 @@ impl Input for RealInput {
         win::mouse(btn, down);
     }
     fn mouse_move(&self, dx: i32, dy: i32) {
-        win::mouse_move(self.sender, dx, dy);
+        win::mouse_move(live_sender(), dx, dy);
     }
     fn wheel(&self, delta: i32) {
         win::wheel(delta);
@@ -101,7 +118,7 @@ impl Input for RealInput {
         win::launch(path);
     }
     fn sender(&self) -> u8 {
-        self.sender.as_u8()
+        live_sender().as_u8()
     }
 }
 
@@ -515,10 +532,11 @@ impl Engine {
         }
     }
 
-    /// The P180 sender pick changed: rebuild the real input so the next move
-    /// rides the new API. (The Lua worker's own `RealInput` keeps the pick it
-    /// was spawned with — only the engine's turns switch live.)
+    /// The P180 sender pick changed: rebuild the real input and overwrite the
+    /// shared pick, so the next move — the engine's turns AND the Lua worker's,
+    /// whose `RealInput` reads the same atomic — rides the new API.
     fn set_sender(&mut self, v: u8) {
+        P180_SENDER.store(MoveSender::from_u8(v).as_u8(), Ordering::Relaxed);
         self.input = Arc::new(RealInput::new(v));
     }
 
@@ -1337,6 +1355,8 @@ mod tests {
     fn rig(edit: impl FnOnce(&mut Config)) -> Rig {
         let guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         set_observer(false);
+        // the shared sender pick is process-wide: every rig starts unseeded
+        P180_SENDER.store(0xFF, Ordering::Relaxed);
         let mut cfg = Config::default();
         cfg.apps[0].profiles[0].dpi = DpiTable { levels: vec![600, 1000, 1600], active: 600, default: 600, shift: 400 };
         edit(&mut cfg);
@@ -2202,6 +2222,7 @@ mod tests {
 
     #[test]
     fn move_sender_byte_roundtrip() {
+        let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner()); // RealInput::new CAS-seeds the shared pick
         for (v, want) in [(0, MoveSender::SendInput), (1, MoveSender::MouseEvent), (2, MoveSender::PostMessage), (9, MoveSender::SendInput), (255, MoveSender::SendInput)] {
             assert_eq!(MoveSender::from_u8(v), want, "from_u8({v})");
         }
@@ -2214,12 +2235,15 @@ mod tests {
 
     #[test]
     fn engine_seeds_sender_from_the_config() {
+        let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        P180_SENDER.store(0xFF, Ordering::Relaxed);
         let (dev_tx, _d) = unbounded();
         let (ui_tx, _u) = unbounded();
         let mut cfg = Config::default();
         cfg.extras.p180_sender = 2;
         let e = Engine::new(Arc::new(Mutex::new(cfg)), dev_tx, ui_tx);
         assert_eq!(e.input.sender(), 2);
+        P180_SENDER.store(0xFF, Ordering::Relaxed); // a fresh process would seed again
         let e = Engine::new(Arc::new(Mutex::new(Config::default())), unbounded().0, unbounded().0);
         assert_eq!(e.input.sender(), 0);
     }
@@ -2236,5 +2260,20 @@ mod tests {
         assert_eq!(r.e.input.sender(), 1);
         r.e.set_sender(9); // unknown falls back to SendInput
         assert_eq!(r.e.input.sender(), 0);
+    }
+
+    #[test]
+    fn lua_input_follows_the_shared_sender_pick() {
+        // The worker's input is built once at spawn yet `sender()`/moves read
+        // the shared atomic — a later SetSender applies without a rebuild.
+        let mut r = rig(|_| {});
+        let worker = RealInput::new(0);
+        assert_eq!(worker.sender, MoveSender::SendInput); // spawn-time pick, kept as a field
+        r.e.set_sender(2);
+        assert_eq!(live_sender(), MoveSender::PostMessage);
+        assert_eq!(worker.sender(), 2); // live pick, not the spawn-time one
+        r.e.set_sender(1);
+        assert_eq!(worker.sender(), 1);
+        assert_eq!(live_sender(), MoveSender::MouseEvent);
     }
 }

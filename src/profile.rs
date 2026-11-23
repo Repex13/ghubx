@@ -435,7 +435,8 @@ pub enum ScreenArea {
 pub struct Sample {
     pub name: String,
     /// x0, y0, x1, y1 in thousandths of the monitor the zone samples
-    /// (`HostFx::monitor`; the sample editor always draws the primary one).
+    /// (`HostFx::monitor`; the sample editor draws the monitor of the zone
+    /// whose panel opened it).
     pub rect: [u16; 4],
 }
 

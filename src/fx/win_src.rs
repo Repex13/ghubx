@@ -306,11 +306,14 @@ pub fn exact_screen(area: ScreenArea, monitor: usize) -> Option<[u8; 3]> {
     }
 }
 
-/// The primary screen scaled to fit `max_w` x `max_h` (aspect kept, HALFTONE
-/// stretch), as RGBA bytes. Read-only: the sample editor's background and a probe.
-pub fn screen_picture(max_w: u32, max_h: u32) -> Option<(Vec<u8>, u32, u32)> {
+/// Monitor `monitor` (`win::monitors()` order, out of range = primary) scaled
+/// to fit `max_w` x `max_h` (aspect kept, HALFTONE stretch), as RGBA bytes.
+/// Source coords are virtual-screen coords, so a monitor left of / above the
+/// primary (negative origin) captures fine. Read-only: the sample editor's
+/// background and a probe.
+pub fn screen_picture(monitor: usize, max_w: u32, max_h: u32) -> Option<(Vec<u8>, u32, u32)> {
     unsafe {
-        let (sw, sh) = (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN));
+        let (sx, sy, sw, sh) = monitor_rect(monitor);
         if sw <= 0 || sh <= 0 || max_w == 0 || max_h == 0 {
             return None;
         }
@@ -335,7 +338,7 @@ pub fn screen_picture(max_w: u32, max_h: u32) -> Option<(Vec<u8>, u32, u32)> {
         let old = SelectObject(mem, bmp.into());
         SetStretchBltMode(mem, HALFTONE);
         let _ = SetBrushOrgEx(mem, 0, 0, None);
-        let ok = StretchBlt(mem, 0, 0, w, h, Some(screen), 0, 0, sw, sh, SRCCOPY).as_bool();
+        let ok = StretchBlt(mem, 0, 0, w, h, Some(screen), sx, sy, sw, sh, SRCCOPY).as_bool();
         // the bitmap is selected into `mem`; GetDIBits needs it deselected on some drivers
         SelectObject(mem, old);
         let mut bi = BITMAPINFO { bmiHeader: BITMAPINFOHEADER { biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32, biWidth: w, biHeight: -h, biPlanes: 1, biBitCount: 32, biCompression: BI_RGB.0, ..Default::default() }, ..Default::default() };

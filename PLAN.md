@@ -53,6 +53,18 @@ Now that the repo is public (`https://github.com/Repex13/ghubx`):
   game incl. Vanguard-blocked ones, impossible to detect because it IS
   the sensor. The G502 can't emit movement on its own, so the flick
   stays physical — this is the legal ceiling for "one-button turns".
+- **READ FROM GAME** `[done TBD]` — the P180 panel's IN-GAME SENS fills
+  from the game's own settings file: CS2's `cs2_user_convars` vcfg,
+  Valorant's `RiotUserSettings.ini`, and now Fortnite — whose sens lives
+  in the UE `ClientSettings.Sav` GVAS blob (`MouseSensitivityX`/`Y`
+  FloatProperties; `GameUserSettings.ini` holds none, legacy
+  `MouseSensitivity` is -1). `games::preset_sensitivity` maps the
+  selected preset to the parser, and the file's decimal runs through the
+  same preset-percentage maths as typing it.
+- **Live Lua sender** `[done TBD]` — `engine::P180_SENDER`, a
+  process-wide atomic `SetSender` overwrites; the Lua worker's
+  `RealInput` reads it for every `MoveMouse` dispatch, so a sender pick
+  changed after spawn applies without rebuilding the worker.
 
 ## 3. Remaining G HUB parity gaps
 
@@ -64,8 +76,12 @@ Now that the repo is public (`https://github.com/Repex13/ghubx`):
 - **Settings watcher** `[done a4842c0]` — notice `settings.db` changing
   (you tweaked G HUB) and offer a one-click re-import diff. The watcher
   (`ghub_watch::DbWatch`, ~5 s poll, 2 s quiet debounce) sets a CHANGED
-  hint beside IMPORT and drops a feed note; the explicit diff view is
-  still open.
+  hint beside IMPORT and drops a feed note.
+- **Import preview diff** `[done TBD]` — the first IMPORT click now runs
+  `ghub_import::preview` (the db copy + convert against a throwaway copy
+  of the config, nothing written) and lists `import_diff`'s lines
+  (+/- apps, profiles per app, macro and retune counts) with a DISMISS
+  link; the confirming click installs exactly what the diff showed.
 - **Lua parity** `[done a4842c0]` — syntax highlighting, unsaved-changes
   prompt, remaining API (`SetMKeyState`, `GetMKeyState`, `AbortMacro`,
   `OutputDebugMessage`, `IsModifierPressed`, `MoveMouseTo` done; anything
@@ -104,6 +120,12 @@ Now that the repo is public (`https://github.com/Repex13/ghubx`):
   only): the zone's colour fades in while any captured button is held and for
   `host.hold_ms` (default 300 ms) after release; the engine feeds
   `fx::Handle::set_reactive_down` from every spy-mask change.
+- **Monitor-aware sample preview** `[done TBD]` —
+  `fx::screen_picture(monitor, ..)` captures whichever monitor the zone's
+  `HostFx.monitor` picks (virtual coords, negative origins fine,
+  out-of-range falls back to primary) and the Edit Samples overlay draws
+  that monitor behind the rectangles. `probe fx-sample` stays
+  primary-only.
 
 ## 6. Bigger items `[proposed / uncertain]`
 

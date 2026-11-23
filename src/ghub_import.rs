@@ -447,19 +447,99 @@ pub fn convert(d: &Value) -> Result<(Vec<AppEntry>, bool, Summary), String> {
     Ok((out, switching, sum))
 }
 
-/// Import into `cfg`, replacing its applications. Settings and extras are kept.
-pub fn import(cfg: &mut Config) -> Result<Summary, String> {
+/// What [`import`] would install: G HUB's settings converted and swapped into
+/// a copy of `base` (same merge — applications replaced, settings and extras
+/// kept). The live config is untouched so the UI can show a diff first.
+pub fn preview(base: &Config) -> Result<(Config, Summary), String> {
     let d = read_settings_json()?;
     let (apps, switching, sum) = convert(&d)?;
     if apps.is_empty() {
         return Err("G HUB has no profiles to import".into());
     }
+    let mut cfg = base.clone();
     cfg.apps = apps;
     cfg.current_app = 0;
     cfg.persistent = None;
     cfg.profile_switching = switching;
     cfg.sanitize();
+    Ok((cfg, sum))
+}
+
+/// Import into `cfg`, replacing its applications. Settings and extras are kept.
+pub fn import(cfg: &mut Config) -> Result<Summary, String> {
+    let (new, sum) = preview(cfg)?;
+    *cfg = new;
     Ok(sum)
+}
+
+/// One-line summaries of what swapping `old`'s applications for `new`'s would
+/// do, for the IMPORT confirmation. Apps match by name, profiles and macros
+/// by name/id; a profile "changed" means different button assignments, and
+/// "retuned" means a different DPI table, report rate or lighting.
+pub fn import_diff(old: &Config, new: &Config) -> Vec<String> {
+    fn push(out: &mut Vec<String>, added: usize, removed: usize, what: &str, app: &str) {
+        let s = |n: usize| if n == 1 { "" } else { "s" };
+        let suffix = if app.is_empty() { String::new() } else { format!(" in {app}") };
+        for (n, sign) in [(added, "+"), (removed, "-")] {
+            if n > 0 {
+                out.push(format!("{sign}{n} {what}{}{suffix}", s(n)));
+            }
+        }
+    }
+    let s = |n: usize| if n == 1 { "" } else { "s" };
+    let mut out = Vec::new();
+    push(
+        &mut out,
+        new.apps.iter().filter(|a| !old.apps.iter().any(|o| o.name == a.name)).count(),
+        old.apps.iter().filter(|a| !new.apps.iter().any(|n| n.name == a.name)).count(),
+        "app",
+        "",
+    );
+    for na in &new.apps {
+        let Some(oa) = old.apps.iter().find(|o| o.name == na.name) else { continue };
+        push(
+            &mut out,
+            na.profiles.iter().filter(|p| !oa.profiles.iter().any(|o| o.name == p.name)).count(),
+            oa.profiles.iter().filter(|p| !na.profiles.iter().any(|n| n.name == p.name)).count(),
+            "profile",
+            &na.name,
+        );
+        let changed = na
+            .profiles
+            .iter()
+            .filter(|p| oa.profiles.iter().any(|o| o.name == p.name && (o.base != p.base || o.gshift != p.gshift)))
+            .count();
+        if changed > 0 {
+            out.push(format!("{changed} profile{} changed in {}", s(changed), na.name));
+        }
+        let retuned = na
+            .profiles
+            .iter()
+            .filter(|p| oa.profiles.iter().any(|o| o.name == p.name && (o.dpi != p.dpi || o.rate_ms != p.rate_ms || o.lighting != p.lighting)))
+            .count();
+        if retuned > 0 {
+            out.push(format!("{retuned} profile{} retuned in {}", s(retuned), na.name));
+        }
+        let macro_changed = na
+            .macros
+            .iter()
+            .filter(|m| oa.macros.iter().any(|o| o.id == m.id && *o != **m))
+            .count();
+        if macro_changed > 0 {
+            out.push(format!("{macro_changed} macro{} changed in {}", s(macro_changed), na.name));
+        }
+        push(
+            &mut out,
+            na.macros.iter().filter(|m| !oa.macros.iter().any(|o| o.id == m.id)).count(),
+            oa.macros.iter().filter(|m| !na.macros.iter().any(|n| n.id == m.id)).count(),
+            "macro",
+            &na.name,
+        );
+    }
+    if out.is_empty() {
+        out.push("no changes".into());
+    }
+    out
 }
 
 #[cfg(test)]
@@ -582,5 +662,43 @@ mod tests {
         assert_eq!(explicit.steps[1].delay_ms, 120);
         let rgb = sequence(&card(&format!(r#""useSimpleActions": true, "simpleSequence": {{"components": [{KEY_K}]}}"#), r#""color": {"red": 1, "green": 2, "blue": 3},"#)).unwrap();
         assert_eq!(rgb.color, Some([1, 2, 3]));
+    }
+
+    #[test]
+    fn import_diff_summarises_the_swap() {
+        let mac = |id: &str, name: &str| Macro { id: id.into(), name: name.into(), kind: MacroKind::NoRepeat, ..Default::default() };
+        let mut old = Config::default();
+        old.apps.push(AppEntry { name: "Game X".into(), ..AppEntry::desktop() });
+        old.apps[0].macros = vec![mac("m1", "jump"), mac("m2", "gone")];
+
+        let mut new = Config::default();
+        // same app names as `old` minus "Game X", plus a new one
+        new.apps[0].profiles[0].base[3] = Assignment::Key(KeyCombo { vk: 0x20, mods: 0 });
+        new.apps[0].profiles[0].rate_ms = 2;
+        new.apps[0].profiles.push(Profile::new("Sniping"));
+        new.apps[0].macros = vec![mac("m1", "jump v2"), mac("m3", "new")];
+        new.apps.push(AppEntry { name: "Valorant".into(), ..AppEntry::desktop() });
+
+        assert_eq!(
+            import_diff(&old, &new),
+            vec![
+                "+1 app",
+                "-1 app",
+                "+1 profile in Desktop",
+                "1 profile changed in Desktop",
+                "1 profile retuned in Desktop",
+                "1 macro changed in Desktop",
+                "+1 macro in Desktop",
+                "-1 macro in Desktop",
+            ]
+        );
+        // identical applications -> the fallback line
+        assert_eq!(import_diff(&old, &old), vec!["no changes"]);
+        // only removals
+        let mut gone = old.clone();
+        gone.apps[0].profiles.clear();
+        gone.apps[0].macros.clear();
+        gone.apps.truncate(1);
+        assert_eq!(import_diff(&old, &gone), vec!["-1 app", "-1 profile in Desktop", "-2 macros in Desktop"]);
     }
 }

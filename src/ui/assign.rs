@@ -32,6 +32,8 @@ pub struct AsgState {
     /// HARDWARE FLICK: physical swipe length in cm (slider, 0.5 steps).
     pub flick_cm: f32,
     pub game_sens: Option<(usize, Option<crate::games::GameSens>)>,
+    /// Game sens behind the selected Perfect 180 preset pill (READ FROM GAME).
+    pub read_sens: Option<(usize, Option<crate::games::GameSens>)>,
     pub obs_form: Option<ObsForm>,
     /// Shot pages only: keep the list scrolled to its end.
     pub scroll_to: Option<f32>,
@@ -44,7 +46,7 @@ impl Default for AsgState {
             tab: 0, search: String::new(), side: false, gshift: false, selected: None,
             collapsed: HashSet::new(), mods: 0, editor: None, last_tab: None,
             launch_path: String::new(), p180_sens_text: String::new(), p180_counts_text: String::new(),
-            flick_cm: 2.5, game_sens: None, obs_form: None, scroll_to: None, obs_refresh: None,
+            flick_cm: 2.5, game_sens: None, read_sens: None, obs_form: None, scroll_to: None, obs_refresh: None,
         }
     }
 }
@@ -573,6 +575,20 @@ impl GhubApp {
         self.asg.game_sens.as_ref().and_then(|(_, g)| g.clone())
     }
 
+    /// Sensitivity behind the selected Perfect 180 preset pill, re-read when the
+    /// selection changes. `--shot` gets the deterministic CS2 sample.
+    fn read_sens_for(&mut self, game: usize) -> Option<crate::games::GameSens> {
+        if self.asg.read_sens.as_ref().is_none_or(|(i, _)| *i != game) {
+            let found = if self.shot.is_some() {
+                (game == 0).then_some(crate::games::GameSens { game: "Counter-Strike 2", preset: 0, sens: 0.51, yaw: 0.022, counts: 16043 })
+            } else {
+                crate::games::preset_sensitivity(game)
+            };
+            self.asg.read_sens = Some((game, found));
+        }
+        self.asg.read_sens.as_ref().and_then(|(_, g)| g.clone())
+    }
+
     fn p180_block(&mut self, ui: &mut Ui) {
         let top = ui.cursor().min;
         let cfg = self.cfg();
@@ -599,7 +615,11 @@ impl GhubApp {
         // `sender_h`: SENDER pills + the optional blocked note under SPEED
         let blocked = e.p180_blocked.contains(&game);
         let sender_h = 80.0 + if blocked { 26.0 } else { 0.0 };
-        let box_r = Rect::from_min_size(top, vec2(278.0, 366.0 + extra + warn_h + sender_h + FLICK_H));
+        // READ FROM GAME line under IN-GAME SENS (only when the selected
+        // preset's parser actually finds a settings file)
+        let read_sens = self.read_sens_for(shown_game);
+        let read_h = if read_sens.is_some() { 18.0 } else { 0.0 };
+        let box_r = Rect::from_min_size(top, vec2(278.0, 366.0 + extra + warn_h + sender_h + FLICK_H + read_h));
         ui.painter().rect_filled(box_r, CornerRadius::same(8), pal().surface_hi);
         let x = box_r.left() + 12.0;
         text(ui, pos2(x, box_r.top() + 12.0), Align2::LEFT_TOP, "PERFECT 180", Ts::new(Fam::Bold, 12.0, pal().text));
@@ -629,7 +649,7 @@ impl GhubApp {
             }
         }
         let yaw = P180_GAMES[game].1;
-        let row = |i: usize| box_r.top() + 136.0 + extra + i as f32 * 28.0 + if i >= 3 { warn_h } else { 0.0 };
+        let row = |i: usize| box_r.top() + 136.0 + extra + i as f32 * 28.0 + if i >= 1 { read_h } else { 0.0 } + if i >= 3 { warn_h } else { 0.0 };
 
         // in-game sensitivity
         text(ui, pos2(x, row(0)), Align2::LEFT_CENTER, "IN-GAME SENS", t_small_label().color(if yaw > 0.0 { pal().label } else { pal().disabled }));
@@ -649,6 +669,27 @@ impl GhubApp {
             let pct = format!("{:.1}", sens_val * 100.0);
             let pct = pct.strip_suffix(".0").unwrap_or(&pct);
             text(ui, pos2(x + 196.0, row(0)), Align2::LEFT_CENTER, &format!("= {pct} %"), Ts::new(Fam::Reg, 11.0, pal().muted).ls(0.2));
+        }
+        if let Some(g) = &read_sens {
+            let link = Rect::from_min_size(pos2(x, row(0) + 15.0), vec2(254.0, 14.0));
+            let rr = click(ui, link, "p180-read-game");
+            let col = if rr.hovered() { pal().primary_hover } else { pal().primary };
+            text(ui, pos2(box_r.right() - 12.0, link.center().y), Align2::RIGHT_CENTER, "READ FROM GAME", Ts::new(Fam::Bold, 9.5, col).ls(0.4));
+            if rr.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                // same math as typing the sens: preset counts, or the parser's
+                // own counts when its yaw makes the preset a custom one (CS2)
+                let counts = if g.preset == P180_CUSTOM { g.counts } else { p180_preset_counts(g.preset, g.sens).unwrap_or(g.counts) };
+                let new = TurnCal { counts, game: g.preset, sens: g.sens, angle: cal.angle };
+                self.edit(|c| {
+                    if c.current_profile_mut().turn.is_some() {
+                        c.current_profile_mut().turn = Some(new);
+                    } else {
+                        c.extras.p180_game = new.game;
+                        c.extras.p180_sens = new.sens;
+                        c.extras.p180_counts = new.counts;
+                    }
+                });
+            }
         }
 
         // counts: exact field + log slider (100 .. 100 000)
@@ -790,7 +831,7 @@ impl GhubApp {
             para(ui, pos2(x, ab.top() + 4.0), 254.0, &format!("Needs {raw} DPI — outside 100–25,600. Give yourself a longer swipe or a higher sensitivity."), Ts::new(Fam::Reg, 10.0, pal().amber).ls(0.3));
         }
         para(ui, pos2(x, fy + 98.0), 254.0, "Then assign DPI SHIFT (SYSTEM) to a button and save to a slot — the flick works with no software running.", Ts::new(Fam::Reg, 10.0, pal().muted).ls(0.3));
-        ui.add_space(378.0 + extra + warn_h + sender_h + FLICK_H);
+        ui.add_space(378.0 + extra + warn_h + sender_h + FLICK_H + read_h);
     }
 
     pub(crate) fn assign(&mut self, slot: usize, a: Assignment) {

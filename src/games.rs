@@ -1,7 +1,7 @@
 //! G HUB's game database (read at runtime from the local G HUB install) and
 //! a scan for installed games (Steam, Epic, Riot, GOG, Ubisoft, registry rules).
 
-use crate::profile::{KeyCombo, MOD_ALT, MOD_CTRL, MOD_SHIFT, MOD_WIN, P180_CUSTOM, p180_counts_for};
+use crate::profile::{KeyCombo, MOD_ALT, MOD_CTRL, MOD_SHIFT, MOD_WIN, P180_CUSTOM, P180_FORTNITE, P180_GAMES, p180_counts_for, p180_preset_counts};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -493,6 +493,7 @@ pub struct GameSens {
 
 const CS2_ID: &str = "ca572e6a-c76d-4e34-bd64-3665c0d0b0c1";
 const VALORANT_ID: &str = "48574816-5d5d-4e5b-b616-9c3af2c15bbf";
+const FORTNITE_ID: &str = "b2fd8db8-b15c-49f0-91a8-7839ee611aaa";
 
 /// `(sensitivity, m_yaw)` from `cs2_user_convars_0_slot0.vcfg`; `m_yaw` defaults to 0.022.
 pub fn parse_cs2_convars(text: &str) -> Option<(f32, f32)> {
@@ -535,6 +536,80 @@ fn valorant_file() -> Option<PathBuf> {
     newest(dirs_in(&root).into_iter().map(|c| c.join(r"Windows\RiotUserSettings.ini")).filter(|p| p.is_file()))
 }
 
+/// `MouseSensitivityX`/`Y` (then the legacy `MouseSensitivity`, when positive)
+/// from Fortnite's `GameUserSettings.ini` — the decimal the new UI accepts,
+/// rounded to 4 decimals. X is what a horizontal turn uses; Y is the fallback.
+pub fn parse_fortnite_sens(text: &str) -> Option<f32> {
+    let (mut x, mut y, mut legacy) = (None, None, None);
+    for l in text.lines() {
+        let Some((k, v)) = l.split_once('=') else { continue };
+        let Ok(v) = v.trim().parse::<f32>() else { continue };
+        match k.trim() {
+            "MouseSensitivityX" => x = Some(v),
+            "MouseSensitivityY" => y = Some(v),
+            "MouseSensitivity" => legacy = Some(v),
+            _ => {}
+        }
+    }
+    let r4 = |v: f32| (v * 10000.0).round() / 10000.0;
+    [x, y, legacy].into_iter().flatten().find(|&v| v > 0.0).map(r4)
+}
+
+/// The f32 of a FloatProperty `key` in a UE `ClientSettings.Sav`: each
+/// property is `[i32 len][name\0][i32 len][type\0][tag][value]`, and the tag's
+/// layout changed between Fortnite versions, so the value is located as the
+/// 4 bytes right before the next length-prefixed ASCII name.
+fn sav_float(data: &[u8], key: &str) -> Option<f32> {
+    let mut name = key.as_bytes().to_vec();
+    name.push(0);
+    let after_name = data.windows(name.len()).position(|w| w == name)? + name.len();
+    let scope = data.get(after_name..after_name + 96)?;
+    let tag = &scope[scope.windows(14).position(|w| w == b"FloatProperty\0")? + 14..];
+    for o in 9..tag.len().saturating_sub(4).min(48) {
+        let n = i32::from_le_bytes(tag[o..o + 4].try_into().unwrap());
+        if !(2..=64).contains(&n) {
+            continue;
+        }
+        let n = n as usize;
+        let Some(s) = tag.get(o + 4..o + 4 + n) else { break };
+        if s[n - 1] == 0 && s[..n - 1].iter().all(|c| c.is_ascii_graphic() || *c == b' ') {
+            return Some(f32::from_le_bytes(tag[o - 4..o].try_into().unwrap()));
+        }
+    }
+    None
+}
+
+/// `MouseSensitivityX`/`Y` (then legacy `MouseSensitivity`) of a UE `.Sav`
+/// blob; values of 0 or less mean "not set".
+fn fortnite_sav_sens(data: &[u8]) -> Option<f32> {
+    let r4 = |v: f32| (v * 10000.0).round() / 10000.0;
+    ["MouseSensitivityX", "MouseSensitivityY", "MouseSensitivity"].iter().find_map(|k| sav_float(data, k).filter(|&v| v > 0.0)).map(r4)
+}
+
+/// `(sens, file)`: newest first of `GameUserSettings.ini` and every
+/// `ClientSettings.Sav` (`Saved\Config` and per-account `Saved\Cloud\*`);
+/// the first one that actually holds a sensitivity wins.
+fn fortnite_file() -> Option<(f32, PathBuf)> {
+    let root = PathBuf::from(std::env::var("LOCALAPPDATA").ok()?).join("FortniteGame").join("Saved");
+    let mut paths = vec![root.join(r"Config\WindowsClient\GameUserSettings.ini"), root.join(r"Config\ClientSettings.Sav")];
+    paths.extend(dirs_in(&root.join("Cloud")).into_iter().map(|c| c.join("ClientSettings.Sav")));
+    let mut cand: Vec<(std::time::SystemTime, PathBuf)> =
+        paths.into_iter().filter(|p| p.is_file()).filter_map(|p| Some((std::fs::metadata(&p).ok()?.modified().ok()?, p))).collect();
+    cand.sort_by_key(|(t, _)| *t);
+    for (_, p) in cand.into_iter().rev() {
+        let bytes = std::fs::read(&p).ok()?;
+        let sens = if p.extension().is_some_and(|e| e.eq_ignore_ascii_case("sav")) {
+            fortnite_sav_sens(&bytes)
+        } else {
+            parse_fortnite_sens(&String::from_utf8_lossy(&bytes))
+        };
+        if let Some(s) = sens {
+            return Some((s, p));
+        }
+    }
+    None
+}
+
 /// Sensitivity of a supported game plus the file it came from (read-only).
 pub fn game_sensitivity_file(ghub_id: Option<&str>, name: &str) -> Option<(GameSens, PathBuf)> {
     if ghub_id == Some(CS2_ID) || name == "Counter-Strike 2" {
@@ -548,11 +623,35 @@ pub fn game_sensitivity_file(ghub_id: Option<&str>, name: &str) -> Option<(GameS
         let sens = parse_valorant_sens(&std::fs::read_to_string(&file).ok()?)?;
         return Some((GameSens { game: "Valorant", preset: 1, sens, yaw: 0.07, counts: p180_counts_for(0.07, sens)? }, file));
     }
+    if ghub_id == Some(FORTNITE_ID) || name.eq_ignore_ascii_case("Fortnite") {
+        // the file holds the decimal (0.0345); `p180_preset_counts` maps it to
+        // the percentage the preset maths expects, same as the typed field
+        let (sens, file) = fortnite_file()?;
+        return Some((GameSens { game: "Fortnite", preset: P180_FORTNITE, sens, yaw: P180_GAMES[P180_FORTNITE].1, counts: p180_preset_counts(P180_FORTNITE, sens)? }, file));
+    }
     None
 }
 
 pub fn game_sensitivity(ghub_id: Option<&str>, name: &str) -> Option<GameSens> {
     game_sensitivity_file(ghub_id, name).map(|(g, _)| g)
+}
+
+/// `(ghub_id, name)` a `game_sensitivity` parser knows, per Perfect 180 preset
+/// index — the link maps the pill to the game, not the other way around.
+fn preset_game(preset: usize) -> Option<(&'static str, &'static str)> {
+    match preset {
+        0 => Some((CS2_ID, "Counter-Strike 2")),
+        1 => Some((VALORANT_ID, "Valorant")),
+        P180_FORTNITE => Some((FORTNITE_ID, "Fortnite")),
+        _ => None,
+    }
+}
+
+/// The sensitivity behind a Perfect 180 preset's pill: `None` when the preset
+/// is CUSTOM, has no parser, or the settings file is absent.
+pub fn preset_sensitivity(preset: usize) -> Option<GameSens> {
+    let (id, name) = preset_game(preset)?;
+    game_sensitivity(Some(id), name)
 }
 
 #[cfg(test)]
@@ -577,6 +676,56 @@ mod tests {
         let t = "[/Script/X]\nFoo=1\nEAresFloatSettingName::MouseSensitivity=0.159999996\nBar=2\n";
         assert_eq!(parse_valorant_sens(t), Some(0.16));
         assert_eq!(parse_valorant_sens("Foo=1\n"), None);
+    }
+
+    #[test]
+    fn parses_fortnite_sens() {
+        let t = "[/Script/FortniteGame.FortGameUserSettings]\nbUseLegacyInput=False\nMouseSensitivityX=0.138\nMouseSensitivityY=0.12\nMouseTargetingSensitivity=0.55\n";
+        // X is the axis a horizontal turn uses
+        assert_eq!(parse_fortnite_sens(t), Some(0.138));
+        // Y is the fallback when X is missing
+        assert_eq!(parse_fortnite_sens("MouseSensitivityY=0.12\n"), Some(0.12));
+        // the legacy single value counts only when positive
+        assert_eq!(parse_fortnite_sens("MouseSensitivity=-1\n"), None);
+        assert_eq!(parse_fortnite_sens("MouseSensitivityX=-1\nMouseSensitivity=0.55\n"), Some(0.55));
+        assert_eq!(parse_fortnite_sens("bDisableMouseAcceleration=False\n"), None);
+    }
+
+    /// Minimal `ClientSettings.Sav` blob: the value is the last f32 before the
+    /// next length-prefixed name, whatever the tag's exact layout.
+    fn sav_prop(name: &str, tag: &[u8], value: f32) -> Vec<u8> {
+        let mut v = Vec::new();
+        v.extend((name.len() as i32 + 1).to_le_bytes());
+        v.extend(name.as_bytes());
+        v.push(0);
+        v.extend(14i32.to_le_bytes());
+        v.extend(b"FloatProperty\0");
+        v.extend(tag);
+        v.extend(value.to_le_bytes());
+        v
+    }
+
+    #[test]
+    fn parses_fortnite_sav() {
+        // two tag layouts seen on this PC: i64 size + flag (current) and an
+        // older file with an extra zeroed i32 in front of the i32 size
+        let mut d = sav_prop("MouseSensitivity", &[4, 0, 0, 0, 0, 0, 0, 0, 0], -1.0);
+        d.extend(sav_prop("MouseSensitivityX", &[0, 0, 0, 0, 0, 4, 0, 0, 0, 0], 0.0145));
+        d.extend(sav_prop("MouseSensitivityY", &[0, 0, 0, 0, 0, 4, 0, 0, 0, 0], 0.0145));
+        d.extend(13i32.to_le_bytes());
+        d.extend(b"NextProperty\0");
+        assert_eq!(fortnite_sav_sens(&d), Some(0.0145));
+        // legacy -1 = unset -> keep looking (X/Y missing here)
+        assert_eq!(fortnite_sav_sens(&sav_prop("MouseSensitivity", &[4, 0, 0, 0, 0, 0, 0, 0, 0], -1.0)), None);
+        assert_eq!(fortnite_sav_sens(b"no keys at all"), None);
+    }
+
+    #[test]
+    fn fortnite_real_file_when_present() {
+        let Some((sens, file)) = fortnite_file() else { return };
+        println!("fortnite sens {sens} from {}", file.display());
+        assert!((0.001..=1.0).contains(&sens), "{sens}");
+        assert_eq!(game_sensitivity(Some(FORTNITE_ID), "").unwrap().sens, sens);
     }
 
     #[test]

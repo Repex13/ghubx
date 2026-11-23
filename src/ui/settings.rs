@@ -7,6 +7,14 @@ use crate::engine::EngineMsg;
 use egui::{Align2, Color32, CornerRadius, Rect, Stroke, StrokeKind, Ui, pos2, vec2};
 
 const NAV: [&str; 5] = ["General", "Appearance", "G HUB", "Diagnostics", "About"];
+
+/// The G HUB import preview shown while IMPORT is armed: what the swap would
+/// change plus the config it would install (applied on the confirming click).
+pub(crate) struct ImportPreview {
+    pub diff: Vec<String>,
+    pub sum: crate::ghub_import::Summary,
+    pub cfg: crate::profile::Config,
+}
 const ACCENTS: [[u8; 3]; 8] = [
     [0x11, 0x96, 0xff],
     [0x44, 0xd6, 0x2c],
@@ -275,6 +283,10 @@ impl GhubApp {
         text(ui, pos2(main.left(), y), Align2::LEFT_CENTER, "Import from G HUB", Ts::new(Fam::Bold, 15.0, pal().text).ls(0.2));
         text(ui, pos2(main.left(), y + 22.0), Align2::LEFT_CENTER, "Copy profiles, macros, DPI and lighting from G HUB", Ts::new(Fam::Reg, 13.0, pal().label).ls(0.3));
         let armed = self.import_armed.is_some_and(|t| t.elapsed().as_secs_f32() < 4.0);
+        if !armed {
+            self.import_armed = None;
+            self.import_preview = None;
+        }
         let ib = Rect::from_min_size(pos2(main.right() - 190.0, y - 5.0), vec2(190.0, 32.0));
         // settings.db changed on disk since the last import — the watcher set the flag
         if self.ghub_db_changed {
@@ -284,17 +296,52 @@ impl GhubApp {
         if dark_button(ui, ib, label, "s-import", crate::ghub_import::settings_db().is_some()).clicked() {
             if armed {
                 self.import_armed = None;
-                let mut c = self.cfg();
-                match crate::ghub_import::import(&mut c) {
-                    Ok(s) => {
-                        self.edit(|cfg| *cfg = c);
-                        self.ghub_db_changed = false;
-                        self.say(format!("Imported {} profile(s), {} macro(s), {} assignment(s)", s.profiles, s.macros, s.assignments));
+                if let Some(p) = self.import_preview.take() {
+                    // what the diff showed is what gets installed
+                    self.edit(|c| {
+                        c.apps = p.cfg.apps;
+                        c.current_app = 0;
+                        c.persistent = None;
+                        c.profile_switching = p.cfg.profile_switching;
+                    });
+                    self.ghub_db_changed = false;
+                    self.say(format!("Imported {} profile(s), {} macro(s), {} assignment(s)", p.sum.profiles, p.sum.macros, p.sum.assignments));
+                }
+            } else {
+                // first click: copy the db read-only and show what would change
+                let c = self.cfg();
+                match crate::ghub_import::preview(&c) {
+                    Ok((new, sum)) => {
+                        let diff = crate::ghub_import::import_diff(&c, &new);
+                        self.import_preview = Some(ImportPreview { diff, sum, cfg: new });
+                        self.import_armed = Some(std::time::Instant::now());
                     }
                     Err(e) => self.say(format!("Import failed: {e}")),
                 }
-            } else {
-                self.import_armed = Some(std::time::Instant::now());
+            }
+        }
+        // while armed: what the swap would do, and a way out
+        let diff = self.import_preview.as_ref().map(|p| p.diff.clone()).unwrap_or_default();
+        if armed && !diff.is_empty() {
+            let mut dy = y + 38.0;
+            let dr = Rect::from_min_size(pos2(main.right() - 66.0, dy - 3.0), vec2(66.0, 16.0));
+            let d = click(ui, dr, "s-import-dismiss");
+            let dcol = if d.hovered() { pal().primary } else { pal().muted };
+            text(ui, dr.center(), Align2::CENTER_CENTER, "DISMISS", Ts::new(Fam::Bold, 9.5, dcol).ls(0.6));
+            let dismiss = d.on_hover_cursor(egui::CursorIcon::PointingHand).clicked();
+            let extra = diff.len().saturating_sub(6);
+            for line in diff.iter().take(6) {
+                text(ui, pos2(main.left(), dy), Align2::LEFT_CENTER, &format!("· {line}"), Ts::new(Fam::Reg, 11.0, pal().label).ls(0.3));
+                dy += 14.0;
+            }
+            if extra > 0 {
+                text(ui, pos2(main.left(), dy), Align2::LEFT_CENTER, &format!("· +{extra} more"), Ts::new(Fam::Reg, 11.0, pal().muted).ls(0.3));
+                dy += 14.0;
+            }
+            y = dy - 38.0;
+            if dismiss {
+                self.import_armed = None;
+                self.import_preview = None;
             }
         }
         if armed {

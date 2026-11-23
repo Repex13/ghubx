@@ -48,7 +48,7 @@ fn main() {
         Some("export-theme") => std::process::exit(export_theme_cmd(&std::env::args().skip(2).collect::<Vec<_>>())),
         Some("import-theme") => std::process::exit(import_theme_cmd(&std::env::args().skip(2).collect::<Vec<_>>())),
         Some("game-sens") => {
-            for (name, id) in [("Counter-Strike 2", Some("ca572e6a-c76d-4e34-bd64-3665c0d0b0c1")), ("Valorant", Some("48574816-5d5d-4e5b-b616-9c3af2c15bbf"))] {
+            for (name, id) in [("Counter-Strike 2", Some("ca572e6a-c76d-4e34-bd64-3665c0d0b0c1")), ("Valorant", Some("48574816-5d5d-4e5b-b616-9c3af2c15bbf")), ("Fortnite", Some("b2fd8db8-b15c-49f0-91a8-7839ee611aaa"))] {
                 match ghubx::games::game_sensitivity_file(id, name) {
                     Some((g, file)) => println!("{name}: file {} | sensitivity {} | yaw {} | preset {} | {} counts for 180", file.display(), g.sens, g.yaw, ghubx::profile::P180_GAMES[g.preset].0, g.counts),
                     None => println!("{name}: not found"),
@@ -599,7 +599,7 @@ fn fx_sample(args: &[String]) -> i32 {
     let mut best = i32::MAX;
     for round in 1..=3 {
         let (s, e) = (src.screen(area, 0), ghubx::fx::exact_screen(area, 0));
-        let pic = ghubx::fx::screen_picture(640, 640).and_then(|(px, w, h)| pic_average(&px, w, h, area));
+        let pic = ghubx::fx::screen_picture(0, 640, 640).and_then(|(px, w, h)| pic_average(&px, w, h, area));
         let (Some(s), Some(e)) = (s, e) else {
             eprintln!("round {round}: capture failed");
             return 1;

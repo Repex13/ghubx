@@ -441,11 +441,12 @@ pub fn exact_screen(area: ScreenArea, monitor: usize) -> Option<[u8; 3]> {
     win_src::exact_screen(area, monitor)
 }
 
-/// The primary screen scaled to fit `max_w` x `max_h` (aspect kept), as RGBA bytes — the
-/// sample editor's background. Read-only.
+/// Monitor `monitor` (`win::monitors()` order, out of range = primary) scaled
+/// to fit `max_w` x `max_h` (aspect kept), as RGBA bytes — the sample editor's
+/// background. Read-only.
 #[cfg(windows)]
-pub fn screen_picture(max_w: u32, max_h: u32) -> Option<(Vec<u8>, u32, u32)> {
-    win_src::screen_picture(max_w, max_h)
+pub fn screen_picture(monitor: usize, max_w: u32, max_h: u32) -> Option<(Vec<u8>, u32, u32)> {
+    win_src::screen_picture(monitor, max_w, max_h)
 }
 
 #[cfg(not(windows))]

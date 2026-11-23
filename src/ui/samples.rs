@@ -1,7 +1,8 @@
 //! "Edit Samples": G HUB's full-window editor for the user's own SCREEN SAMPLER
-//! areas, drawn on a picture of the primary screen (a generated one in `--shot`
-//! and scripted runs so captures stay deterministic). Changes go through
-//! `self.edit` at once; zones that use a sample follow every edit.
+//! areas, drawn on a picture of the monitor the opening zone samples (a
+//! generated one in `--shot` and scripted runs so captures stay deterministic).
+//! Changes go through `self.edit` at once; zones that use a sample follow
+//! every edit.
 
 use super::theme::*;
 use super::GhubApp;
@@ -13,6 +14,9 @@ use std::time::{Duration, Instant};
 pub struct SampleEditor {
     /// Index into `Config.samples` of the selected sample (handles, name field, DELETE).
     pub sel: Option<usize>,
+    /// Monitor (`win::monitors()` order) the background picture is captured from —
+    /// the `HostFx::monitor` of the zone whose panel opened the editor.
+    pub monitor: usize,
     picture: Option<(Vec<u8>, u32, u32)>,
     tex: Option<TextureHandle>,
     drag: Option<Drag>,
@@ -31,8 +35,8 @@ enum Drag {
 }
 
 impl SampleEditor {
-    pub fn new(sel: Option<usize>) -> Self {
-        Self { sel, picture: None, tex: None, drag: None, restore_arm: None, name: String::new(), name_for: None, name_focused: false }
+    pub fn new(sel: Option<usize>, monitor: usize) -> Self {
+        Self { sel, monitor, picture: None, tex: None, drag: None, restore_arm: None, name: String::new(), name_for: None, name_focused: false }
     }
 
     /// The picture bytes, captured or generated on open and on REFRESH SCREEN.
@@ -44,7 +48,7 @@ impl SampleEditor {
     }
 
     fn refresh(&mut self, synthetic: bool) {
-        self.picture = Some(if synthetic { generated_picture() } else { crate::fx::screen_picture(1280, 720).unwrap_or_else(generated_picture) });
+        self.picture = Some(if synthetic { generated_picture() } else { crate::fx::screen_picture(self.monitor, 1280, 720).unwrap_or_else(generated_picture) });
         self.tex = None;
     }
 }
@@ -94,6 +98,9 @@ impl GhubApp {
         let escape = ui.input(|i| i.key_pressed(egui::Key::Escape)) && !ed.name_focused;
         let open = !(back.clicked() || escape);
         text(ui, pos2(win.left() + 64.0, win.top() + 133.0), Align2::LEFT_CENTER, "Edit Samples", Ts::new(Fam::Bold, 24.0, th.text));
+        // which monitor the background picture came from
+        let mon = if ed.monitor == 0 { "PRIMARY".to_string() } else { format!("MONITOR {}", ed.monitor + 1) };
+        text(ui, pos2(win.right() - 64.0, win.top() + 133.0), Align2::RIGHT_CENTER, &mon, Ts::new(Fam::Reg, 12.0, th.muted).ls(0.5));
 
         // the screen picture: a real capture, or the generated one in --shot / scripted runs
         let synthetic = self.shot.is_some() || self.scripted();

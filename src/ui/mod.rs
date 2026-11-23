@@ -161,6 +161,9 @@ pub struct GhubApp {
     pub(crate) p180_at: Option<Instant>,
     pub(crate) list_view: bool,
     pub(crate) import_armed: Option<Instant>,
+    /// Preview+diff computed on the first IMPORT click; the armed second
+    /// click applies this stored copy (Settings > G HUB).
+    pub(crate) import_preview: Option<settings::ImportPreview>,
     /// The General hotkey field is armed: the next key event is captured.
     pub(crate) hotkey_capture: bool,
     pub(crate) appear_hex: String,
@@ -297,6 +300,7 @@ impl GhubApp {
             ghub_db: Default::default(),
             ghub_db_check: Instant::now(),
             ghub_db_changed: false,
+            import_preview: None,
             theme_edit: None,
             sample_edit: None,
             theme_page: 0,
@@ -411,7 +415,7 @@ impl GhubApp {
             drop(c);
             self.light.zone = 1;
             if page == "sampleedit" {
-                self.sample_edit = Some(samples::SampleEditor::new(Some(1)));
+                self.sample_edit = Some(samples::SampleEditor::new(Some(1), 0));
             }
         }
         if page == "wdl" {
