@@ -124,8 +124,104 @@ pub fn mouse(btn: u8, down: bool) {
     send(&[mouse_input(0, 0, data, flags)]);
 }
 
-pub fn mouse_move(dx: i32, dy: i32) {
-    send(&[mouse_input(dx, dy, 0, MOUSEEVENTF_MOVE)]);
+/// The `mouse_event` argument list for a relative move (`LLMHF_INJECTED` marks
+/// it the same as SendInput — only the API differs).
+fn event_move_args(dx: i32, dy: i32) -> (MOUSE_EVENT_FLAGS, i32, i32, i32, usize) {
+    (MOUSEEVENTF_MOVE, dx, dy, 0, INJECT_TAG)
+}
+
+// MK_* flags a posted WM_MOUSEMOVE carries (stable Win32 values).
+const MK_LBUTTON: usize = 0x0001;
+const MK_RBUTTON: usize = 0x0002;
+const MK_MBUTTON: usize = 0x0010;
+const MK_XBUTTON1: usize = 0x0020;
+const MK_XBUTTON2: usize = 0x0040;
+
+/// `wParam` of a posted WM_MOUSEMOVE: the MK_* bits of held buttons (`held`
+/// uses bit i = button i, the same order as [`mouse`]).
+fn move_wparam(held: u8) -> usize {
+    let mut w = 0;
+    if held & 1 != 0 {
+        w |= MK_LBUTTON;
+    }
+    if held & 2 != 0 {
+        w |= MK_RBUTTON;
+    }
+    if held & 4 != 0 {
+        w |= MK_MBUTTON;
+    }
+    if held & 8 != 0 {
+        w |= MK_XBUTTON1;
+    }
+    if held & 16 != 0 {
+        w |= MK_XBUTTON2;
+    }
+    w
+}
+
+/// `lParam` of a posted WM_MOUSEMOVE: LOWORD = x, HIWORD = y (client coords).
+fn move_lparam(x: i32, y: i32) -> isize {
+    ((y as u16 as i32) << 16 | (x as u16 as i32)) as isize
+}
+
+/// Which mouse buttons are down right now (bit i = button i).
+fn held_mouse() -> u8 {
+    let mut held = 0u8;
+    for (vk, bit) in [(0x01u16, 0), (0x02, 1), (0x04, 2), (0x05, 3), (0x06, 4)] {
+        if unsafe { (GetAsyncKeyState(vk as i32) as u16) & 0x8000 != 0 } {
+            held |= 1 << bit;
+        }
+    }
+    held
+}
+
+/// Posted-move position: `PostMessageW` cannot move the real cursor, so each
+/// post reports a running total — a burst of small deltas reads as one steady
+/// drag. The anchor re-syncs to the real cursor after 300 ms of quiet.
+static POST_POS: Mutex<Option<((i32, i32), std::time::Instant)>> = Mutex::new(None);
+
+fn post_mouse_move(dx: i32, dy: i32) {
+    use std::time::Instant;
+    use windows::Win32::Graphics::Gdi::ScreenToClient;
+    let pos = {
+        let mut g = POST_POS.lock().unwrap();
+        let pos = match *g {
+            Some((p, t)) if t.elapsed() < Duration::from_millis(300) => (p.0 + dx, p.1 + dy),
+            _ => {
+                let c = cursor_pos();
+                (c.0 + dx, c.1 + dy)
+            }
+        };
+        *g = Some((pos, Instant::now()));
+        pos
+    };
+    unsafe {
+        let hwnd = GetForegroundWindow();
+        if hwnd.0.is_null() {
+            return;
+        }
+        let mut pt = POINT { x: pos.0, y: pos.1 };
+        let _ = ScreenToClient(hwnd, &mut pt);
+        let _ = PostMessageW(Some(hwnd), WM_MOUSEMOVE, WPARAM(move_wparam(held_mouse())), LPARAM(move_lparam(pt.x, pt.y)));
+    }
+}
+
+/// Relative mouse move through the picked user-mode sender (Perfect 180's
+/// fallback chain). Boundary from PLAN.md: this is for games with flaky
+/// handling of one API only — user-mode senders, never drivers, Interception,
+/// or raw-input devices, and nothing that could look like anti-cheat
+/// circumvention. Only the move path ever switches; keys/buttons stay on
+/// SendInput.
+pub fn mouse_move(sender: crate::engine::MoveSender, dx: i32, dy: i32) {
+    use crate::engine::MoveSender;
+    match sender {
+        MoveSender::SendInput => send(&[mouse_input(dx, dy, 0, MOUSEEVENTF_MOVE)]),
+        MoveSender::MouseEvent => {
+            let (flags, x, y, data, tag) = event_move_args(dx, dy);
+            unsafe { mouse_event(flags, x, y, data, tag) };
+        }
+        MoveSender::PostMessage => post_mouse_move(dx, dy),
+    }
 }
 
 /// Vertical wheel; positive = up. 120 = one notch.
@@ -1251,5 +1347,31 @@ mod tests {
         assert_eq!(TrayControl::Onboard.label(0), "On-board profile");
         assert_eq!(TrayControl::NoDevice.label(0), "Connect your G502 HERO");
         assert_eq!(TrayControl::default(), TrayControl::NoDevice);
+    }
+
+    #[test]
+    fn event_move_args_are_a_relative_move() {
+        let (flags, dx, dy, data, tag) = event_move_args(120, -45);
+        assert_eq!(flags, MOUSEEVENTF_MOVE);
+        assert_eq!((dx, dy, data, tag), (120, -45, 0, INJECT_TAG));
+    }
+
+    #[test]
+    fn move_lparam_packs_loword_x_hiword_y() {
+        assert_eq!(move_lparam(5, 7) as i64, (7 << 16) | 5);
+        // negative coordinates keep their 16-bit two's-complement halves (the
+        // isize sign-extends a negative HIWORD; the low 32 bits are what
+        // PostMessageW delivers)
+        assert_eq!(move_lparam(-1, 700) as i64 as u64 & 0xFFFF_FFFF, (700 << 16) | 0xFFFF);
+        assert_eq!(move_lparam(-300, -200) as i64 as u64 & 0xFFFF_FFFF, 0xFF38_FED4);
+    }
+
+    #[test]
+    fn move_wparam_marks_held_buttons() {
+        assert_eq!(move_wparam(0), 0);
+        assert_eq!(move_wparam(0b00001), MK_LBUTTON);
+        assert_eq!(move_wparam(0b00110), MK_RBUTTON | MK_MBUTTON);
+        assert_eq!(move_wparam(0b11000), MK_XBUTTON1 | MK_XBUTTON2);
+        assert_eq!(move_wparam(0b11111), MK_LBUTTON | MK_RBUTTON | MK_MBUTTON | MK_XBUTTON1 | MK_XBUTTON2);
     }
 }

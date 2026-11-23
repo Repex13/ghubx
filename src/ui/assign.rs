@@ -588,18 +588,24 @@ impl GhubApp {
         let warn_text = format!("{} cm of mouse travel for one full turn. That is not a real setting: check the sensitivity.", thousands(travel.round() as i64));
         let warn_g = warn.then(|| galley(ui, &warn_text, Ts::new(Fam::Reg, 11.0, pal().amber).ls(0.4), 254.0));
         let warn_h = warn_g.as_ref().map_or(0.0, |g| g.size().y + 8.0);
-        let box_r = Rect::from_min_size(top, vec2(278.0, 366.0 + extra + warn_h + FLICK_H));
-        ui.painter().rect_filled(box_r, CornerRadius::same(8), pal().surface_hi);
-        let x = box_r.left() + 12.0;
-        text(ui, pos2(x, box_r.top() + 12.0), Align2::LEFT_TOP, "PERFECT 180", Ts::new(Fam::Bold, 12.0, pal().text));
-        para(ui, pos2(x, box_r.top() + 30.0), 254.0, "One press turns you 180°. Calibrate it from your in-game sensitivity.", Ts::new(Fam::Reg, 11.0, pal().muted).ls(0.4));
-
-        // game presets (3 x 2); a count that doesn't match the preset maths shows as CUSTOM
+        // the preset the pills show (a count that doesn't match the preset
+        // maths is CUSTOM); resolved before the box so its height can grow for
+        // the blocked note
         let mut game = cal.game.min(P180_GAMES.len() - 1);
         if game != P180_CUSTOM && p180_preset_counts(game, cal.sens) != Some(cal.counts) {
             game = P180_CUSTOM;
         }
         let shown_game = game;
+        // `sender_h`: SENDER pills + the optional blocked note under SPEED
+        let blocked = e.p180_blocked.contains(&game);
+        let sender_h = 80.0 + if blocked { 26.0 } else { 0.0 };
+        let box_r = Rect::from_min_size(top, vec2(278.0, 366.0 + extra + warn_h + sender_h + FLICK_H));
+        ui.painter().rect_filled(box_r, CornerRadius::same(8), pal().surface_hi);
+        let x = box_r.left() + 12.0;
+        text(ui, pos2(x, box_r.top() + 12.0), Align2::LEFT_TOP, "PERFECT 180", Ts::new(Fam::Bold, 12.0, pal().text));
+        para(ui, pos2(x, box_r.top() + 30.0), 254.0, "One press turns you 180°. Calibrate it from your in-game sensitivity.", Ts::new(Fam::Reg, 11.0, pal().muted).ls(0.4));
+
+        // game presets (3 x 2)
         let mut recalc = false;
         for (slot, &i) in P180_ORDER.iter().enumerate() {
             let r = Rect::from_min_size(pos2(x + (slot % 3) as f32 * 86.0, box_r.top() + 66.0 + (slot / 3) as f32 * 26.0), vec2(82.0, 22.0));
@@ -685,6 +691,32 @@ impl GhubApp {
         let ms_changed = slider(ui, speed_r, &mut ms, 0.0..=200.0, "p180-ms");
         text(ui, pos2(box_r.right() - 12.0, row(4)), Align2::RIGHT_CENTER, &format!("{}ms", ms.round() as u16), t_body_bold());
 
+        // SENDER: which user-mode API the turn's moves ride on. A fallback for
+        // games with flaky handling of one API — never an anti-cheat workaround
+        // (a game that drops injected input drops all three; PLAN.md's boundary
+        // keeps drivers, Interception and raw-input devices out of scope). The
+        // honest answer for a blocked game is the HARDWARE FLICK below.
+        text(ui, pos2(x, row(5)), Align2::LEFT_CENTER, "SENDER", t_small_label());
+        {
+            let link = Rect::from_min_size(pos2(x + 104.0, row(5) - 11.0), vec2(150.0, 22.0));
+            let lr = click(ui, link, "p180-blocked");
+            let col = if blocked { pal().amber } else if lr.hovered() { pal().primary_hover } else { pal().primary };
+            text(ui, pos2(x + 254.0, row(5)), Align2::RIGHT_CENTER, "GAME BLOCKS IT", Ts::new(Fam::Bold, 9.5, col).ls(0.3));
+            if lr.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                self.edit(|c| p180_toggle_blocked(&mut c.extras.p180_blocked, game));
+            }
+        }
+        for (v, label) in [(0u8, "SENDINPUT"), (1, "MOUSE_EVENT"), (2, "POST_MSG")] {
+            let pr = Rect::from_min_size(pos2(x + v as f32 * 86.0, row(5) + 20.0), vec2(82.0, 22.0));
+            if pill_sized(ui, pr, label, e.p180_sender == v, 8.5, ("p180-sender", v)).clicked() && e.p180_sender != v {
+                self.edit(|c| c.extras.p180_sender = v);
+                let _ = self.eng.send(EngineMsg::SetSender(v));
+            }
+        }
+        if blocked {
+            para(ui, pos2(x, row(5) + 48.0), 254.0, "marked as blocking injected turns — try HARDWARE FLICK instead", Ts::new(Fam::Reg, 10.0, pal().amber).ls(0.3));
+        }
+
         if recalc && let Some(c) = p180_preset_counts(game, sens_val) {
             counts = c;
         }
@@ -708,7 +740,7 @@ impl GhubApp {
             });
         }
 
-        let br = Rect::from_min_size(pos2(x, row(4) + 20.0), vec2(254.0, 26.0));
+        let br = Rect::from_min_size(pos2(x, row(4) + 20.0 + sender_h), vec2(254.0, 26.0));
         let label = match self.p180_at {
             Some(t) => format!("TURNING IN {}…", 3 - t.elapsed().as_secs().min(2)),
             None => "TEST IN 3 SECONDS".into(),
@@ -758,7 +790,7 @@ impl GhubApp {
             para(ui, pos2(x, ab.top() + 4.0), 254.0, &format!("Needs {raw} DPI — outside 100–25,600. Give yourself a longer swipe or a higher sensitivity."), Ts::new(Fam::Reg, 10.0, pal().amber).ls(0.3));
         }
         para(ui, pos2(x, fy + 98.0), 254.0, "Then assign DPI SHIFT (SYSTEM) to a button and save to a slot — the flick works with no software running.", Ts::new(Fam::Reg, 10.0, pal().muted).ls(0.3));
-        ui.add_space(378.0 + extra + warn_h + FLICK_H);
+        ui.add_space(378.0 + extra + warn_h + sender_h + FLICK_H);
     }
 
     pub(crate) fn assign(&mut self, slot: usize, a: Assignment) {

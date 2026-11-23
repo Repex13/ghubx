@@ -500,6 +500,48 @@ def flick_apply():
     must(dpi["shift"] == 2400 and 2400 in dpi["levels"], dpi)
 
 
+# PERFECT 180 box after `scroll -200` (matches the p180blocked shot page):
+# SENDER row at y~623, pills at y~656.
+P180_SENDER = {0: (145, 656), 1: (231, 656), 2: (317, 656)}  # SENDINPUT / MOUSE_EVENT / POST_MSG
+P180_BLOCKED_LINK = "click 330 623"  # GAME BLOCKS IT
+
+
+def p180_cs2_config(sender=None, blocked=None):
+    """Seed with CS2's real counts so the CS2 preset shows selected."""
+    cfg = re.sub(r"(?m)^p180_counts\s*=.*$", "p180_counts = 8182", seed_config())
+    extra = ""
+    if sender is not None:
+        extra += f"p180_sender = {sender}\n"
+    if blocked is not None:
+        extra += f"p180_blocked = [{', '.join(map(str, blocked))}]\n"
+    return cfg.replace("p180_angle = 180", f"p180_angle = 180\n{extra}")
+
+
+@scenario
+def p180_sender():
+    open_actions = device_assign() + [TAB_ACTIONS, SETTLE, "scroll 230 500 -200", SETTLE]
+    for v in (1, 2):  # MOUSE_EVENT, POST_MSG (config is saved on quit: one pick per run)
+        x, y = P180_SENDER[v]
+        res = run_script(f"p180_sender_{v}", open_actions + [f"click {x} {y}", "shot {shots}/picked.png", SETTLE],
+                         config=p180_cs2_config())
+        ok_run(res)
+        must(res.cfg["extras"].get("p180_sender") == v, res.cfg["extras"])
+    # SENDINPUT back off from a seeded MOUSE_EVENT pick
+    res = run_script("p180_sender_0", open_actions + [click(P180_SENDER[0]), SETTLE],
+                     config=p180_cs2_config(sender=1))
+    ok_run(res)
+    must(res.cfg["extras"].get("p180_sender") == 0, res.cfg["extras"])
+    # GAME BLOCKS IT marks the shown preset (CS2 = index 0), clicking again unmarks it
+    res = run_script("p180_block_on", open_actions + [P180_BLOCKED_LINK, "shot {shots}/blocked.png", SETTLE],
+                     config=p180_cs2_config())
+    ok_run(res)
+    must(res.cfg["extras"].get("p180_blocked") == [0], res.cfg["extras"])
+    res = run_script("p180_block_off", open_actions + [P180_BLOCKED_LINK, SETTLE],
+                     config=p180_cs2_config(blocked=[0]))
+    ok_run(res)
+    must(not res.cfg["extras"].get("p180_blocked"), res.cfg["extras"])
+
+
 @scenario
 def sensitivity():
     res = run_script("sensitivity", ["wait 1500", HOME_TILE, SETTLE, RAIL_SENS, SETTLE,

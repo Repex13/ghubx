@@ -874,6 +874,17 @@ pub fn p180_counts_for(yaw: f32, sens: f32) -> Option<i32> {
     (yaw > 0.0 && sens > 0.0).then(|| (180.0 / (yaw * sens)).round().clamp(1.0, 1_000_000.0) as i32)
 }
 
+/// Toggle a preset in the blocked-games set (`extras.p180_blocked`), kept
+/// sorted for stable serialization.
+pub fn p180_toggle_blocked(blocked: &mut Vec<usize>, game: usize) {
+    match blocked.binary_search(&game) {
+        Ok(i) => {
+            blocked.remove(i);
+        }
+        Err(i) => blocked.insert(i, game),
+    }
+}
+
 /// Shift DPI that makes a physical swipe of `swipe_cm` cover `counts` counts
 /// (one 180°): `counts / dpi × 2.54 = cm`, rounded to the sensor's 50-count
 /// steps. `None` when the needed DPI is outside 100..=25600 — the swipe is
@@ -923,6 +934,13 @@ pub struct Extras {
     pub p180_sens: f32,
     /// Turn angle in degrees (180 = a half turn).
     pub p180_angle: u16,
+    /// Which user-mode API the injected turn's moves ride on: 0 SendInput,
+    /// 1 `mouse_event`, 2 a posted `WM_MOUSEMOVE` (see `engine::MoveSender`).
+    pub p180_sender: u8,
+    /// `P180_GAMES` presets the user marked as blocking injected turns (a
+    /// reminder, not a hard block — TEST still fires).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub p180_blocked: Vec<usize>,
     pub scroll_accel: bool,
     /// Extra wheel ticks per tick at full speed.
     pub scroll_boost: f32,
@@ -930,7 +948,7 @@ pub struct Extras {
 
 impl Default for Extras {
     fn default() -> Self {
-        Self { p180_counts: 8182, p180_ms: 60, p180_steps: 12, p180_game: 0, p180_sens: 1.0, p180_angle: 180, scroll_accel: false, scroll_boost: 3.0 }
+        Self { p180_counts: 8182, p180_ms: 60, p180_steps: 12, p180_game: 0, p180_sens: 1.0, p180_angle: 180, p180_sender: 0, p180_blocked: Vec::new(), scroll_accel: false, scroll_boost: 3.0 }
     }
 }
 
@@ -1198,6 +1216,9 @@ impl Config {
         }
         self.current_app = self.current_app.min(self.apps.len() - 1);
         fix_fortnite_counts(self.extras.p180_game, self.extras.p180_sens, &mut self.extras.p180_counts);
+        self.extras.p180_blocked.retain(|&i| i < P180_GAMES.len());
+        self.extras.p180_blocked.sort_unstable();
+        self.extras.p180_blocked.dedup();
         for p in self.apps.iter_mut().flat_map(|a| a.profiles.iter_mut()) {
             if let Some(t) = &mut p.turn {
                 fix_fortnite_counts(t.game, t.sens, &mut t.counts);
@@ -2392,6 +2413,45 @@ bass_only = true
         // older configs without the calculator fields still load
         let e: Extras = toml::from_str("p180_counts = 1800\np180_ms = 60\np180_steps = 12\nscroll_accel = false\nscroll_boost = 3.0").unwrap();
         assert_eq!((e.p180_counts, e.p180_game, e.p180_sens), (1800, 0, 1.0));
+    }
+
+    #[test]
+    fn p180_sender_and_blocked_serde() {
+        let e: Extras = toml::from_str("p180_counts = 1800\np180_sender = 2\np180_blocked = [0, 5]").unwrap();
+        assert_eq!(e.p180_sender, 2);
+        assert_eq!(e.p180_blocked, vec![0, 5]);
+        // older configs without the fields default to SendInput + nothing blocked
+        let old: Extras = toml::from_str("p180_counts = 1800\np180_ms = 60\np180_steps = 12\nscroll_accel = false\nscroll_boost = 3.0").unwrap();
+        assert_eq!(old.p180_sender, 0);
+        assert!(old.p180_blocked.is_empty());
+        // an empty blocked set is not written back out
+        let toml = toml::to_string_pretty(&Extras::default()).unwrap();
+        assert!(!toml.contains("p180_blocked"), "{toml}");
+        assert!(toml.contains("p180_sender = 0"), "{toml}");
+    }
+
+    #[test]
+    fn p180_toggle_blocked_adds_removes_sorted() {
+        let mut b = Vec::new();
+        p180_toggle_blocked(&mut b, 5);
+        assert_eq!(b, [5]);
+        p180_toggle_blocked(&mut b, 0);
+        assert_eq!(b, [0, 5]);
+        p180_toggle_blocked(&mut b, 2);
+        assert_eq!(b, [0, 2, 5]);
+        p180_toggle_blocked(&mut b, 5);
+        assert_eq!(b, [0, 2]);
+        p180_toggle_blocked(&mut b, 0);
+        p180_toggle_blocked(&mut b, 2);
+        assert!(b.is_empty());
+    }
+
+    #[test]
+    fn sanitize_drops_unknown_blocked_games() {
+        let mut c = Config::default();
+        c.extras.p180_blocked = vec![5, 99, 1, 5, 0];
+        c.sanitize();
+        assert_eq!(c.extras.p180_blocked, vec![0, 1, 5]);
     }
 
     #[test]

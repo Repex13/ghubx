@@ -110,7 +110,7 @@ fn main() -> eframe::Result<()> {
     let lua = if dev || shot.is_some() {
         ghubx::lua::Handle::fixed()
     } else {
-        ghubx::lua::Handle::spawn_with(std::sync::Arc::new(ghubx::engine::RealInput), std::sync::Arc::new(ghubx::win::is_vk_down), Some(eng_tx.clone()))
+        ghubx::lua::Handle::spawn_with(std::sync::Arc::new(ghubx::engine::RealInput::new(cfg.lock().unwrap().extras.p180_sender)), std::sync::Arc::new(ghubx::win::is_vk_down), Some(eng_tx.clone()))
     };
     // Notification feed + update worker (fixed no-op in observer/test modes).
     let feed = ghubx::notify::Feed::default();

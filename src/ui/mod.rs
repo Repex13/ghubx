@@ -316,7 +316,7 @@ impl GhubApp {
     fn prepare_shot(&mut self, page: &str) {
         self.route = match page {
             "home" | "dropdown" => Route::Home,
-            "assign" | "assign2" | "gshift" | "macro" | "macroname" | "macrotype" | "macroseq" | "macroedit" | "macrorec" | "macromenu" | "macrocustom" | "macrofold" | "macroconfirm" | "macroaction" | "select" | "keys" | "actions" | "obsactions" | "obsnew" | "p180warn" | "gamecmds" | "p180game" => Route::Device(DevTab::Assignments),
+            "assign" | "assign2" | "gshift" | "macro" | "macroname" | "macrotype" | "macroseq" | "macroedit" | "macrorec" | "macromenu" | "macrocustom" | "macrofold" | "macroconfirm" | "macroaction" | "select" | "keys" | "actions" | "obsactions" | "obsnew" | "p180warn" | "p180blocked" | "gamecmds" | "p180game" => Route::Device(DevTab::Assignments),
             "sens" => Route::Device(DevTab::Sensitivity),
             "light" | "fixed" | "wdl" | "effectmenu" | "screenfx" | "screenfxmine" | "sampleedit" | "audiofx" | "audiofxadv" | "reactivefx" => Route::Device(DevTab::Lighting),
             "devset" | "onboard" | "slotmenu" | "slotconfirm" | "slotdetails" | "slotassign" => Route::DeviceSettings,
@@ -332,7 +332,7 @@ impl GhubApp {
         self.asg.tab = match page {
             "macro" | "macroname" | "macrotype" | "macroseq" | "macroedit" | "macrorec" | "macromenu" | "macrocustom" | "macrofold" | "macroconfirm" | "macroaction" => 3,
             "keys" => 1,
-            "actions" | "p180game" | "p180warn" | "obsactions" | "obsnew" => 2,
+            "actions" | "p180game" | "p180warn" | "p180blocked" | "obsactions" | "obsnew" => 2,
             _ => 0,
         };
         if page == "select" {
@@ -346,6 +346,19 @@ impl GhubApp {
             c.extras.p180_game = 0;
             c.extras.p180_sens = 0.01;
             c.extras.p180_counts = 818_182;
+            drop(c);
+            self.asg.scroll_to = Some(200.0);
+        }
+        if page == "p180blocked" {
+            let mut c = self.cfg.lock().unwrap();
+            // CS2 marked as blocking injected turns, sender picked on the
+            // second pill; counts stay the preset value so the CS2 pill shows
+            // selected (otherwise the pick resolves to CUSTOM)
+            c.extras.p180_game = 0;
+            c.extras.p180_sens = 1.0;
+            c.extras.p180_counts = 8182;
+            c.extras.p180_blocked = vec![0];
+            c.extras.p180_sender = 1;
             drop(c);
             self.asg.scroll_to = Some(200.0);
         }

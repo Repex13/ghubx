@@ -25,9 +25,58 @@ pub trait Input: Send + Sync {
     fn text(&self, s: &str);
     /// Open a file, folder, URL or program.
     fn launch(&self, path: &str);
+    /// Which sender this input uses for relative moves (`Extras.p180_sender`);
+    /// test sinks report 0 (SendInput).
+    fn sender(&self) -> u8 {
+        0
+    }
 }
 
-pub struct RealInput;
+/// Which user-mode API a Perfect 180 turn's relative moves ride on. The
+/// fallback chain exists for games with *flaky* handling of one API — it must
+/// never try to get around anti-cheat: no drivers, no Interception, no
+/// raw-input devices (the hard boundary in PLAN.md). Games that drop injected
+/// input entirely need the HARDWARE FLICK instead.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MoveSender {
+    /// `SendInput` + `MOUSEEVENTF_MOVE` — the same call every other action uses.
+    #[default]
+    SendInput = 0,
+    /// Legacy `mouse_event` — same `LLMHF_INJECTED` flag, an older API some
+    /// games treat differently.
+    MouseEvent = 1,
+    /// `PostMessageW(WM_MOUSEMOVE)` to the foreground window — games reading
+    /// window messages see it; raw-input readers ignore it entirely.
+    PostMessage = 2,
+}
+
+impl MoveSender {
+    /// `Extras.p180_sender` byte -> sender; anything unknown is SendInput.
+    pub fn from_u8(v: u8) -> Self {
+        match v {
+            1 => Self::MouseEvent,
+            2 => Self::PostMessage,
+            _ => Self::SendInput,
+        }
+    }
+
+    /// Sender -> its `Extras.p180_sender` byte.
+    pub fn as_u8(self) -> u8 {
+        self as u8
+    }
+}
+
+/// The OS-side input sink; `sender` picks the API relative moves ride on
+/// (Perfect 180 is the only move source — keys/buttons stay on SendInput).
+pub struct RealInput {
+    pub sender: MoveSender,
+}
+
+impl RealInput {
+    pub fn new(sender: u8) -> Self {
+        Self { sender: MoveSender::from_u8(sender) }
+    }
+}
 
 impl Input for RealInput {
     fn key(&self, vk: u16, down: bool) {
@@ -37,7 +86,7 @@ impl Input for RealInput {
         win::mouse(btn, down);
     }
     fn mouse_move(&self, dx: i32, dy: i32) {
-        win::mouse_move(dx, dy);
+        win::mouse_move(self.sender, dx, dy);
     }
     fn wheel(&self, delta: i32) {
         win::wheel(delta);
@@ -50,6 +99,9 @@ impl Input for RealInput {
     }
     fn launch(&self, path: &str) {
         win::launch(path);
+    }
+    fn sender(&self) -> u8 {
+        self.sender.as_u8()
     }
 }
 
@@ -136,6 +188,9 @@ pub enum EngineMsg {
     WriteOnboard { sectors: Vec<(u16, [u8; 256])>, active: Option<u8> },
     /// The mouse reloaded its stored profile (after a sector write): send everything again.
     Reapply,
+    /// The Perfect 180 sender pick changed (`Extras.p180_sender`): swap the real
+    /// input to it live so the next move uses the new API.
+    SetSender(u8),
     /// Restore slots from the mouse's ROM copies.
     RestoreOnboard { slots: Vec<u16> },
     /// A toggle macro's `repeat_count` ended its loop: forget the toggle (id).
@@ -218,6 +273,7 @@ pub struct Engine {
 
 impl Engine {
     pub fn new(cfg: Arc<Mutex<Config>>, dev: Sender<DevCmd>, ui: Sender<UiEvent>) -> Self {
+        let sender = cfg.lock().unwrap().extras.p180_sender;
         Self {
             cfg,
             dev,
@@ -241,7 +297,7 @@ impl Engine {
             fx_last: [None, None],
             persist: true,
             flash_until: None,
-            input: Arc::new(RealInput),
+            input: Arc::new(RealInput::new(sender)),
             loopback: None,
             lua: crate::lua::Handle::fixed(),
             lua_script: String::new(),
@@ -343,6 +399,7 @@ impl Engine {
                     }
                     Ok(EngineMsg::WriteOnboard { sectors, active }) => self.on_write_onboard(sectors, active),
                     Ok(EngineMsg::Reapply) => self.on_reapply(),
+                    Ok(EngineMsg::SetSender(v)) => self.set_sender(v),
                     Ok(EngineMsg::RestoreOnboard { slots }) => self.on_restore_onboard(slots),
                     Ok(EngineMsg::SetStartupEffect(on)) => {
                         if !observer() && self.st.connected && !self.st.ghub_running {
@@ -451,6 +508,13 @@ impl Engine {
         } else {
             let _ = self.dev.send(DevCmd::RestoreOnboard { slots });
         }
+    }
+
+    /// The P180 sender pick changed: rebuild the real input so the next move
+    /// rides the new API. (The Lua worker's own `RealInput` keeps the pick it
+    /// was spawned with — only the engine's turns switch live.)
+    fn set_sender(&mut self, v: u8) {
+        self.input = Arc::new(RealInput::new(v));
     }
 
     /// A sector write reloads the mouse's stored profile; forget what we applied and send it all again.
@@ -2129,5 +2193,43 @@ mod tests {
             let slept = p.pass(&[s.clone()], &mut down, &mut rng);
             assert!((10..=30).contains(&slept), "{slept}");
         }
+    }
+
+    #[test]
+    fn move_sender_byte_roundtrip() {
+        for (v, want) in [(0, MoveSender::SendInput), (1, MoveSender::MouseEvent), (2, MoveSender::PostMessage), (9, MoveSender::SendInput), (255, MoveSender::SendInput)] {
+            assert_eq!(MoveSender::from_u8(v), want, "from_u8({v})");
+        }
+        for s in [MoveSender::SendInput, MoveSender::MouseEvent, MoveSender::PostMessage] {
+            assert_eq!(MoveSender::from_u8(s.as_u8()), s);
+        }
+        assert_eq!(MoveSender::default(), MoveSender::SendInput);
+        assert_eq!(RealInput::new(2).sender, MoveSender::PostMessage);
+    }
+
+    #[test]
+    fn engine_seeds_sender_from_the_config() {
+        let (dev_tx, _d) = unbounded();
+        let (ui_tx, _u) = unbounded();
+        let mut cfg = Config::default();
+        cfg.extras.p180_sender = 2;
+        let e = Engine::new(Arc::new(Mutex::new(cfg)), dev_tx, ui_tx);
+        assert_eq!(e.input.sender(), 2);
+        let e = Engine::new(Arc::new(Mutex::new(Config::default())), unbounded().0, unbounded().0);
+        assert_eq!(e.input.sender(), 0);
+    }
+
+    #[test]
+    fn set_sender_swaps_the_real_input_live() {
+        // The recorder is swapped out for a RealInput here; nothing after this
+        // point in the test may press buttons (that would touch the OS).
+        let mut r = rig(|_| {});
+        assert_eq!(r.e.input.sender(), 0);
+        r.e.set_sender(2);
+        assert_eq!(r.e.input.sender(), 2);
+        r.e.set_sender(1);
+        assert_eq!(r.e.input.sender(), 1);
+        r.e.set_sender(9); // unknown falls back to SendInput
+        assert_eq!(r.e.input.sender(), 0);
     }
 }
