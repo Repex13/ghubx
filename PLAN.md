@@ -141,17 +141,17 @@ Now that the repo is public (`https://github.com/Repex13/ghubx`):
   via the normal `edit()` reconcile. Dialogs run on a helper thread;
   buttons are inert in observer mode. Restore does not touch the mouse's
   on-board slots — says so in the UI.
-- **READ FROM GAME: R6 Siege + Apex** `[done TBD]` — the R6 SIEGE preset's
+- **READ FROM GAME: R6 Siege + Apex** `[done 90a544e]` — the R6 SIEGE preset's
   link reads the newest `GameSettings.ini` under `Documents\My Games`
   (`MouseYawSensitivity x MouseSensitivityMultiplierUnit` is the normalised
   sens — Ubisoft's own coefficient), and the shared CS2/APEX pill falls back
   to Apex's `settings.cfg` when CS2 isn't installed. `probe game-sens`
   prints all five readers.
-- **Toast quiet-while-gaming** `[done TBD]` — `win::foreground_fullscreen`
+- **Toast quiet-while-gaming** `[done 90a544e]` — `win::foreground_fullscreen`
   (foreground window covering its monitor) folds into `notify::maybe_toast`,
   so feed balloons never pop mid-match; the note still lands in the bell
   feed, and a suppressed push doesn't consume the 2 s gap.
-- **G-Shift live badge** `[done TBD]` — a dot beside the G-SHIFT layer
+- **G-Shift live badge** `[done 90a544e]` — a dot beside the G-SHIFT layer
   switch on Assignments lights while the device reports the bound button
   held (same spy mask as INPUT MONITOR), so a G-Shift bind can be verified
   without opening Diagnostics.
