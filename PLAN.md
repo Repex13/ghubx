@@ -130,7 +130,7 @@ Now that the repo is public (`https://github.com/Repex13/ghubx`):
   into `backups/` on every write/import, keep last 10.
 - **Diagnostics page** `[done 5e67bc3]` — firmware version, HID++ feature table,
   one-click "copy report" for debugging.
-- **INPUT MONITOR** `[done TBD]` — on Diagnostics: all 11 spy slots as
+- **INPUT MONITOR** `[done acc2799]` — on Diagnostics: all 11 spy slots as
   `G1..G11` capsules that light while the physical button is held, from the
   live `UiEvent::Buttons` mask, with the raw hex beside them. For checking
   which G-key a press really is before binding P180/FLICK/macros.
