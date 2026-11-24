@@ -25,7 +25,7 @@ Now that the repo is public (`https://github.com/Repex13/ghubx`):
 - **Notification feed** — G HUB's bell, locally: unread dot on a header
   icon + a dropdown list. Feeds "update available", "G HUB started —
   GHUB-X now observing", "OBS disconnected", "profile switched to X".
-- **Windows toasts** `[done TBD]` — the feed's note hook
+- **Windows toasts** `[done e92aebc]` — the feed's note hook
   (`notify::Feed::set_note_hook`, the single funnel every producer pushes
   through) fires `win::tray_balloon` when `general.toasts` is on, a tray
   icon exists, and ≥ `TOAST_GAP` (2 s) passed since the last balloon —
@@ -73,7 +73,7 @@ Now that the repo is public (`https://github.com/Repex13/ghubx`):
   process-wide atomic `SetSender` overwrites; the Lua worker's
   `RealInput` reads it for every `MoveMouse` dispatch, so a sender pick
   changed after spawn applies without rebuilding the worker.
-- **Auto-script 180 (MAKE A LUA 180)** `[done TBD]` — the P180 panel writes
+- **Auto-script 180 (MAKE A LUA 180)** `[done e92aebc]` — the P180 panel writes
   the calibrated turn into the active profile's Lua script as an editable
   `OnEvent` block bound to a chosen G-key (G4..G11 -> `G_PRESSED` arg), the
   "logitech method" (`MoveMouseRelative`). `profile::p180_lua_snippet` emits
@@ -126,7 +126,7 @@ Now that the repo is public (`https://github.com/Repex13/ghubx`):
   into `backups/` on every write/import, keep last 10.
 - **Diagnostics page** `[done 5e67bc3]` — firmware version, HID++ feature table,
   one-click "copy report" for debugging.
-- **Whole-config export/restore** `[done TBD]` — Settings > G HUB > CONFIG
+- **Whole-config export/restore** `[done e92aebc]` — Settings > G HUB > CONFIG
   BACKUP: EXPORT CONFIG saves the whole setup as one `.toml`; RESTORE
   CONFIG parses through the real `Config` loader (`profile::export_config`
   / `import_config`), snapshots a backup first, then replaces everything
