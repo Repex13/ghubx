@@ -619,6 +619,22 @@ def p180_lua():
 P180_LUA_REMOVE = "click 330 694"  # REMOVE link under ADD TO SCRIPT
 
 
+P180_LUA_TEST = "click 268 694"  # TEST link left of REMOVE under ADD TO SCRIPT
+
+
+@scenario
+def p180_lua_test():
+    """TEST shows with the managed block and leaves the script untouched."""
+    open_actions = device_assign() + [TAB_ACTIONS, SETTLE, "scroll 230 500 -240", SETTLE]
+    res = run_script("p180_lua_test", open_actions + [P180_LUA_ADD, SETTLE,
+                                                      "shot {shots}/added.png",
+                                                      P180_LUA_TEST, SETTLE])
+    ok_run(res)
+    s = prof(res.cfg).get("script", "")
+    must(s.count("GHUB-X PERFECT 180") == 2 and "MoveMouseRelative" in s, s)
+    must(text_pixels(res, "added.png", (252, 686, 286, 702)), "TEST missing after ADD TO SCRIPT")
+
+
 @scenario
 def p180_lua_remove():
     """REMOVE shows only while the script holds a managed block and deletes it."""
@@ -1051,13 +1067,13 @@ def hotkey_set():
     # Settings > General: the capture field stores vk=F5 mods=0 (scripts send no
     # modifiers); the run is "(tray only)" but capture still writes the config.
     res = run_script("hotkey_set", ["wait 1500", GEAR, SETTLE, NAV_GENERAL, SETTLE,
-                                    "click 860 394",  # hotkey capture field
+                                    "click 850 432",  # hotkey capture field
                                     SETTLE, "key F5", SETTLE])
     ok_run(res)
     must(res.cfg["general"].get("profile_hotkey") == {"mods": 0, "vk": 116}, res.cfg["general"])
     cfg = seed_config().replace("dpi_flash = false", "dpi_flash = false\nprofile_hotkey = { mods = 0, vk = 116 }")
     res = run_script("hotkey_clear", ["wait 1500", GEAR, SETTLE, NAV_GENERAL, SETTLE,
-                                      "click 961 394",  # X clears the hotkey
+                                      "click 960 432",  # X clears the hotkey
                                       SETTLE], config=cfg)
     ok_run(res)
     must("profile_hotkey" not in res.cfg["general"], res.cfg["general"])

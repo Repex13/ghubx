@@ -823,9 +823,22 @@ impl GhubApp {
             });
             self.say(format!("Lua 180 bound to G{g}"));
         }
-        // While the script actually holds a managed block, a REMOVE link sits
-        // under the button (same edit -> ConfigChanged -> lua_sync path).
+        // While the script actually holds a managed block, TEST and REMOVE
+        // links sit under the button (REMOVE uses the same edit ->
+        // ConfigChanged -> lua_sync path; TEST fires the G-key event at the
+        // worker through the engine).
         if cfg.current().1.script.contains(P180_LUA_OPEN) {
+            let tr = click(ui, Rect::from_min_size(pos2(x + 254.0 - 118.0, ly + 30.0), vec2(52.0, 14.0)), "p180-lua-test");
+            let tc = if tr.hovered() { pal().primary_hover } else { pal().muted };
+            text(ui, pos2(x + 254.0 - 62.0, tr.rect.center().y), Align2::RIGHT_CENTER, "TEST", Ts::new(Fam::Bold, 9.5, tc).ls(0.4));
+            if tr.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                // Fire the key the block is actually bound to (arg == N in the
+                // managed span); the pill is only a fallback. lua_event maps
+                // spy slot s -> arg s+1, so the slot is g - 1.
+                let g = p180_lua_arg(&cfg.current().1.script).unwrap_or(self.asg.p180_g);
+                let _ = self.eng.send(EngineMsg::TestLua { slot: (g - 1) as usize });
+                self.say(format!("Lua 180 test fired on G{g}"));
+            }
             let rm = Rect::from_min_size(pos2(x + 254.0 - 56.0, ly + 30.0), vec2(56.0, 14.0));
             let rr = click(ui, rm, "p180-lua-remove");
             let col = if rr.hovered() { pal().primary_hover } else { pal().muted };

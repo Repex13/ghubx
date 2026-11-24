@@ -602,6 +602,26 @@ impl GhubApp {
             y += 24.0;
         }
         y += 14.0;
+        text(ui, pos2(main.left(), y), Align2::LEFT_CENTER, "INPUT MONITOR", t_section());
+        text(ui, pos2(main.right(), y), Align2::RIGHT_CENTER, &format!("0x{:03X}", self.mask), Ts::new(Fam::Reg, 10.0, pal().muted).ls(0.3));
+        y += 16.0;
+        // Every spy slot as a capsule that lights while the button is held —
+        // for checking which G-key a physical press really is before binding.
+        let mut px = main.left();
+        for slot in 0..11 {
+            let down = self.mask & (1 << slot) != 0;
+            let r = Rect::from_min_size(pos2(px, y), vec2(44.0, 22.0));
+            pill(ui, r, &crate::catalog::slot_name(slot), down, ("diag-mon", slot));
+            px += 50.0;
+        }
+        y += 30.0;
+        let hint = if self.dev.connected && self.control_text().0.contains("GHUB-X") {
+            "press a button to see it light"
+        } else {
+            "GHUB-X sees buttons only while it controls the mouse"
+        };
+        text(ui, pos2(main.left(), y), Align2::LEFT_CENTER, hint, Ts::new(Fam::Reg, 10.0, pal().muted).ls(0.3));
+        y += 26.0;
         text(ui, pos2(main.left(), y), Align2::LEFT_CENTER, "LOG", t_section());
         y += 14.0;
         let box_r = Rect::from_min_max(pos2(main.left(), y), pos2(main.right(), main.bottom() - 24.0));

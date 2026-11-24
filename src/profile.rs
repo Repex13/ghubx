@@ -1074,6 +1074,18 @@ pub fn p180_lua_remove(script: &str) -> String {
     }
 }
 
+/// The G-key the managed block is bound to: the `arg == N` inside the
+/// `P180_LUA_OPEN`..`P180_LUA_CLOSE` span (the TEST link fires exactly this,
+/// whatever the picker pill currently shows). `None` with no managed block
+/// or an edited-to-death guard.
+pub fn p180_lua_arg(script: &str) -> Option<u8> {
+    let o = script.find(P180_LUA_OPEN)?;
+    let c = script[o..].find(P180_LUA_CLOSE)? + o;
+    let needle = "arg ==";
+    let p = script[o..c].find(needle)? + o + needle.len();
+    script[p..].trim_start().chars().take_while(char::is_ascii_digit).collect::<String>().parse().ok()
+}
+
 /// The first two parameter names of the `function` at `toks[f]`
 /// (`(event, arg)` when the signature can't be read — the conventional names
 /// the snippet is written against).
@@ -2878,6 +2890,18 @@ bass_only = true
         // cut, the `end` survives
         let with = "function OnEvent(event, arg)\n    --[==[ GHUB-X PERFECT 180 ]==]\n    hi()\n    --[==[ /GHUB-X PERFECT 180 ]==] end\n";
         assert_eq!(p180_lua_remove(with), "function OnEvent(event, arg)\n end\n");
+    }
+
+    #[test]
+    fn p180_lua_arg_reads_the_bound_key() {
+        let s = p180_lua_inject("", &p180_lua_snippet(7, 2348, 12, 40));
+        assert_eq!(p180_lua_arg(&s), Some(7));
+        // indented inside an existing OnEvent: still found
+        let s = p180_lua_inject("function OnEvent(event, arg)\n    OutputLogMessage(\"hi\")\nend\n", &p180_lua_snippet(4, 100, 1, 5));
+        assert_eq!(p180_lua_arg(&s), Some(4));
+        // no managed block, or a stray marker only: None
+        assert_eq!(p180_lua_arg("function OnEvent() end"), None);
+        assert_eq!(p180_lua_arg(P180_LUA_OPEN), None);
     }
 
     #[test]

@@ -85,7 +85,11 @@ Now that the repo is public (`https://github.com/Repex13/ghubx`):
   signature's own parameter names. Same injected input as the built-in
   action, just scriptable — blocked games still need HARDWARE FLICK.
   A REMOVE link under the button shows while the script holds a managed
-  block and calls `profile::p180_lua_remove` (user code preserved).
+  block and calls `profile::p180_lua_remove` (user code preserved);
+  a TEST link beside it fires the bound G-key's press+release at the Lua
+  worker (`EngineMsg::TestLua` -> `lua_event`, observer-gated like the
+  P180 TEST, reads the bound arg from `profile::p180_lua_arg` so it tests
+  what the script is bound to, not what the pill shows).
 
 ## 3. Remaining G HUB parity gaps
 
@@ -126,6 +130,10 @@ Now that the repo is public (`https://github.com/Repex13/ghubx`):
   into `backups/` on every write/import, keep last 10.
 - **Diagnostics page** `[done 5e67bc3]` — firmware version, HID++ feature table,
   one-click "copy report" for debugging.
+- **INPUT MONITOR** `[done TBD]` — on Diagnostics: all 11 spy slots as
+  `G1..G11` capsules that light while the physical button is held, from the
+  live `UiEvent::Buttons` mask, with the raw hex beside them. For checking
+  which G-key a press really is before binding P180/FLICK/macros.
 - **Whole-config export/restore** `[done e92aebc]` — Settings > G HUB > CONFIG
   BACKUP: EXPORT CONFIG saves the whole setup as one `.toml`; RESTORE
   CONFIG parses through the real `Config` loader (`profile::export_config`

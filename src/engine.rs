@@ -191,6 +191,9 @@ pub enum EngineMsg {
     StartGhub,
     /// Inject a test turn of exactly this many counts.
     TestPerfect180 { counts: i32 },
+    /// Fire a spy-slot press+release at the Lua worker only — the MAKE A LUA
+    /// 180 row's TEST button (the generated `G_PRESSED` block then runs).
+    TestLua { slot: usize },
     /// Play these macro steps once (macro editor TEST button).
     TestMacro(Box<Macro>),
     /// Run this assignment once, as a press followed at once by a release (macro steps).
@@ -446,6 +449,17 @@ impl Engine {
                             let e = self.cfg.lock().unwrap().extras.clone();
                             let input = self.input.clone();
                             std::thread::spawn(move || perfect_180(&*input, counts, e.p180_ms, e.p180_steps));
+                        }
+                    }
+                    Ok(EngineMsg::TestLua { slot }) => {
+                        // Same gate as TestPerfect180; unlike it, nothing runs
+                        // without control (the worker holds no script anyway).
+                        if observer() {
+                            self.log("Lua test is off in dev mode".into());
+                        } else if !self.st.controlled {
+                            self.log("Lua scripts run only while GHUB-X controls the mouse".into());
+                        } else {
+                            self.lua_test(slot);
                         }
                     }
                     Ok(EngineMsg::Quit) | Err(_) => {
@@ -745,6 +759,13 @@ impl Engine {
             s => (if down { "G_PRESSED" } else { "G_RELEASED" }, s as i32 + 1),
         };
         self.lua.send(crate::lua::LuaMsg::Event(name, arg));
+    }
+
+    /// A synthetic press+release of one spy slot for the script (TEST LUA in
+    /// the MAKE A LUA 180 row): same naming as a real hardware press.
+    fn lua_test(&self, slot: usize) {
+        self.lua_event(slot, true);
+        self.lua_event(slot, false);
     }
 
     /// Push the active profile's script when it changed while we control the
@@ -2127,6 +2148,21 @@ mod tests {
         assert_eq!(rx.try_iter().collect::<Vec<_>>(), vec![LuaMsg::Script(String::new())]);
         r.e.release_device();
         assert_eq!(rx.try_iter().collect::<Vec<_>>(), Vec::<LuaMsg>::new());
+    }
+
+    #[test]
+    fn lua_test_fires_press_and_release_like_hardware() {
+        use crate::lua::LuaMsg;
+        let mut r = rig(|c| c.apps[0].profiles[0].script = "function OnEvent() end".into());
+        let (spy, rx) = crate::lua::spy();
+        r.e.lua = spy;
+        r.take_control();
+        let _ = rx.try_iter().count(); // the Script() load
+        r.e.lua_test(4); // spy slot 4 -> G_PRESSED arg 5, the G5 pill
+        assert_eq!(
+            rx.try_iter().collect::<Vec<_>>(),
+            vec![LuaMsg::Event("G_PRESSED", 5), LuaMsg::Event("G_RELEASED", 5)]
+        );
     }
 
     #[test]
