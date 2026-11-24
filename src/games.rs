@@ -498,6 +498,7 @@ const CS2_ID: &str = "ca572e6a-c76d-4e34-bd64-3665c0d0b0c1";
 const VALORANT_ID: &str = "48574816-5d5d-4e5b-b616-9c3af2c15bbf";
 const FORTNITE_ID: &str = "b2fd8db8-b15c-49f0-91a8-7839ee611aaa";
 const R6_ID: &str = "cebe3aba-815a-486d-94ed-31c20a385ddb";
+const OW2_ID: &str = "c1364cf0-d2ee-4fba-bf7d-f4a9042a527b";
 
 /// `(sensitivity, m_yaw)` from `cs2_user_convars_0_slot0.vcfg`; `m_yaw` defaults to 0.022.
 pub fn parse_cs2_convars(text: &str) -> Option<(f32, f32)> {
@@ -663,6 +664,21 @@ fn apex_file() -> Option<PathBuf> {
     p.is_file().then_some(p)
 }
 
+/// `mouse.sensitivity` under `[MAIN]` in Overwatch's
+/// `Documents\Overwatch\Settings\Settings_v0.ini` — the slider value, which the
+/// OW2/COD preset's 0.0066 yaw multiplies per count.
+fn parse_ow2_sens(text: &str) -> Option<f32> {
+    text.lines().find_map(|l| {
+        let v = l.trim().strip_prefix("mouse.sensitivity")?.trim_start_matches([' ', '=']).trim().trim_matches('"');
+        v.parse::<f32>().ok().filter(|&v| v > 0.0)
+    })
+}
+
+fn ow2_file() -> Option<PathBuf> {
+    let p = PathBuf::from(std::env::var("USERPROFILE").ok()?).join(r"Documents\Overwatch\Settings\Settings_v0.ini");
+    p.is_file().then_some(p)
+}
+
 /// `basename` or `basename: key` for [`GameSens::source`].
 fn sens_source(file: &Path, key: Option<&str>) -> String {
     let base = file.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
@@ -704,6 +720,12 @@ pub fn game_sensitivity_file(ghub_id: Option<&str>, name: &str) -> Option<(GameS
         let yaw = P180_GAMES[0].1;
         return Some((GameSens { game: "Apex Legends", preset: 0, sens, yaw, counts: p180_counts_for(yaw, sens)?, source: sens_source(&file, Some("mouse_sensitivity")) }, file));
     }
+    if ghub_id == Some(OW2_ID) || name.eq_ignore_ascii_case("Overwatch") || name.eq_ignore_ascii_case("Overwatch 2") {
+        let file = ow2_file()?;
+        let sens = parse_ow2_sens(&std::fs::read_to_string(&file).ok()?)?;
+        let yaw = P180_GAMES[2].1;
+        return Some((GameSens { game: "Overwatch 2", preset: 2, sens, yaw, counts: p180_counts_for(yaw, sens)?, source: sens_source(&file, Some("mouse.sensitivity")) }, file));
+    }
     None
 }
 
@@ -718,6 +740,7 @@ fn preset_game(preset: usize) -> Option<(&'static str, &'static str)> {
     match preset {
         0 => Some((CS2_ID, "Counter-Strike 2")),
         1 => Some((VALORANT_ID, "Valorant")),
+        2 => Some((OW2_ID, "Overwatch")),
         P180_R6 => Some((R6_ID, "Tom Clancy's Rainbow Six Siege")),
         P180_FORTNITE => Some((FORTNITE_ID, "Fortnite")),
         _ => None,
@@ -791,6 +814,15 @@ mod tests {
         assert_eq!(parse_apex_sens("mouse_sensitivity=2.5\n"), Some(2.5));
         assert_eq!(parse_apex_sens("mouse_sensitivity \"0\"\n"), None);
         assert_eq!(parse_apex_sens("bind \"f\" \"+jump\"\n"), None);
+    }
+
+    #[test]
+    fn parses_ow2_sens() {
+        let t = "[MAIN]\nfullscreen = 1\nmouse.sensitivity = \"10.000000\"\ngroup.import.mark = \"0000000000000000\"\n";
+        assert_eq!(parse_ow2_sens(t), Some(10.0));
+        assert_eq!(parse_ow2_sens("mouse.sensitivity = 7.5\n"), Some(7.5));
+        assert_eq!(parse_ow2_sens("mouse.sensitivity = \"0.000000\"\n"), None);
+        assert_eq!(parse_ow2_sens("[RENDER.1]\n"), None);
     }
 
     /// Minimal `ClientSettings.Sav` blob: the value is the last f32 before the

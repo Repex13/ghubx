@@ -141,12 +141,14 @@ Now that the repo is public (`https://github.com/Repex13/ghubx`):
   via the normal `edit()` reconcile. Dialogs run on a helper thread;
   buttons are inert in observer mode. Restore does not touch the mouse's
   on-board slots — says so in the UI.
-- **READ FROM GAME: R6 Siege + Apex** `[done 90a544e]` — the R6 SIEGE preset's
-  link reads the newest `GameSettings.ini` under `Documents\My Games`
-  (`MouseYawSensitivity x MouseSensitivityMultiplierUnit` is the normalised
-  sens — Ubisoft's own coefficient), and the shared CS2/APEX pill falls back
-  to Apex's `settings.cfg` when CS2 isn't installed. `probe game-sens`
-  prints all five readers.
+- **READ FROM GAME: R6 Siege + Apex + OW2** `[done 90a544e]` — the R6 SIEGE
+  preset's link reads the newest `GameSettings.ini` under `Documents\My
+  Games` (`MouseYawSensitivity x MouseSensitivityMultiplierUnit` is the
+  normalised sens — Ubisoft's own coefficient), the shared CS2/APEX pill
+  falls back to Apex's `settings.cfg` when CS2 isn't installed, and the
+  OW2/COD pill reads `Settings_v0.ini`'s `mouse.sensitivity` (COD itself
+  keeps sens in per-title binary blobs — no reader). `probe game-sens`
+  prints all six readers.
 - **Toast quiet-while-gaming** `[done 90a544e]` — `win::foreground_fullscreen`
   (foreground window covering its monitor) folds into `notify::maybe_toast`,
   so feed balloons never pop mid-match; the note still lands in the bell
