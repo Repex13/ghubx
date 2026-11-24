@@ -7,10 +7,23 @@
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// Most notes kept; older ones fall off the front.
 const CAP: usize = 50;
+
+/// Minimum gap between Windows toasts raised from feed notes (Windows drops
+/// faster balloon spam anyway, but keep the app clean).
+pub const TOAST_GAP: Duration = Duration::from_secs(2);
+
+/// Pure gate for the feed's toast hook: the `general.toasts` flag must be on
+/// (observer-mode callers fold it to false, so dev/shot/scripted runs stay
+/// inert), the app must own a tray icon, and at least [`TOAST_GAP`] must have
+/// passed since the last balloon (`None` = the first one). A `last` in the
+/// future counts as "too soon" rather than panicking.
+pub fn maybe_toast(enabled: bool, tray_ready: bool, last: Option<Instant>, now: Instant) -> bool {
+    enabled && tray_ready && last.is_none_or(|t| now.saturating_duration_since(t) >= TOAST_GAP)
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NoteKind {
@@ -35,25 +48,47 @@ struct Shared {
     unread: usize,
 }
 
-fn lock(s: &Mutex<Shared>) -> std::sync::MutexGuard<'_, Shared> {
+fn lock<T>(s: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     s.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// A clone shares the same feed.
+/// Runs on the pushing thread for every stored note — `GhubApp` hangs the
+/// Windows-toast path off it.
+type NoteHook = Arc<dyn Fn(&str) + Send + Sync>;
+
+/// A clone shares the same feed (and its note hook).
 #[derive(Clone, Default)]
 pub struct Feed {
     shared: Arc<Mutex<Shared>>,
+    /// The single funnel all producers go through (status transitions, the
+    /// settings-db watcher, and the update worker); `None` until `GhubApp`
+    /// installs it and in tests.
+    hook: Arc<Mutex<Option<NoteHook>>>,
 }
 
 impl Feed {
     /// Append a note; it counts as unread until [`Feed::mark_read`].
+    /// The note hook fires afterwards, outside the feed lock.
     pub fn push(&self, text: impl Into<String>, kind: NoteKind) {
-        let mut g = lock(&self.shared);
-        g.notes.push_back(Note { text: text.into(), at: Instant::now(), kind });
-        while g.notes.len() > CAP {
-            g.notes.pop_front();
+        let text = text.into();
+        {
+            let mut g = lock(&self.shared);
+            g.notes.push_back(Note { text: text.clone(), at: Instant::now(), kind });
+            while g.notes.len() > CAP {
+                g.notes.pop_front();
+            }
+            g.unread = (g.unread + 1).min(g.notes.len());
         }
-        g.unread = (g.unread + 1).min(g.notes.len());
+        let f = lock(&self.hook).clone();
+        if let Some(f) = f {
+            f(&text);
+        }
+    }
+
+    /// Install the note hook (replaces any previous one). It runs on the
+    /// pushing thread — keep it cheap and never push a note back from it.
+    pub fn set_note_hook(&self, f: impl Fn(&str) + Send + Sync + 'static) {
+        *lock(&self.hook) = Some(Arc::new(f));
     }
 
     /// Newest first.
@@ -102,6 +137,32 @@ mod tests {
         assert_eq!(notes[0].text, "note 54");
         assert_eq!(notes[49].text, "note 5");
         assert_eq!(f.unread(), 50);
+    }
+
+    #[test]
+    fn note_hook_sees_every_push() {
+        let f = Feed::default();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let seen2 = seen.clone();
+        f.set_note_hook(move |text| seen2.lock().unwrap().push(text.to_string()));
+        f.push("one", NoteKind::Info);
+        // a clone hits the same hook (the update worker pushes into a clone)
+        f.clone().push("two", NoteKind::Update);
+        assert_eq!(*seen.lock().unwrap(), vec!["one".to_string(), "two".to_string()]);
+    }
+
+    #[test]
+    fn maybe_toast_gates_on_flag_tray_and_gap() {
+        let now = Instant::now();
+        assert!(maybe_toast(true, true, None, now));
+        assert!(!maybe_toast(false, true, None, now));
+        assert!(!maybe_toast(true, false, None, now));
+        // inside the gap: no; at/past it: yes
+        assert!(!maybe_toast(true, true, Some(now - Duration::from_secs(1)), now));
+        assert!(maybe_toast(true, true, Some(now - TOAST_GAP), now));
+        assert!(maybe_toast(true, true, Some(now - Duration::from_secs(10)), now));
+        // a `last` in the future reads as "too soon", never panics
+        assert!(!maybe_toast(true, true, Some(now), now - Duration::from_secs(1)));
     }
 
     #[test]

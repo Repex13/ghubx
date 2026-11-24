@@ -132,6 +132,20 @@ def must(cond, msg):
         raise AssertionError(msg)
 
 
+SURFACE_HI = (42, 43, 48)  # pal().surface_hi box fill in the default dark theme
+
+
+def text_pixels(res: Result, name: str, box) -> bool:
+    """Any pixel in (x0,y0,x1,y1) that isn't the flat box fill — text glyphs."""
+    im = Image.open(res.shots / name).convert("RGB")
+    for x in range(box[0], box[2]):
+        for y in range(box[1], box[3]):
+            px = im.getpixel((x, y))
+            if abs(px[0] - SURFACE_HI[0]) + abs(px[1] - SURFACE_HI[1]) + abs(px[2] - SURFACE_HI[2]) > 30:
+                return True
+    return False
+
+
 def ok_run(res: Result):
     must(res.rc == 0 and res.cfg is not None, f"exit code {res.rc}\n{res.out[-400:]}")
 
@@ -171,6 +185,15 @@ def general_toggle():
                                         "click 952 236"])  # Close to tray switch
     ok_run(res)
     must(res.cfg["general"].get("close_to_tray") is False, res.cfg["general"])
+
+
+@scenario
+def toasts_toggle():
+    """WINDOWS TOASTS switch on General persists general.toasts (default off)."""
+    res = run_script("toasts_toggle", ["wait 1500", GEAR, SETTLE, NAV_GENERAL, SETTLE,
+                                       "click 952 384"])  # Windows toasts switch
+    ok_run(res)
+    must(res.cfg["general"].get("toasts") is True, res.cfg["general"])
 
 
 @scenario
@@ -520,6 +543,21 @@ def p180_read():
     must(ex["p180_game"] == 0 and abs(ex["p180_sens"] - 0.51) < 0.001 and ex["p180_counts"] == 16043, ex)
 
 
+@scenario
+def p180_read_source():
+    """READ FROM GAME shows a `from <settings file>` caption after the read
+    (needs this PC's CS2 install, same as p180_read)."""
+    res = run_script("p180_read_source", device_assign() + [TAB_ACTIONS, SETTLE, "scroll 230 500 -200", SETTLE,
+                                                            "shot {shots}/before.png",
+                                                            P180_READ_LINK, SETTLE,
+                                                            "shot {shots}/read.png"],
+                     config=p180_cs2_config())
+    ok_run(res)
+    cap = (104, 510, 258, 521)  # `from cs2_user_convars_0_slot0.vcfg` under the link (ends left of the link text, above COUNTS)
+    must(text_pixels(res, "read.png", cap), "no `from <file>` caption after READ FROM GAME")
+    must(not text_pixels(res, "before.png", cap), "caption before READ FROM GAME")
+
+
 def p180_cs2_config(sender=None, blocked=None):
     """Seed with CS2's real counts so the CS2 preset shows selected."""
     cfg = re.sub(r"(?m)^p180_counts\s*=.*$", "p180_counts = 8182", seed_config())
@@ -576,6 +614,26 @@ def p180_lua():
     ok_run(res)
     s = prof(res.cfg).get("script", "")
     must(s.count("GHUB-X PERFECT 180") == 2 and 'arg == 6' in s and 'arg == 5' not in s, s)
+
+
+P180_LUA_REMOVE = "click 330 694"  # REMOVE link under ADD TO SCRIPT
+
+
+@scenario
+def p180_lua_remove():
+    """REMOVE shows only while the script holds a managed block and deletes it."""
+    open_actions = device_assign() + [TAB_ACTIONS, SETTLE, "scroll 230 500 -240", SETTLE]
+    res = run_script("p180_lua_remove", open_actions + ["shot {shots}/before.png",  # no block yet: no REMOVE
+                                                        P180_LUA_REMOVE, SETTLE,     # harmless no-op click
+                                                        P180_LUA_ADD, SETTLE,
+                                                        "shot {shots}/added.png",
+                                                        P180_LUA_REMOVE, SETTLE])
+    ok_run(res)
+    s = prof(res.cfg).get("script", "")
+    must("GHUB-X PERFECT 180" not in s and "MoveMouseRelative" not in s, s)
+    rm = (318, 686, 360, 702)  # the REMOVE text under ADD TO SCRIPT
+    must(not text_pixels(res, "before.png", rm), "REMOVE visible before a block exists")
+    must(text_pixels(res, "added.png", rm), "REMOVE missing after ADD TO SCRIPT")
 
 
 @scenario

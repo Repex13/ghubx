@@ -617,7 +617,9 @@ pub fn remove_tray_icon() {
     }
 }
 
-fn tray_balloon(msg: &str) {
+/// `NIF_INFO` balloon on the tray icon; a no-op without one (the icon is only
+/// ever added on the tray thread of a normal, non-observer run).
+pub(crate) fn tray_balloon(msg: &str) {
     let h = TRAY_HWND.load(Ordering::Relaxed);
     if h == 0 {
         return;

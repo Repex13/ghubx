@@ -25,7 +25,12 @@ Now that the repo is public (`https://github.com/Repex13/ghubx`):
 - **Notification feed** — G HUB's bell, locally: unread dot on a header
   icon + a dropdown list. Feeds "update available", "G HUB started —
   GHUB-X now observing", "OBS disconnected", "profile switched to X".
-  Optional Windows toast later; in-app feed first.
+- **Windows toasts** `[done TBD]` — the feed's note hook
+  (`notify::Feed::set_note_hook`, the single funnel every producer pushes
+  through) fires `win::tray_balloon` when `general.toasts` is on, a tray
+  icon exists, and ≥ `TOAST_GAP` (2 s) passed since the last balloon —
+  gated by `notify::maybe_toast` so observer/dev/shot runs never toast.
+  Off by default; toggle on Settings > General.
 
 ## 2. Perfect 180 compatibility `[decided with boundary]`
 
@@ -60,7 +65,10 @@ Now that the repo is public (`https://github.com/Repex13/ghubx`):
   FloatProperties; `GameUserSettings.ini` holds none, legacy
   `MouseSensitivity` is -1). `games::preset_sensitivity` maps the
   selected preset to the parser, and the file's decimal runs through the
-  same preset-percentage maths as typing it.
+  same preset-percentage maths as typing it. `GameSens::source` carries
+  provenance (`file` or `file: key` — Fortnite names the winning sav
+  property) shown as a dim `from …` caption while that read is in force,
+  cleared by any manual edit.
 - **Live Lua sender** `[done 0c6779f]` — `engine::P180_SENDER`, a
   process-wide atomic `SetSender` overwrites; the Lua worker's
   `RealInput` reads it for every `MoveMouse` dispatch, so a sender pick
@@ -76,6 +84,8 @@ Now that the repo is public (`https://github.com/Repex13/ghubx`):
   keyword stream (comments/strings can't fake `end`s) and rebound to the
   signature's own parameter names. Same injected input as the built-in
   action, just scriptable — blocked games still need HARDWARE FLICK.
+  A REMOVE link under the button shows while the script holds a managed
+  block and calls `profile::p180_lua_remove` (user code preserved).
 
 ## 3. Remaining G HUB parity gaps
 
@@ -116,6 +126,13 @@ Now that the repo is public (`https://github.com/Repex13/ghubx`):
   into `backups/` on every write/import, keep last 10.
 - **Diagnostics page** `[done 5e67bc3]` — firmware version, HID++ feature table,
   one-click "copy report" for debugging.
+- **Whole-config export/restore** `[done TBD]` — Settings > G HUB > CONFIG
+  BACKUP: EXPORT CONFIG saves the whole setup as one `.toml`; RESTORE
+  CONFIG parses through the real `Config` loader (`profile::export_config`
+  / `import_config`), snapshots a backup first, then replaces everything
+  via the normal `edit()` reconcile. Dialogs run on a helper thread;
+  buttons are inert in observer mode. Restore does not touch the mouse's
+  on-board slots — says so in the UI.
 
 ## 5. Lighting extras `[done 92f14ea]`
 

@@ -177,6 +177,8 @@ pub struct GhubApp {
     /// Session notification feed behind the header bell; the update worker
     /// pushes into a clone of it.
     pub(crate) feed: crate::notify::Feed,
+    /// Result of a Settings > G HUB EXPORT/RESTORE CONFIG file dialog.
+    pub(crate) cfg_io: Option<Receiver<settings::CfgIo>>,
     /// Update worker (`Handle::fixed` in observer/test modes).
     pub(crate) update: crate::update::Handle,
     /// The first `Status` event is a baseline, not a transition worth noting.
@@ -285,6 +287,7 @@ impl GhubApp {
             obs,
             lua,
             feed,
+            cfg_io: None,
             update,
             status_seen: false,
             notes_scroll: 0.0,
@@ -313,6 +316,23 @@ impl GhubApp {
         if let Some(s) = shot {
             app.prepare_shot(&s.page);
             app.shot = Some(s);
+        }
+        // Windows toasts hang off the feed's note hook — the single funnel
+        // every producer pushes through (status transitions, the db watcher,
+        // the update worker). The balloon needs a tray icon, and the flag is
+        // folded out under observer mode so --dev/--shot/scripted runs and the
+        // deterministic seed notes never toast.
+        {
+            let cfg2 = app.cfg.clone();
+            let last_toast = std::sync::Arc::new(std::sync::Mutex::new(None::<Instant>));
+            app.feed.set_note_hook(move |text| {
+                let enabled = cfg2.lock().unwrap().general.toasts && !crate::engine::observer_mode();
+                let mut last = last_toast.lock().unwrap();
+                if crate::notify::maybe_toast(enabled, crate::win::tray_ready(), *last, Instant::now()) {
+                    crate::win::tray_balloon(text);
+                    *last = Some(Instant::now());
+                }
+            });
         }
         app
     }

@@ -15,6 +15,12 @@ pub(crate) struct ImportPreview {
     pub sum: crate::ghub_import::Summary,
     pub cfg: crate::profile::Config,
 }
+
+/// Result of an EXPORT/RESTORE CONFIG file dialog running on a helper thread.
+pub(crate) enum CfgIo {
+    Message(String),
+    RestoreText(String),
+}
 const ACCENTS: [[u8; 3]; 8] = [
     [0x11, 0x96, 0xff],
     [0x44, 0xd6, 0x2c],
@@ -28,6 +34,7 @@ const ACCENTS: [[u8; 3]; 8] = [
 
 impl GhubApp {
     pub(crate) fn settings_page(&mut self, ui: &mut Ui, win: Rect, tab: usize) {
+        self.poll_cfg_io(ui);
         if tab != 2 {
             self.ghub_autostart = None;
         }
@@ -121,6 +128,10 @@ impl GhubApp {
             }
         }
         y += 44.0;
+        if row(ui, main, y, "Windows toasts", "A Windows notification for each new item in the bell feed", g.toasts, "s-toasts") {
+            self.edit(|c| c.general.toasts = !c.general.toasts);
+        }
+        y += 52.0;
         self.hotkey_row(ui, main, y);
         y += 52.0;
         ui.painter().line_segment([pos2(main.left(), y), pos2(main.right(), y)], Stroke::new(1.0, pal().divider));
@@ -357,7 +368,93 @@ impl GhubApp {
             super::assets::CacheStatus::Updating => "Saved copy: updating\u{2026}",
             super::assets::CacheStatus::Unavailable => "Saved copy: not available (G HUB not found)",
         };
-        text(ui, pos2(main.left(), pr.bottom() + 20.0), Align2::LEFT_CENTER, status, Ts::new(Fam::Reg, 13.0, pal().muted).ls(0.3));
+        let st = text(ui, pos2(main.left(), pr.bottom() + 20.0), Align2::LEFT_CENTER, status, Ts::new(Fam::Reg, 13.0, pal().muted).ls(0.3));
+        self.config_backup_section(ui, main, st.bottom());
+    }
+
+    /// G HUB tab's tail: EXPORT/RESTORE of the whole `config.toml` (a machine
+    /// move or a pre-tweak safety copy). The dialogs run on a helper thread
+    /// like the profile/theme ones; both buttons are inert in observer mode.
+    /// Restoring only changes the app config — it never writes the mouse's
+    /// on-board slots.
+    fn config_backup_section(&mut self, ui: &Ui, main: Rect, top: f32) {
+        let mut y = top + 26.0;
+        ui.painter().line_segment([pos2(main.left(), y), pos2(main.right(), y)], Stroke::new(1.0, pal().divider));
+        y += 26.0;
+        text(ui, pos2(main.left(), y), Align2::LEFT_CENTER, "CONFIG BACKUP", t_section());
+        let pr = para(
+            ui,
+            pos2(main.left(), y + 20.0),
+            main.width().min(520.0),
+            "Save the whole GHUB-X setup to one file, or load a copy back — restore replaces every app, profile and setting here; it does not write the mouse's on-board slots.",
+            Ts::new(Fam::Reg, 13.0, pal().label).ls(0.3),
+        );
+        let by = pr.bottom() + 16.0;
+        let live = !crate::engine::observer_mode() && self.cfg_io.is_none();
+        let eb = Rect::from_min_size(pos2(main.left(), by), vec2(150.0, 30.0));
+        if dark_button(ui, eb, "EXPORT CONFIG", "s-cfg-export", live).clicked() && live {
+            let owner = crate::win::main_window_handle();
+            let text = crate::profile::export_config(&self.cfg());
+            let (tx, rx) = crossbeam_channel::bounded(1);
+            std::thread::spawn(move || {
+                let msg = match crate::win::save_file(owner, "Export the GHUB-X config", "ghubx-config.toml", "GHUB-X config", "*.toml") {
+                    Some(path) => match std::fs::write(&path, text) {
+                        Ok(()) => "Config exported".into(),
+                        Err(e) => format!("Couldn't write the file: {e}"),
+                    },
+                    None => String::new(),
+                };
+                let _ = tx.send(CfgIo::Message(msg));
+            });
+            self.cfg_io = Some(rx);
+        }
+        let rb = Rect::from_min_size(pos2(eb.right() + 12.0, by), vec2(160.0, 30.0));
+        if dark_button(ui, rb, "RESTORE CONFIG", "s-cfg-restore", live).clicked() && live {
+            let owner = crate::win::main_window_handle();
+            let (tx, rx) = crossbeam_channel::bounded(1);
+            std::thread::spawn(move || {
+                let msg = match crate::win::pick_file(owner, "Restore a GHUB-X config", "GHUB-X config", "*.toml") {
+                    Some(path) => match std::fs::read_to_string(&path) {
+                        Ok(t) => CfgIo::RestoreText(t),
+                        Err(e) => CfgIo::Message(format!("Couldn't read the file: {e}")),
+                    },
+                    None => CfgIo::Message(String::new()),
+                };
+                let _ = tx.send(msg);
+            });
+            self.cfg_io = Some(rx);
+        }
+    }
+
+    /// Pick up the EXPORT/RESTORE CONFIG dialog result: the restore goes
+    /// through the normal `edit()` reconcile (engine + lua sync + lighting)
+    /// after a pre-restore snapshot lands in `backups/`.
+    fn poll_cfg_io(&mut self, ui: &Ui) {
+        let Some(rx) = &self.cfg_io else { return };
+        match rx.try_recv() {
+            Ok(res) => {
+                self.cfg_io = None;
+                match res {
+                    CfgIo::Message(m) if m.is_empty() => {}
+                    CfgIo::Message(m) => self.say(m),
+                    CfgIo::RestoreText(t) => match crate::profile::import_config(&t) {
+                        Ok(new) => {
+                            // backup first, through the batch-15 machinery:
+                            // Config::save flushes any pending state and copies
+                            // the just-written file into backups/ itself
+                            if let Err(e) = self.cfg().save() {
+                                self.say(format!("Couldn't save a backup first: {e}"));
+                            } else {
+                                self.edit(|c| *c = new);
+                                self.say("Config restored");
+                            }
+                        }
+                        Err(e) => self.say(e),
+                    },
+                }
+            }
+            Err(_) => ui.ctx().request_repaint_after(std::time::Duration::from_millis(100)),
+        }
     }
 
     pub(crate) fn set_theme(&mut self, id: &str) {

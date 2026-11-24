@@ -39,6 +39,9 @@ pub struct AsgState {
     pub game_sens: Option<(usize, Option<crate::games::GameSens>)>,
     /// Game sens behind the selected Perfect 180 preset pill (READ FROM GAME).
     pub read_sens: Option<(usize, Option<crate::games::GameSens>)>,
+    /// `(app, applied preset, GameSens::source)` of the last READ FROM GAME —
+    /// the `from …` caption under the link while that read is still in force.
+    pub read_from: Option<(usize, usize, String)>,
     pub obs_form: Option<ObsForm>,
     /// Shot pages only: keep the list scrolled to its end.
     pub scroll_to: Option<f32>,
@@ -51,7 +54,7 @@ impl Default for AsgState {
             tab: 0, search: String::new(), side: false, gshift: false, selected: None,
             collapsed: HashSet::new(), mods: 0, editor: None, last_tab: None,
             launch_path: String::new(), p180_sens_text: String::new(), p180_counts_text: String::new(),
-            flick_cm: 2.5, p180_g: 5, game_sens: None, read_sens: None, obs_form: None, scroll_to: None, obs_refresh: None,
+            flick_cm: 2.5, p180_g: 5, game_sens: None, read_sens: None, read_from: None, obs_form: None, scroll_to: None, obs_refresh: None,
         }
     }
 }
@@ -571,7 +574,7 @@ impl GhubApp {
         if self.asg.game_sens.as_ref().is_none_or(|(i, _)| *i != idx) {
             let app = cfg.current().0;
             let found = if self.shot.is_some() {
-                (app.name == "Counter-Strike 2").then_some(crate::games::GameSens { game: "Counter-Strike 2", preset: 0, sens: 0.51, yaw: 0.022, counts: 16043 })
+                (app.name == "Counter-Strike 2").then_some(crate::games::GameSens { game: "Counter-Strike 2", preset: 0, sens: 0.51, yaw: 0.022, counts: 16043, source: "cs2_user_convars_0_slot0.vcfg".into() })
             } else {
                 crate::games::game_sensitivity(app.ghub_id.as_deref(), &app.name)
             };
@@ -585,7 +588,7 @@ impl GhubApp {
     fn read_sens_for(&mut self, game: usize) -> Option<crate::games::GameSens> {
         if self.asg.read_sens.as_ref().is_none_or(|(i, _)| *i != game) {
             let found = if self.shot.is_some() {
-                (game == 0).then_some(crate::games::GameSens { game: "Counter-Strike 2", preset: 0, sens: 0.51, yaw: 0.022, counts: 16043 })
+                (game == 0).then_some(crate::games::GameSens { game: "Counter-Strike 2", preset: 0, sens: 0.51, yaw: 0.022, counts: 16043, source: "cs2_user_convars_0_slot0.vcfg".into() })
             } else {
                 crate::games::preset_sensitivity(game)
             };
@@ -621,9 +624,11 @@ impl GhubApp {
         let blocked = e.p180_blocked.contains(&game);
         let sender_h = 80.0 + if blocked { 26.0 } else { 0.0 };
         // READ FROM GAME line under IN-GAME SENS (only when the selected
-        // preset's parser actually finds a settings file)
+        // preset's parser actually finds a settings file); after a read a
+        // `from <source>` caption sits under it for another 14 px.
         let read_sens = self.read_sens_for(shown_game);
-        let read_h = if read_sens.is_some() { 18.0 } else { 0.0 };
+        let from_src = self.asg.read_from.as_ref().and_then(|(a, g, s)| (*a == cfg.current_app && *g == shown_game).then(|| s.clone()));
+        let read_h = if read_sens.is_some() { 18.0 + if from_src.is_some() { 14.0 } else { 0.0 } } else { 0.0 };
         let box_r = Rect::from_min_size(top, vec2(278.0, 366.0 + extra + warn_h + sender_h + LUA_H + FLICK_H + read_h));
         ui.painter().rect_filled(box_r, CornerRadius::same(8), pal().surface_hi);
         let x = box_r.left() + 12.0;
@@ -651,6 +656,7 @@ impl GhubApp {
                 let new = TurnCal { counts: gs.counts, game: gs.preset, sens: gs.sens, angle: cal.angle };
                 self.edit(|c| c.current_profile_mut().turn = Some(new));
                 self.asg.game_sens = None;
+                self.asg.read_from = None;
             }
         }
         let yaw = P180_GAMES[game].1;
@@ -685,6 +691,7 @@ impl GhubApp {
                 // own counts when its yaw makes the preset a custom one (CS2)
                 let counts = if g.preset == P180_CUSTOM { g.counts } else { p180_preset_counts(g.preset, g.sens).unwrap_or(g.counts) };
                 let new = TurnCal { counts, game: g.preset, sens: g.sens, angle: cal.angle };
+                self.asg.read_from = Some((cfg.current_app, new.game, g.source.clone()));
                 self.edit(|c| {
                     if c.current_profile_mut().turn.is_some() {
                         c.current_profile_mut().turn = Some(new);
@@ -694,6 +701,11 @@ impl GhubApp {
                         c.extras.p180_counts = new.counts;
                     }
                 });
+            }
+            // `from <file>`/`from <file>: <key>` — which settings file (and for
+            // Fortnite which property) the value just applied came from.
+            if let Some(src) = &from_src {
+                text(ui, pos2(x, row(0) + 30.0), Align2::LEFT_CENTER, &format!("from {src}"), Ts::new(Fam::Reg, 9.5, pal().muted).ls(0.3));
             }
         }
 
@@ -773,6 +785,8 @@ impl GhubApp {
         if recalc || manual || ms_changed || angle_changed || game != shown_game {
             let new = TurnCal { counts, game, sens: sens_val, angle: angle_deg };
             let ms = ms.round() as u16;
+            // the value no longer matches what READ FROM GAME applied
+            self.asg.read_from = None;
             self.edit(|c| {
                 c.extras.p180_ms = ms;
                 if c.current_profile_mut().turn.is_some() {
@@ -808,6 +822,21 @@ impl GhubApp {
                 p.script = p180_lua_inject(&p.script, &p180_lua_snippet(g, total, steps, ms));
             });
             self.say(format!("Lua 180 bound to G{g}"));
+        }
+        // While the script actually holds a managed block, a REMOVE link sits
+        // under the button (same edit -> ConfigChanged -> lua_sync path).
+        if cfg.current().1.script.contains(P180_LUA_OPEN) {
+            let rm = Rect::from_min_size(pos2(x + 254.0 - 56.0, ly + 30.0), vec2(56.0, 14.0));
+            let rr = click(ui, rm, "p180-lua-remove");
+            let col = if rr.hovered() { pal().primary_hover } else { pal().muted };
+            text(ui, pos2(x + 254.0, rm.center().y), Align2::RIGHT_CENTER, "REMOVE", Ts::new(Fam::Bold, 9.5, col).ls(0.4));
+            if rr.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                self.edit(|c| {
+                    let p = c.current_profile_mut();
+                    p.script = p180_lua_remove(&p.script);
+                });
+                self.say("Lua 180 removed");
+            }
         }
 
         let br = Rect::from_min_size(pos2(x, ly + LUA_H), vec2(254.0, 26.0));

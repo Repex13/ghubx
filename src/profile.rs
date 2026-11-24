@@ -1034,6 +1034,46 @@ pub fn p180_lua_inject(script: &str, snippet: &str) -> String {
     out
 }
 
+/// Remove the managed Perfect 180 block [`p180_lua_inject`] wrote — the
+/// REMOVE half of MAKE A LUA 180. Loops so a pasted-in second block goes too:
+/// each pass drops the first `P180_LUA_OPEN..P180_LUA_CLOSE` span (both marker
+/// lines included), a stray open marker's line, or a stray close marker.
+/// A marker on its own line takes the whole line; one sharing a line with
+/// code loses only the marker text, so the user's own code is byte-preserved.
+pub fn p180_lua_remove(script: &str) -> String {
+    let mut out = String::from(script);
+    let line_start = |s: &str, i: usize| s[..i].rfind('\n').map_or(0, |p| p + 1);
+    loop {
+        if let Some(o) = out.find(P180_LUA_OPEN) {
+            match out[o..].find(P180_LUA_CLOSE) {
+                Some(c) => {
+                    let c = o + c + P180_LUA_CLOSE.len(); // end of the close marker
+                    let eol = out[c..].find('\n').map_or(out.len(), |i| c + i + 1);
+                    // whole lines when the markers sit alone on theirs
+                    let a = if out[line_start(&out, o)..o].trim().is_empty() { line_start(&out, o) } else { o };
+                    let b = if out[c..eol].trim().is_empty() { eol } else { c };
+                    out.replace_range(a..b, "");
+                }
+                None => {
+                    // stray open marker: drop its line when it's alone there,
+                    // else just the marker text
+                    let eol = out[o..].find('\n').map_or(out.len(), |i| o + i + 1);
+                    let (a, b) = if out[line_start(&out, o)..o].trim().is_empty() { (line_start(&out, o), eol) } else { (o, o + P180_LUA_OPEN.len()) };
+                    out.replace_range(a..b, "");
+                }
+            }
+        } else if let Some(c) = out.find(P180_LUA_CLOSE) {
+            // stray close marker, same alone-on-the-line rule
+            let end = c + P180_LUA_CLOSE.len();
+            let eol = out[end..].find('\n').map_or(out.len(), |i| end + i + 1);
+            let (a, b) = if out[line_start(&out, c)..c].trim().is_empty() { (line_start(&out, c), eol) } else { (c, end) };
+            out.replace_range(a..b, "");
+        } else {
+            return out;
+        }
+    }
+}
+
 /// The first two parameter names of the `function` at `toks[f]`
 /// (`(event, arg)` when the signature can't be read — the conventional names
 /// the snippet is written against).
@@ -1194,6 +1234,9 @@ pub struct General {
     pub dpi_flash: bool,
     /// Keep the DPI LEDs lit (the mouse stores this; GHUB-X also lights the level while it controls).
     pub dpi_led_always_on: bool,
+    /// Windows balloon toast on new feed items (needs the tray icon; off by
+    /// default — toasts are chatty for a control app).
+    pub toasts: bool,
     /// Global hotkey that cycles the current app's profiles (registered on the tray window).
     pub profile_hotkey: Option<Hotkey>,
 }
@@ -1210,6 +1253,7 @@ impl Default for General {
             osd_profile: true,
             dpi_flash: false,
             dpi_led_always_on: false,
+            toasts: false,
             profile_hotkey: None,
         }
     }
@@ -1623,6 +1667,22 @@ impl Config {
     }
 }
 
+/// The whole config as TOML — the same serializer [`Config::save`] uses — for
+/// Settings' EXPORT CONFIG (a machine move or a pre-tweak safety copy).
+pub fn export_config(cfg: &Config) -> String {
+    toml::to_string_pretty(cfg).unwrap_or_default()
+}
+
+/// Parse a config file back through the real load path (`toml::from_str` +
+/// `sanitize`, same as [`Config::load_existing`]) so a corrupt file errors
+/// instead of bricking the running app. Unknown fields drop exactly as serde
+/// already does on a normal load.
+pub fn import_config(text: &str) -> Result<Config, String> {
+    let mut c: Config = toml::from_str(text).map_err(|e| format!("Not a GHUB-X config file: {e}"))?;
+    c.sanitize();
+    Ok(c)
+}
+
 // ---------------------------------------------------------------- config backups
 
 /// `YYYYMMDD-HHMMSS` (local time) for backup file names.
@@ -1631,9 +1691,11 @@ fn stamp_compact() -> String {
     format!("{:04}{:02}{:02}-{:02}{:02}{:02}", t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond)
 }
 
-/// Copy the just-written config to `<config dir>/backups/config-<ts>.toml` and
-/// prune the folder to the newest 10. Its own failure never fails the save.
-fn backup_config(config: &std::path::Path) -> std::io::Result<()> {
+/// Copy the config file at `config` to `<config dir>/backups/config-<ts>.toml`
+/// and prune the folder to the newest 10. `Config::save` calls it after every
+/// write and RESTORE CONFIG calls it first, so a restore is always undoable.
+/// Its own failure never fails the save.
+pub(crate) fn backup_config(config: &std::path::Path) -> std::io::Result<()> {
     let Some(dir) = config.parent() else { return Ok(()) };
     let backups = dir.join("backups");
     std::fs::create_dir_all(&backups)?;
@@ -2772,6 +2834,84 @@ bass_only = true
         let open = out.find(P180_LUA_OPEN).unwrap();
         assert!(out.find("live()").unwrap() < open, "{out}");
         assert!(open > out.find("dead()").unwrap(), "{out}");
+    }
+
+    #[test]
+    fn p180_lua_remove_is_the_inject_inverse() {
+        // block on its own indented lines inside OnEvent: both marker lines go
+        // and the rest of the script is byte-preserved
+        let src = "function OnEvent(event, arg)\n    if event == \"MOUSE_BUTTON_PRESSED\" then\n        do_x()\n    end\nend\n";
+        let with = p180_lua_inject(src, &p180_lua_snippet(5, 100, 4, 10));
+        assert!(with.contains(P180_LUA_OPEN));
+        assert_eq!(p180_lua_remove(&with), src);
+        // twice is the same as once (the loop eats a pasted-in second block)
+        let doubled = format!("{with}{}", &with[with.find(P180_LUA_OPEN).unwrap()..]);
+        let removed = p180_lua_remove(&doubled);
+        assert!(!removed.contains(P180_LUA_OPEN) && !removed.contains(P180_LUA_CLOSE), "{removed}");
+    }
+
+    #[test]
+    fn p180_lua_remove_no_block_is_a_no_op() {
+        let src = "local x = 1\nfunction OnEvent(event, arg)\n    do_x()\nend\n";
+        assert_eq!(p180_lua_remove(src), src);
+        assert_eq!(p180_lua_remove(""), "");
+    }
+
+    #[test]
+    fn p180_lua_remove_drops_stray_markers() {
+        // open marker with no close: the whole marker line goes
+        let stray = "function OnEvent(event, arg)\n    hi()\n    --[==[ GHUB-X PERFECT 180 ]==]\nend\n";
+        let out = p180_lua_remove(stray);
+        assert!(!out.contains(P180_LUA_OPEN), "{out}");
+        assert_eq!(out, "function OnEvent(event, arg)\n    hi()\nend\n");
+        // a close marker alone goes too
+        let stray2 = "x = 1\n--[==[ /GHUB-X PERFECT 180 ]==]\ny = 2\n";
+        assert_eq!(p180_lua_remove(stray2), "x = 1\ny = 2\n");
+        // a marker glued to code loses only the marker text, never the code
+        let glued = format!("x = 1 {P180_LUA_OPEN} y = 2\n");
+        assert_eq!(p180_lua_remove(&glued), "x = 1  y = 2\n");
+    }
+
+    #[test]
+    fn p180_lua_remove_keeps_a_shared_end_line() {
+        // close marker glued to the `end` of OnEvent: only the marker text is
+        // cut, the `end` survives
+        let with = "function OnEvent(event, arg)\n    --[==[ GHUB-X PERFECT 180 ]==]\n    hi()\n    --[==[ /GHUB-X PERFECT 180 ]==] end\n";
+        assert_eq!(p180_lua_remove(with), "function OnEvent(event, arg)\n end\n");
+    }
+
+    #[test]
+    fn toasts_defaults_off_and_round_trips() {
+        // old configs without the field load with toasts off
+        let c: Config = toml::from_str("apps = []\n").unwrap();
+        assert!(!c.general.toasts);
+        // and an explicit value survives a serialize/parse round trip
+        let mut c = Config::default();
+        c.general.toasts = true;
+        let c: Config = toml::from_str(&toml::to_string(&c).unwrap()).unwrap();
+        assert!(c.general.toasts);
+    }
+
+    #[test]
+    fn config_export_import_round_trip() {
+        let mut c = Config::default();
+        c.apps.push(sample_app());
+        c.current_app = 0;
+        c.general.toasts = true;
+        let back = import_config(&export_config(&c)).unwrap();
+        assert_eq!(back, c);
+    }
+
+    #[test]
+    fn config_import_rejects_corrupt() {
+        assert!(import_config("this is not toml = [").is_err());
+        // wrong types are rejected too, and sanitization repairs odd values
+        assert!(import_config("[general]\ntoasts = \"yes please\"").is_err());
+        let c = import_config("apps = []\ncurrent_app = 9\n").unwrap();
+        assert_eq!(c.current_app, 0);
+        // unknown fields drop exactly like a normal load does
+        let c = import_config("apps = []\n[general]\ntoasts = true\nmystery_key = 42\n").unwrap();
+        assert!(c.general.toasts);
     }
 
     #[test]
