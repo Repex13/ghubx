@@ -319,7 +319,8 @@ impl GhubApp {
         }
         // Windows toasts hang off the feed's note hook — the single funnel
         // every producer pushes through (status transitions, the db watcher,
-        // the update worker). The balloon needs a tray icon, and the flag is
+        // the update worker). The balloon needs a tray icon, stays quiet while
+        // a fullscreen window owns the foreground (mid-match), and the flag is
         // folded out under observer mode so --dev/--shot/scripted runs and the
         // deterministic seed notes never toast.
         {
@@ -328,7 +329,7 @@ impl GhubApp {
             app.feed.set_note_hook(move |text| {
                 let enabled = cfg2.lock().unwrap().general.toasts && !crate::engine::observer_mode();
                 let mut last = last_toast.lock().unwrap();
-                if crate::notify::maybe_toast(enabled, crate::win::tray_ready(), *last, Instant::now()) {
+                if crate::notify::maybe_toast(enabled, crate::win::tray_ready(), crate::win::foreground_fullscreen(), *last, Instant::now()) {
                     crate::win::tray_balloon(text);
                     *last = Some(Instant::now());
                 }

@@ -1042,7 +1042,19 @@ impl GhubApp {
         let ty = vy + 52.0;
         let sc = pos2(cx + 2.5, ty);
         text(ui, pos2(sc.x - 27.0, ty), Align2::RIGHT_CENTER, "DEFAULT", Ts::new(Fam::Bold, 12.0, if gs { pal().ink(102) } else { pal().text }).ls(1.44));
-        text(ui, pos2(sc.x + 27.0, ty), Align2::LEFT_CENTER, "G-SHIFT", Ts::new(Fam::Bold, 12.0, if gs { pal().text } else { pal().ink(102) }).ls(1.44));
+        let gs_tr = text(ui, pos2(sc.x + 27.0, ty), Align2::LEFT_CENTER, "G-SHIFT", Ts::new(Fam::Bold, 12.0, if gs { pal().text } else { pal().ink(102) }).ls(1.44));
+        // live G-Shift badge: while a button carries G-SHIFT, a dot beside the
+        // label lights when the device reports it held — verifies the bind
+        // without opening Diagnostics' input monitor
+        if let Some(slot) = (0..SLOTS).find(|&s| prof.effective(s, false) == Assignment::System(SystemFn::GShift)) {
+            let held = self.mask & (1 << slot) != 0;
+            let c = pos2(gs_tr.right() + 10.0, ty);
+            if held {
+                ui.painter().circle_filled(c, 4.5, pal().gshift);
+            } else {
+                ui.painter().circle_stroke(c, 4.0, Stroke::new(1.4, pal().tint(pal().gshift, 0.45)));
+            }
+        }
         if switch(ui, sc, gs, pal().gshift, "gshift-switch").clicked() {
             self.asg.gshift = !gs;
             if self.asg.gshift && !prof.uses_gshift() {

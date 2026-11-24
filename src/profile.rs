@@ -841,6 +841,8 @@ pub fn turn_for(profile: &Profile, extras: &Extras) -> TurnCal {
 
 /// Index of the FORTNITE preset in `P180_GAMES`.
 pub const P180_FORTNITE: usize = 5;
+/// Index of the R6 SIEGE preset in `P180_GAMES`.
+pub const P180_R6: usize = 4;
 
 /// The sensitivity in the preset's own unit. Fortnite shows a percentage (13.8 %), but players
 /// also know it as the decimal (0.138): a Fortnite value below 1.0 is taken as the decimal.

@@ -18,11 +18,13 @@ pub const TOAST_GAP: Duration = Duration::from_secs(2);
 
 /// Pure gate for the feed's toast hook: the `general.toasts` flag must be on
 /// (observer-mode callers fold it to false, so dev/shot/scripted runs stay
-/// inert), the app must own a tray icon, and at least [`TOAST_GAP`] must have
-/// passed since the last balloon (`None` = the first one). A `last` in the
-/// future counts as "too soon" rather than panicking.
-pub fn maybe_toast(enabled: bool, tray_ready: bool, last: Option<Instant>, now: Instant) -> bool {
-    enabled && tray_ready && last.is_none_or(|t| now.saturating_duration_since(t) >= TOAST_GAP)
+/// inert), the app must own a tray icon, no fullscreen window may be in the
+/// foreground (`quiet` — a balloon over a game mid-match is the wrong time),
+/// and at least [`TOAST_GAP`] must have passed since the last balloon (`None`
+/// = the first one). A `last` in the future counts as "too soon" rather than
+/// panicking.
+pub fn maybe_toast(enabled: bool, tray_ready: bool, quiet: bool, last: Option<Instant>, now: Instant) -> bool {
+    enabled && tray_ready && !quiet && last.is_none_or(|t| now.saturating_duration_since(t) >= TOAST_GAP)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -154,15 +156,19 @@ mod tests {
     #[test]
     fn maybe_toast_gates_on_flag_tray_and_gap() {
         let now = Instant::now();
-        assert!(maybe_toast(true, true, None, now));
-        assert!(!maybe_toast(false, true, None, now));
-        assert!(!maybe_toast(true, false, None, now));
+        assert!(maybe_toast(true, true, false, None, now));
+        assert!(!maybe_toast(false, true, false, None, now));
+        assert!(!maybe_toast(true, false, false, None, now));
+        // fullscreen foreground: quiet, but it doesn't consume the gap —
+        // leaving the game toasts the queued note right away
+        assert!(!maybe_toast(true, true, true, None, now));
+        assert!(maybe_toast(true, true, false, None, now));
         // inside the gap: no; at/past it: yes
-        assert!(!maybe_toast(true, true, Some(now - Duration::from_secs(1)), now));
-        assert!(maybe_toast(true, true, Some(now - TOAST_GAP), now));
-        assert!(maybe_toast(true, true, Some(now - Duration::from_secs(10)), now));
+        assert!(!maybe_toast(true, true, false, Some(now - Duration::from_secs(1)), now));
+        assert!(maybe_toast(true, true, false, Some(now - TOAST_GAP), now));
+        assert!(maybe_toast(true, true, false, Some(now - Duration::from_secs(10)), now));
         // a `last` in the future reads as "too soon", never panics
-        assert!(!maybe_toast(true, true, Some(now), now - Duration::from_secs(1)));
+        assert!(!maybe_toast(true, true, false, Some(now), now - Duration::from_secs(1)));
     }
 
     #[test]

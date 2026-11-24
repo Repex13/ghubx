@@ -128,7 +128,7 @@ impl GhubApp {
             }
         }
         y += 44.0;
-        if row(ui, main, y, "Windows toasts", "A Windows notification for each new item in the bell feed", g.toasts, "s-toasts") {
+        if row(ui, main, y, "Windows toasts", "A Windows notification for each feed note, quiet while a fullscreen app is up", g.toasts, "s-toasts") {
             self.edit(|c| c.general.toasts = !c.general.toasts);
         }
         y += 52.0;

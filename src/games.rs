@@ -1,7 +1,7 @@
 //! G HUB's game database (read at runtime from the local G HUB install) and
 //! a scan for installed games (Steam, Epic, Riot, GOG, Ubisoft, registry rules).
 
-use crate::profile::{KeyCombo, MOD_ALT, MOD_CTRL, MOD_SHIFT, MOD_WIN, P180_CUSTOM, P180_FORTNITE, P180_GAMES, p180_counts_for, p180_preset_counts};
+use crate::profile::{KeyCombo, MOD_ALT, MOD_CTRL, MOD_SHIFT, MOD_WIN, P180_CUSTOM, P180_FORTNITE, P180_GAMES, P180_R6, p180_counts_for, p180_preset_counts};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -497,6 +497,7 @@ pub struct GameSens {
 const CS2_ID: &str = "ca572e6a-c76d-4e34-bd64-3665c0d0b0c1";
 const VALORANT_ID: &str = "48574816-5d5d-4e5b-b616-9c3af2c15bbf";
 const FORTNITE_ID: &str = "b2fd8db8-b15c-49f0-91a8-7839ee611aaa";
+const R6_ID: &str = "cebe3aba-815a-486d-94ed-31c20a385ddb";
 
 /// `(sensitivity, m_yaw)` from `cs2_user_convars_0_slot0.vcfg`; `m_yaw` defaults to 0.022.
 pub fn parse_cs2_convars(text: &str) -> Option<(f32, f32)> {
@@ -621,6 +622,47 @@ fn fortnite_file() -> Option<(f32, &'static str, PathBuf)> {
     None
 }
 
+/// R6's hipfire coefficient: `MouseYawSensitivity × MouseSensitivityMultiplierUnit`
+/// (Ubisoft's own formula — 50 × 0.02 = 1.0 at defaults). The community yaw
+/// 0.005729578°/count applies at coefficient 1 and scales linearly, so the
+/// product is exactly the `sens` `p180_counts_for` wants.
+fn parse_r6_sens(text: &str) -> Option<f32> {
+    let mut yaw = None;
+    let mut mult = None;
+    for l in text.lines() {
+        let Some((k, v)) = l.split_once('=') else { continue };
+        let Ok(v) = v.trim().parse::<f32>() else { continue };
+        match k.trim() {
+            "MouseYawSensitivity" => yaw = Some(v),
+            "MouseSensitivityMultiplierUnit" => mult = Some(v),
+            _ => {}
+        }
+    }
+    let sens = yaw? * mult.unwrap_or(0.02); // 0.02 is the shipped default
+    (sens > 0.0).then(|| (sens * 10000.0).round() / 10000.0)
+}
+
+/// Newest `GameSettings.ini` across the profile dirs under
+/// `Documents\My Games\Rainbow Six - Siege` (one per Ubisoft account).
+fn r6_file() -> Option<PathBuf> {
+    let root = PathBuf::from(std::env::var("USERPROFILE").ok()?).join(r"Documents\My Games\Rainbow Six - Siege");
+    newest(dirs_in(&root).into_iter().map(|d| d.join("GameSettings.ini")).filter(|p| p.is_file()))
+}
+
+/// `mouse_sensitivity` from Apex's `Saved Games\Respawn\Apex\local\settings.cfg`
+/// (quoted or bare value); same Source-family yaw as CS2's preset.
+fn parse_apex_sens(text: &str) -> Option<f32> {
+    text.lines().find_map(|l| {
+        let v = l.trim().strip_prefix("mouse_sensitivity")?.trim_start_matches([' ', '=', '"']).trim_end_matches('"').trim();
+        v.parse::<f32>().ok().filter(|&v| v > 0.0)
+    })
+}
+
+fn apex_file() -> Option<PathBuf> {
+    let p = PathBuf::from(std::env::var("USERPROFILE").ok()?).join(r"Saved Games\Respawn\Apex\local\settings.cfg");
+    p.is_file().then_some(p)
+}
+
 /// `basename` or `basename: key` for [`GameSens::source`].
 fn sens_source(file: &Path, key: Option<&str>) -> String {
     let base = file.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
@@ -649,6 +691,19 @@ pub fn game_sensitivity_file(ghub_id: Option<&str>, name: &str) -> Option<(GameS
         let (sens, key, file) = fortnite_file()?;
         return Some((GameSens { game: "Fortnite", preset: P180_FORTNITE, sens, yaw: P180_GAMES[P180_FORTNITE].1, counts: p180_preset_counts(P180_FORTNITE, sens)?, source: sens_source(&file, Some(key)) }, file));
     }
+    if ghub_id == Some(R6_ID) || name.eq_ignore_ascii_case("Tom Clancy's Rainbow Six Siege") {
+        let file = r6_file()?;
+        let sens = parse_r6_sens(&std::fs::read_to_string(&file).ok()?)?;
+        let yaw = P180_GAMES[P180_R6].1;
+        return Some((GameSens { game: "Tom Clancy's Rainbow Six Siege", preset: P180_R6, sens, yaw, counts: p180_counts_for(yaw, sens)?, source: sens_source(&file, Some("MouseYawSensitivity×mult")) }, file));
+    }
+    if name.eq_ignore_ascii_case("Apex Legends") {
+        // no G HUB id needed: the name match covers app-detail and preset reads
+        let file = apex_file()?;
+        let sens = parse_apex_sens(&std::fs::read_to_string(&file).ok()?)?;
+        let yaw = P180_GAMES[0].1;
+        return Some((GameSens { game: "Apex Legends", preset: 0, sens, yaw, counts: p180_counts_for(yaw, sens)?, source: sens_source(&file, Some("mouse_sensitivity")) }, file));
+    }
     None
 }
 
@@ -658,10 +713,12 @@ pub fn game_sensitivity(ghub_id: Option<&str>, name: &str) -> Option<GameSens> {
 
 /// `(ghub_id, name)` a `game_sensitivity` parser knows, per Perfect 180 preset
 /// index — the link maps the pill to the game, not the other way around.
+/// The shared CS2/APEX pill tries CS2's file first, then Apex's.
 fn preset_game(preset: usize) -> Option<(&'static str, &'static str)> {
     match preset {
         0 => Some((CS2_ID, "Counter-Strike 2")),
         1 => Some((VALORANT_ID, "Valorant")),
+        P180_R6 => Some((R6_ID, "Tom Clancy's Rainbow Six Siege")),
         P180_FORTNITE => Some((FORTNITE_ID, "Fortnite")),
         _ => None,
     }
@@ -671,7 +728,7 @@ fn preset_game(preset: usize) -> Option<(&'static str, &'static str)> {
 /// is CUSTOM, has no parser, or the settings file is absent.
 pub fn preset_sensitivity(preset: usize) -> Option<GameSens> {
     let (id, name) = preset_game(preset)?;
-    game_sensitivity(Some(id), name)
+    game_sensitivity(Some(id), name).or_else(|| (preset == 0).then(|| game_sensitivity(None, "Apex Legends")).flatten())
 }
 
 #[cfg(test)]
@@ -713,6 +770,27 @@ mod tests {
         assert_eq!(parse_fortnite_sens("MouseSensitivityX=-1\nMouseSensitivity=0.55\n"), Some(0.55));
         assert_eq!(fortnite_ini_sens("MouseSensitivityX=-1\nMouseSensitivity=0.55\n"), Some(("MouseSensitivity", 0.55)));
         assert_eq!(parse_fortnite_sens("bDisableMouseAcceleration=False\n"), None);
+    }
+
+    #[test]
+    fn parses_r6_sens() {
+        // real GameSettings.ini shape: Ubisoft's coefficient = yaw × mult
+        let t = "[INPUT]\nMouseSensitivity=50\nMouseYawSensitivity=25\nMousePitchSensitivity=25\nMouseSensitivityMultiplierUnit=0.020000\n";
+        assert_eq!(parse_r6_sens(t), Some(0.5));
+        // defaults normalise to 1.0; a missing multiplier falls back to 0.02
+        assert_eq!(parse_r6_sens("MouseYawSensitivity=50\nMouseSensitivityMultiplierUnit=0.02\n"), Some(1.0));
+        assert_eq!(parse_r6_sens("MouseYawSensitivity=80\n"), Some(1.6));
+        // no yaw at all, or a zeroed coefficient: no read
+        assert_eq!(parse_r6_sens("MousePitchSensitivity=25\n"), None);
+        assert_eq!(parse_r6_sens("MouseYawSensitivity=0\n"), None);
+    }
+
+    #[test]
+    fn parses_apex_sens() {
+        assert_eq!(parse_apex_sens("setting_version \"2\"\nmouse_sensitivity \"1.800000\"\n"), Some(1.8));
+        assert_eq!(parse_apex_sens("mouse_sensitivity=2.5\n"), Some(2.5));
+        assert_eq!(parse_apex_sens("mouse_sensitivity \"0\"\n"), None);
+        assert_eq!(parse_apex_sens("bind \"f\" \"+jump\"\n"), None);
     }
 
     /// Minimal `ClientSettings.Sav` blob: the value is the last f32 before the

@@ -288,6 +288,30 @@ pub fn foreground_path() -> Option<String> {
     }
 }
 
+/// The foreground window covers its whole monitor — a fullscreen game or
+/// video is up. Used to keep feed toasts quiet while the user is in a match;
+/// 2 px slack absorbs thin borders on borderless-windowed titles.
+pub fn foreground_fullscreen() -> bool {
+    use windows::Win32::Foundation::RECT;
+    use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MONITORINFO, MONITOR_DEFAULTTONEAREST, MonitorFromWindow};
+    unsafe {
+        let hwnd = GetForegroundWindow();
+        if hwnd.0.is_null() {
+            return false;
+        }
+        let mut w = RECT::default();
+        if GetWindowRect(hwnd, &mut w).is_err() {
+            return false;
+        }
+        let mut mi = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+        if !GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mut mi).as_bool() {
+            return false;
+        }
+        let m = mi.rcMonitor;
+        w.left <= m.left + 2 && w.top <= m.top + 2 && w.right >= m.right - 2 && w.bottom >= m.bottom - 2
+    }
+}
+
 /// (pid, exe name) for every running process.
 pub fn processes() -> Vec<(u32, String)> {
     use windows::Win32::System::Diagnostics::ToolHelp::*;

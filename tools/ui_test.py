@@ -558,6 +558,21 @@ def p180_read_source():
     must(not text_pixels(res, "before.png", cap), "caption before READ FROM GAME")
 
 
+@scenario
+def p180_read_r6():
+    """READ FROM GAME on the R6 SIEGE preset reads GameSettings.ini (the yaw x
+    multiplier product); needs this PC's Rainbow Six Siege settings."""
+    cfg = re.sub(r"(?m)^p180_game\s*=.*$", "p180_game = 4", seed_config())
+    cfg = re.sub(r"(?m)^p180_sens\s*=.*$", "p180_sens = 0.5", cfg)
+    cfg = re.sub(r"(?m)^p180_counts\s*=.*$", "p180_counts = 62832", cfg)
+    res = run_script("p180_read_r6", device_assign() + [TAB_ACTIONS, SETTLE, "scroll 230 500 -200", SETTLE,
+                                                        P180_READ_LINK, SETTLE],
+                     config=cfg)
+    ok_run(res)
+    ex = res.cfg["extras"]
+    must(ex["p180_game"] == 4 and abs(ex["p180_sens"] - 0.5) < 0.001 and ex["p180_counts"] == 62832, ex)
+
+
 def p180_cs2_config(sender=None, blocked=None):
     """Seed with CS2's real counts so the CS2 preset shows selected."""
     cfg = re.sub(r"(?m)^p180_counts\s*=.*$", "p180_counts = 8182", seed_config())
